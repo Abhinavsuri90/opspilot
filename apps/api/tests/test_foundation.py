@@ -104,6 +104,12 @@ def test_login_and_tenant_isolation() -> None:
         forbidden = client.get("/v1/organization/members")
         assert forbidden.status_code == 403
         assert forbidden.json()["error"]["code"] == "forbidden"
+        logout = client.post("/v1/auth/logout")
+        assert logout.status_code == 204
+        assert client.get("/v1/auth/me").status_code == 401
+
+        client.cookies.set("opspilot_session", "forged-token")
+        assert client.get("/v1/auth/me").status_code == 401
 
     app_engine = create_engine(os.environ["DATABASE_URL"])
     with Session(app_engine) as session:
@@ -134,3 +140,30 @@ def test_login_and_tenant_isolation() -> None:
                 ),
                 {"org": contoso.id},
             )
+
+
+@pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
+def test_tenant_context_expires_at_transaction_end() -> None:
+    owner_engine = create_engine(os.environ["DATABASE_OWNER_URL"])
+    with Session(owner_engine) as owner:
+        northwind = owner.scalar(select(Organization).where(Organization.slug == "northwind"))
+        contoso = owner.scalar(select(Organization).where(Organization.slug == "contoso"))
+        assert northwind is not None and contoso is not None
+
+    app_engine = create_engine(os.environ["DATABASE_URL"])
+    with Session(app_engine) as session:
+        # An app connection without a transaction-local tenant cannot read memberships.
+        assert session.scalars(select(Membership)).all() == []
+        session.rollback()
+
+        set_org_context(session, northwind.id)
+        assert all(row.org_id == northwind.id for row in session.scalars(select(Membership)))
+        session.rollback()
+
+        # Reusing the Session must not retain Northwind's setting or rows.
+        assert session.scalars(select(Membership)).all() == []
+        session.rollback()
+
+        set_org_context(session, contoso.id)
+        visible = session.scalars(select(Membership)).all()
+        assert visible and all(row.org_id == contoso.id for row in visible)
