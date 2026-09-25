@@ -4,11 +4,14 @@ from typing import Any
 
 import jwt
 from argon2 import PasswordHasher
-from argon2.exceptions import InvalidHashError, VerifyMismatchError
+from argon2.exceptions import InvalidHashError, VerificationError
 
 from app.config import get_settings
 
 password_hasher = PasswordHasher()
+# Unknown accounts still perform password verification, so the login path does
+# roughly the same work whether an email exists or not.
+DUMMY_PASSWORD_HASH = password_hasher.hash("unused-login-placeholder")
 
 
 def hash_password(password: str) -> str:
@@ -18,7 +21,7 @@ def hash_password(password: str) -> str:
 def verify_password(password_hash: str, password: str) -> bool:
     try:
         return password_hasher.verify(password_hash, password)
-    except (VerifyMismatchError, InvalidHashError):
+    except (VerificationError, InvalidHashError):
         return False
 
 

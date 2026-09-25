@@ -6,7 +6,7 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response, 
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -21,7 +21,12 @@ from app.repositories import (
     get_user_by_id,
     list_members,
 )
-from app.security import make_session_token, read_session_token, verify_password
+from app.security import (
+    DUMMY_PASSWORD_HASH,
+    make_session_token,
+    read_session_token,
+    verify_password,
+)
 
 settings = get_settings()
 app = FastAPI(title="OpsPilot API", version="0.1.0")
@@ -38,6 +43,11 @@ class LoginRequest(BaseModel):
     org_slug: str
     email: EmailStr
     password: str
+
+    @field_validator("org_slug", "email", mode="before")
+    @classmethod
+    def normalize_identifier(cls, value: object) -> object:
+        return value.strip().lower() if isinstance(value, str) else value
 
 
 class SessionResponse(BaseModel):
@@ -133,9 +143,11 @@ def login(
     body: LoginRequest, response: Response, session: Annotated[Session, Depends(get_session)]
 ) -> SessionResponse:
     org = get_organization_by_slug(session, body.org_slug)
-    user = get_user_by_email(session, body.email.lower())
+    user = get_user_by_email(session, body.email)
     # Keep the same public error for all credential failures.
-    if org is None or user is None or not verify_password(user.password_hash, body.password):
+    password_hash = user.password_hash if user is not None else DUMMY_PASSWORD_HASH
+    password_valid = verify_password(password_hash, body.password)
+    if org is None or user is None or not password_valid:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     set_org_context(session, org.id)
     membership = get_membership(session, org.id, user.id)

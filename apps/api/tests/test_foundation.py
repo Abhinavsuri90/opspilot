@@ -38,11 +38,21 @@ def test_login_and_tenant_isolation() -> None:
         )
         assert bad.status_code == 401
         assert bad.json()["error"]["code"] == "unauthorized"
-        login = client.post(
+        unknown_user = client.post(
             "/v1/auth/login",
             json={
                 "org_slug": "northwind",
-                "email": "northwind@example.com",
+                "email": "missing@example.com",
+                "password": os.environ["DEMO_PASSWORD"],
+            },
+        )
+        assert unknown_user.status_code == 401
+        assert unknown_user.json() == bad.json()
+        login = client.post(
+            "/v1/auth/login",
+            json={
+                "org_slug": " Northwind ",
+                "email": " NORTHWIND@example.com ",
                 "password": os.environ["DEMO_PASSWORD"],
             },
         )
