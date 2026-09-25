@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
-from app.db import set_org_context
+from app.db import get_session, set_org_context
 from app.main import app
 from app.models import Membership, Organization
 
@@ -17,6 +17,36 @@ def test_healthz() -> None:
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
     assert response.headers["x-request-id"]
+
+
+def test_error_envelopes_and_request_ids() -> None:
+    with TestClient(app) as client:
+        method = client.get("/v1/auth/login", headers={"X-Request-ID": "test-request-123"})
+        assert method.status_code == 405
+        assert method.json()["error"]["code"] == "request_failed"
+        assert method.headers["x-request-id"] == "test-request-123"
+
+        invalid = client.post(
+            "/v1/auth/login", json={}, headers={"X-Request-ID": "invalid request id"}
+        )
+        assert invalid.status_code == 422
+        assert invalid.json()["error"]["code"] == "validation_error"
+        assert invalid.headers["x-request-id"] != "invalid request id"
+        assert invalid.headers["x-request-id"]
+
+    def broken_dependency() -> None:
+        raise RuntimeError("private database detail")
+
+    app.dependency_overrides[get_session] = broken_dependency
+    try:
+        with TestClient(app, raise_server_exceptions=False) as client:
+            failed = client.get("/readyz", headers={"X-Request-ID": "failure-123"})
+        assert failed.status_code == 500
+        assert failed.json()["error"]["code"] == "internal_error"
+        assert "private database detail" not in failed.text
+        assert failed.headers["x-request-id"] == "failure-123"
+    finally:
+        del app.dependency_overrides[get_session]
 
 
 @pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")

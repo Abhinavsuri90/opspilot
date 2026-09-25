@@ -1,3 +1,5 @@
+import logging
+import re
 import uuid
 from collections.abc import Awaitable, Callable
 from typing import Annotated
@@ -9,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import get_settings
 from app.db import get_session, set_org_context
@@ -29,6 +32,7 @@ from app.security import (
 )
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 app = FastAPI(title="OpsPilot API", version="0.1.0")
 app.add_middleware(
     CORSMiddleware,
@@ -74,8 +78,8 @@ class MemberResponse(BaseModel):
     role: str
 
 
-@app.exception_handler(HTTPException)
-async def http_error_handler(request: Request, exc: HTTPException) -> JSONResponse:
+@app.exception_handler(StarletteHTTPException)
+async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     code = {
         401: "unauthorized",
         403: "forbidden",
@@ -84,6 +88,22 @@ async def http_error_handler(request: Request, exc: HTTPException) -> JSONRespon
     return JSONResponse(
         status_code=exc.status_code,
         content={"error": {"code": code, "message": str(exc.detail), "details": None}},
+    )
+
+
+@app.exception_handler(Exception)
+async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.exception("Unhandled API error", exc_info=exc)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": {
+                "code": "internal_error",
+                "message": "An unexpected error occurred",
+                "details": None,
+            }
+        },
+        headers={"X-Request-ID": getattr(request.state, "request_id", str(uuid.uuid4()))},
     )
 
 
@@ -105,8 +125,15 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
 async def add_request_id(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
 ) -> Response:
+    supplied_id = request.headers.get("X-Request-ID", "")
+    request_id = (
+        supplied_id
+        if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", supplied_id)
+        else str(uuid.uuid4())
+    )
+    request.state.request_id = request_id
     response = await call_next(request)
-    response.headers["X-Request-ID"] = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+    response.headers["X-Request-ID"] = request_id
     return response
 
 
