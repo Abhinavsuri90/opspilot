@@ -38,6 +38,7 @@ jobs:
       - run: python scripts/seed.py
       - run: pytest -q
         working-directory: apps/api
+      - run: sh scripts/ci_api_smoke.sh
 
   web:
     runs-on: ubuntu-latest
