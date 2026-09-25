@@ -20,7 +20,11 @@ try {
   if (process.env.E2E_SCREENSHOT) {
     await page.screenshot({ path: process.env.E2E_SCREENSHOT, fullPage: true });
   }
-  console.log("Browser login and empty dashboard passed");
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await page.waitForURL(`${baseURL}/login`);
+  await page.goto(`${baseURL}/dashboard`);
+  await page.waitForURL(`${baseURL}/login`);
+  console.log("Browser login, dashboard, and logout passed");
 } finally {
   await browser.close();
 }

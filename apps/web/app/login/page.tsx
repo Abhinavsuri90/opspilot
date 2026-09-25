@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { api } from "@/lib/api";
@@ -7,6 +8,7 @@ import { loginSchema } from "@/lib/login";
 
 export default function LoginPage() {
   const router = useRouter();
+  const queryClient = useQueryClient();
   const [orgSlug, setOrgSlug] = useState("northwind");
   const [email, setEmail] = useState("northwind@example.com");
   const [password, setPassword] = useState("");
@@ -24,11 +26,12 @@ export default function LoginPage() {
     setError("");
     try {
       const result = await api.POST("/v1/auth/login", { body: parsed.data });
-      if (result.error) {
+      if (result.error || !result.data) {
         setError("Invalid organization, email, or password");
         return;
       }
-      router.push("/dashboard");
+      queryClient.setQueryData(["session"], result.data);
+      router.replace("/dashboard");
     } catch {
       setError("Could not reach the API. Try again shortly.");
     } finally {
