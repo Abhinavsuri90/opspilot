@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-09-26 — Company demo and operations console
+
+- Replaced the placeholder web experience with a shared responsive shell, a document-driven Dashboard, a searchable/filterable Inbox, and a read-only Admin member directory. TanStack Query remains the data layer. Review editing, approval, actions, and settings are still unimplemented.
+- Added four fictional text-layer invoices, two each for Northwind and Contoso, plus a browser check that uploads all four and verifies both directions of document isolation and the reviewer/admin access boundary.
+- Updated the local demo guide and screenshots. The local mock-provider checks passed: 41 API tests, 16 web tests, Ruff, mypy, ESLint, TypeScript, production web build, browser happy path and error states, tenant demo, and a 390-pixel responsive check. The containers were stopped afterward; local volumes remain.
+- Live OpenRouter accuracy and public deployment remain unverified.
+
 ## 2026-09-26 — Local walkthrough and complete route review
 
 - Rebuilt the local mock-provider stack and verified the browser at `http://localhost:3300/login`: sign-in, fresh PDF upload, extraction with evidence, retry UI, and logout passed. Refreshed the real dashboard and inbox screenshots in `docs/assets/`.

@@ -53,9 +53,21 @@ def invoice_pdf(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("output", type=Path)
+    parser = argparse.ArgumentParser(
+        description="Generate a fictional, text-layer invoice PDF for local demos."
+    )
+    parser.add_argument("output", type=Path, help="Where to write the PDF")
     parser.add_argument("--invoice-number", default="NW-2026-001")
+    parser.add_argument("--vendor", default="Northwind Traders")
+    parser.add_argument("--invoice-date", default="2026-09-26")
+    parser.add_argument("--total", default="$123.45")
     args = parser.parse_args()
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_bytes(invoice_pdf(args.invoice_number))
+    args.output.write_bytes(
+        invoice_pdf(
+            invoice_number=args.invoice_number,
+            vendor=args.vendor,
+            invoice_date=args.invoice_date,
+            total=args.total,
+        )
+    )

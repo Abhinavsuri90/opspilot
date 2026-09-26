@@ -2,15 +2,43 @@
 
 OpsPilot is a **working invoice intake and extraction prototype**, not the completed agent platform in `SPEC.md`. Its strongest current story is an end-to-end, tenant-isolated document workflow with explicit evidence and a durable worker. A public Railway deployment is still pending; do not claim a live URL until the hosted smoke test passes.
 
-## Five-minute demo
+## Local demo accounts and invoices
 
-1. Run `LLM_PROVIDER=mock OPENROUTER_API_KEY= make up` and open `http://localhost:3300`. Sign in to `northwind` with the local demo credentials in your ignored `.env`.
-2. Open **Inbox**, download the fictional sample invoice, and upload it. The page shows the document moving through queued/extracting to `needs_review`.
-3. Open the result and point to each extracted value, its source text, and page number. Explain that the worker checks model output against text actually present in the PDF.
-4. Sign out. If showing tenant isolation, sign in to the second seeded organization and show that its inbox does not reveal Northwind's document.
-5. Open the [latest CI run](https://github.com/Abhinavsuri90/opspilot/actions/workflows/ci.yml) and the [deployment readiness review](deployment-readiness-review.md). State which tests ran and which production checks remain.
+Start Docker Desktop, then run `LLM_PROVIDER=mock OPENROUTER_API_KEY= make up` from the repository root. Open `http://localhost:3300/login`. These seeded accounts use the password in your ignored `.env` under `DEMO_PASSWORD` when they are first created; later seed runs preserve existing passwords unless explicitly reset.
 
-The local worker uses a deterministic mock by default. Generate a fresh fictional invoice number for a second extraction: repeated identical uploads intentionally return the existing document.
+| Organization | Email | Seeded role | Current UI permissions |
+| --- | --- | --- | --- |
+| `northwind` (Northwind Traders) | `northwind@example.com` | Admin | View invoices; upload; retry failed extractions; view the read-only Admin member directory. |
+| `contoso` (Contoso Logistics) | `contoso@example.com` | Reviewer | View invoices; upload; retry failed extractions. Review editing and approval are still planned. |
+
+Upload these **fictional, text-layer PDFs** from `examples/demo/`. Each has a different invoice number, vendor, date, and total so its result is easy to recognize.
+
+| Suggested organization | PDF | Vendor | Invoice number | Date | Total |
+| --- | --- | --- | --- | --- | --- |
+| Northwind | [northwind-harbor-supply.pdf](../examples/demo/northwind-harbor-supply.pdf) | Harbor Supply Co | `NW-DEMO-2026-101` | 2026-09-05 | $187.40 |
+| Northwind | [northwind-maple-office.pdf](../examples/demo/northwind-maple-office.pdf) | Maple Office Goods | `NW-DEMO-2026-102` | 2026-09-11 | $942.15 |
+| Contoso | [contoso-cedar-freight.pdf](../examples/demo/contoso-cedar-freight.pdf) | Cedar Freight LLC | `CT-DEMO-2026-201` | 2026-09-17 | $356.80 |
+| Contoso | [contoso-blue-ridge-parts.pdf](../examples/demo/contoso-blue-ridge-parts.pdf) | Blue Ridge Parts | `CT-DEMO-2026-202` | 2026-09-23 | $1284.32 |
+
+## Company-by-company walkthrough
+
+1. Sign in with organization `northwind`, email `northwind@example.com`, and its seeded password. The **Dashboard** shows recent documents; **Admin** shows Northwind's read-only member directory. Open **Inbox** and upload `examples/demo/northwind-harbor-supply.pdf`. Watch it move from **Queued** through **Extracting** to **Needs review**; open the result and compare all four fields with the table above. Each field includes source text and a page number.
+2. Upload `examples/demo/northwind-maple-office.pdf` while still in Northwind. Confirm both Northwind invoices appear. The worker validates that extracted evidence exists on the cited PDF page.
+3. Sign out, then sign in with organization `contoso`, email `contoso@example.com`, and its seeded password. Contoso has a reviewer role, so the **Admin** link is absent and direct `/admin` visits show an access message. Open **Inbox**. The two `northwind-*.pdf` filenames should **not** appear. Previously uploaded Contoso documents may already be present if you have run the demo before.
+4. Upload `examples/demo/contoso-cedar-freight.pdf` and `examples/demo/contoso-blue-ridge-parts.pdf`. Check that their results show the expected `CT-DEMO` invoice numbers and reach **Needs review**. Sign out and return to Northwind: the two `contoso-*.pdf` filenames should **not** appear there.
+5. Open the [latest CI runs](https://github.com/Abhinavsuri90/opspilot/actions/workflows/ci.yml) and the [deployment readiness review](deployment-readiness-review.md). State which tests ran and which production checks remain.
+
+The signed-in organization controls where an upload is stored; the filenames are suggested demo groupings, not a restriction on which file an organization can upload. Uploading the exact same PDF again intentionally opens its existing result. To make a fresh fictional invoice, change at least the invoice number:
+
+```sh
+python3 scripts/generate_demo_invoice.py /tmp/opspilot-new-invoice.pdf \
+  --invoice-number NW-DEMO-NEW-001 --vendor 'Harbor Supply Co' \
+  --invoice-date 2026-09-26 --total '$219.75'
+```
+
+The local worker uses a deterministic mock provider by default; this walkthrough does not need an OpenRouter key or measure live model accuracy.
+
+For an automated browser check of all four PDFs, both organizations, and the admin role, keep the mock stack running and run `LLM_PROVIDER=mock OPENROUTER_API_KEY= make smoke-tenants`. The test reuses identical uploads rather than creating duplicate documents.
 
 ## Architecture to explain
 

@@ -8,7 +8,7 @@
 
 | Area | Current status |
 | --- | --- |
-| Auth, memberships, tenant isolation, audit | Working locally; Postgres integration tests |
+| Auth, memberships, tenant isolation, audit | Working locally; Postgres integration tests; read-only admin member directory |
 | PDF upload, object storage, durable outbox, worker, failed-job retry | Working locally; browser smoke test |
 | Extraction provider | Deterministic local mock by default; optional OpenRouter adapter tested with a fake HTTP response |
 | Evaluation | 20 generated text-layer invoices; mock baseline in CI; live model run available locally |
@@ -40,12 +40,15 @@ LLM_PROVIDER=mock OPENROUTER_API_KEY= make up
 
 3. Open **Inbox**, download the fictional sample invoice from the page, and upload it. Wait for **Needs review**, then inspect the extracted values and their evidence. The local API is at `http://localhost:8000`, with interactive OpenAPI docs at `http://localhost:8000/docs`.
 
+   For a company-by-company demo, upload the four [fictional invoices](examples/demo/) following the [demo guide](docs/demo-guide.md). Northwind (`northwind@example.com`, admin) and Contoso (`contoso@example.com`, reviewer) use separate workspaces. They share the seeded `DEMO_PASSWORD` when first created; later seeds keep existing passwords. Northwind's admin can see a read-only member directory, while Contoso's reviewer cannot.
+
 4. To run automated checks, install Node.js 22 and npm, then use:
 
 ```sh
 make lint typecheck test
 make smoke
 LLM_PROVIDER=mock OPENROUTER_API_KEY= make smoke-ui
+LLM_PROVIDER=mock OPENROUTER_API_KEY= make smoke-tenants
 LLM_PROVIDER=mock OPENROUTER_API_KEY= make eval
 cd apps/web && npm run test:e2e:errors
 ```
@@ -57,6 +60,17 @@ make down
 ```
 
 `make up` builds the services, starts local infrastructure, migrates the database, seeds fictional accounts, and waits for the web and API health checks. `make down` preserves local database and object-storage data for the next run. `make eval` writes a timestamped JSON and Markdown report to `evals/reports/` (ignored by Git). The CI mock baseline exercises the generated invoices and parser. It is **not** a measurement of AI accuracy on real invoices. `make smoke-ui` uses an installed Chrome by default; set `PLAYWRIGHT_CHROME_PATH` to another Chromium executable if needed.
+
+### Pages you can use now
+
+| Page | What it does |
+| --- | --- |
+| `/login` | Sign in to a seeded organization. |
+| `/dashboard` | See recent document counts and open recent invoices. Counts cover the latest 50 records returned by the API. |
+| `/inbox` | Upload PDF invoices, search/filter recent documents, inspect fields with exact text evidence, and retry failed extraction. `Needs review` is an inspection state; editing and approval are not implemented. |
+| `/admin` | Admin-only, read-only organization member directory and recent document snapshot. There are no invite or role-edit actions. |
+
+Each login is scoped to its organization through membership and database row-level security. The example PDF names are suggested groupings; the signed-in organization determines which workspace receives an upload. There is no working Review, Actions, or Settings page yet.
 
 ## Optional OpenRouter extraction
 
