@@ -2,7 +2,7 @@
 
 Reviewed 2026-09-26 for the first public demo. This is a code and local integration review, not a completed Railway deployment or an external security assessment.
 
-Local verification before public rollout: backend Ruff, strict mypy, and Postgres tests; frontend lint, typecheck, and tests; production web build; nonroot API release-image import; live API smoke; browser login, fresh upload/extraction, retry UI, and logout; synthetic mock eval. The production npm dependency audit and a pinned Python runtime dependency audit reported no known advisories at the time of review. A full Compose browser smoke job has been added to CI but must still pass on the pushed commit.
+Local verification before public rollout: backend Ruff, strict mypy, and Postgres tests; frontend lint, typecheck, and tests; production web build; nonroot API release-image import; live API smoke; browser login, fresh upload/extraction, retry UI, and logout; synthetic mock eval. The frontend npm dependency audit and a pinned Python runtime dependency audit reported no known advisories at the time of review. The [first four-job CI run](https://github.com/Abhinavsuri90/opspilot/actions/runs/36233730171), including the full Compose browser smoke, passed at commit `217545a`.
 
 ## Problems addressed in this iteration
 
@@ -34,7 +34,7 @@ Local verification before public rollout: backend Ruff, strict mypy, and Postgre
 
 ## Still required before wider use
 
-- **Public deployment:** create or share a Railway project, configure private API/worker/Postgres/Bucket, run the migration job, and pass the browser smoke on the public web URL. The [deployment runbook](deployment.md) has the exact setup. No public URL has been verified yet. The new CI browser job also needs its first green run after push.
+- **Public deployment:** create or share a Railway project, configure private API/worker/Postgres/Bucket, run the migration job, and pass the browser smoke on the public web URL. The [deployment runbook](deployment.md) has the exact setup. No public URL has been verified yet.
 - **Live model:** rotate the key previously shared in chat, store the replacement only in the worker's secret environment, run the live synthetic eval, and compare cost and field accuracy. Current evaluation results are from generated documents and the deterministic mock.
 - **Operations:** enable backups and test a restore, configure worker/pending-job and usage alerts, and verify the actual Railway Bucket with upload/download. A deployment health check does not monitor the bucket or worker continuously.
 - **Security and scale:** the API now has a shared identity-based login throttle and a raw request cap for document uploads. Add an edge per-IP limit or WAF before sharing a demo account widely, and set retention/deletion policy and privacy controls before accepting real customer documents.

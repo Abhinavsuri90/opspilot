@@ -2,19 +2,18 @@
 
 ## Last updated
 
-2026-09-26, after implementation commit `280b1d7`. Run `git log -1 --oneline` for the current documentation commit.
+2026-09-26, after verified commit `217545a`. Run `git log -1 --oneline` for the current documentation commit.
 
 ## Current status
 
 OpsPilot is a local Phase 1 invoice intake/extraction prototype. Authenticated tenants upload text-layer PDFs through a Next.js web app and same-origin API proxy. FastAPI stores documents in S3-compatible storage and queues extraction through a Postgres outbox. The worker records four fields with page-level evidence; the Inbox displays results and permits two manual retries of a failed document. A Postgres login attempt counter and raw-upload limit guard the public demo path. OpenRouter is optional; live extraction accuracy has not been tested. Public staging and the review/approval/action phases are pending.
 
-The screenshot of failed CI commit `69ebf1b` is historical. Commit `45f4f3e` passed all three then-existing jobs. A new full-stack browser CI job and Python dependency audit have been added and need a green run on the current push before release.
+The screenshot of failed CI commit `69ebf1b` is historical. Commit `45f4f3e` passed all three then-existing jobs. The [new four-job CI run](https://github.com/Abhinavsuri90/opspilot/actions/runs/36233730171), including the full-stack browser smoke and Python dependency audit, passed at `217545a`.
 
 ## Exact next step
 
-1. Push the current commits and confirm API, web, release-images, and browser-smoke jobs all pass on the same GitHub commit.
-2. Obtain the owner's Railway project link or invite. Follow [docs/deployment.md](docs/deployment.md): provision Postgres and Bucket, run migration/bootstrap first, deploy private API/worker and public web, then run the browser smoke against the public URL.
-3. Record the verified hosted URL, CI run, backup/restore status, and remaining limitations in `PROGRESS.md`. Keep `LLM_PROVIDER=mock` until the infrastructure demo is stable. Rotate the previously shared OpenRouter key before optional live-model evaluation; never send the replacement in chat or commit it.
+1. Obtain the owner's Railway project link or invite. Follow [docs/deployment.md](docs/deployment.md): provision Postgres and Bucket, run migration/bootstrap first, deploy private API/worker and public web, then run the browser smoke against the public URL. Confirm CI passes on the exact deploy commit.
+2. Record the verified hosted URL, CI run, backup/restore status, and remaining limitations in `PROGRESS.md`. Keep `LLM_PROVIDER=mock` until the infrastructure demo is stable. Rotate the previously shared OpenRouter key before optional live-model evaluation; never send the replacement in chat or commit it.
 
 ## Files in play
 
