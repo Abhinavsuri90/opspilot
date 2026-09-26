@@ -4,6 +4,8 @@
 > Estimates marked **[estimate]** must be replaced with measured numbers as the build progresses.
 > Every significant change gets an ADR in `docs/adr/`, and this doc gets updated.
 
+**Implementation status (2026-09-26):** Local auth and tenant isolation, text-layer invoice intake, S3-compatible storage, a Postgres outbox worker, an inbox, and synthetic extraction evaluation are implemented. The optional OpenRouter adapter has been tested with fake HTTP responses; live model accuracy has not been measured. The Redis dispatcher, review/approval, actions, scanned-PDF support, public staging, and production architecture below remain targets. The direct polling choice is recorded in [ADR 003](docs/adr/003-direct-outbox-polling.md).
+
 ---
 
 ## 1. Context

@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-09-26 — Local invoice extraction slice verified
+
+- Added text-layer PDF upload, S3-compatible storage, content-hash deduplication, tenant-scoped document and extraction tables, and a transactional outbox worker with retry and stale-claim recovery.
+- Added a working inbox that shows extracted fields with PDF evidence. The extraction provider is a deterministic mock by default; an optional OpenRouter adapter requests structured JSON and rejects fields without matching text evidence.
+- Added a fictional PDF sample, a 20-invoice synthetic evaluation, and an ADR documenting direct Postgres outbox polling before Redis queue dispatch.
+- Local checks passed: backend Ruff, mypy, seven tests; frontend ESLint, TypeScript, two tests, production build; live API smoke; browser login/upload/extraction/logout. `make eval` wrote a report with 100% exact field match and 100% evidence grounding for the **generated mock-only invoices**. No live model accuracy claim is made.
+- The user-shared OpenRouter key was not used or stored. Live OpenRouter extraction and evaluation still need a newly issued key in ignored local environment variables.
+- Public staging, human review/approval, scanned-PDF support, and actions remain outstanding. CI for this change is pending the GitHub push.
+
 ## 2026-09-26 — Published to GitHub and verified
 
 - Published the Phase 0 repository at https://github.com/Abhinavsuri90/opspilot with eight focused commits.

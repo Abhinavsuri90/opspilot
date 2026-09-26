@@ -1,28 +1,24 @@
 # Current handoff
 
 ## Last updated
-2026-09-26 03:48 IST. Latest commit hash: run `git rev-parse HEAD` after this handoff is committed.
+
+2026-09-26. Check `git log -1 --oneline` for the latest commit.
 
 ## Current status
-Phase 0 local foundation works. The eight-commit `main` branch is published at https://github.com/Abhinavsuri90/opspilot. The first GitHub Actions run passed: https://github.com/Abhinavsuri90/opspilot/actions/runs/36195985550. Local lint, typecheck, tests, API smoke, and browser login/logout pass. Railway staging is pending.
 
-## Exact next step
-Get the user's Railway project choice and access details. Configure Postgres and the staging web/API services following `docs/deployment.md`, run migrations and private demo seeding, then run `scripts/smoke_test.py` against the staging API URL and verify browser login. Before beginning, run `git status --short --branch` and `make up` to confirm the local stack.
+The local app supports authenticated, tenant-isolated PDF invoice intake, S3-compatible storage, a Postgres outbox worker, evidence-bearing extraction, and an inbox. The worker defaults to a deterministic mock. OpenRouter is optional and has fake-HTTP contract coverage; no live model call has been made. The sample and 20-invoice eval set are fictional text-layer PDFs. Public staging, OCR, human review/approval, and actions are pending.
 
-## Files in play
-`apps/api`, `apps/web`, `.github/workflows/ci.yml`, `scripts/ci_api_smoke.sh`, `README.md`, `docs/assets/dashboard.png`, deployment and handoff docs. The current task ends with the GitHub publication and verification recorded here.
+## Next step
 
-## Decisions and deviations
-Build Phase 0 first. The local MinIO image could not be pulled, so Compose uses Adobe S3Mock (ADR 002). Postgres is exposed on host port 55432 and web on 3300 because local services already occupy the defaults. API runs with only the restricted database role; one-off admin jobs get owner credentials (ADR 001). An isolated Git repository was initialized after sandbox escalation, avoiding the unrelated parent checkout. GitHub SSH authentication was unavailable, so `origin` uses HTTPS; the authenticated push succeeded.
+Rotate the OpenRouter key previously shared in chat. Put a new key only in ignored `.env` with `LLM_PROVIDER=openrouter`, restart the worker, upload a newly generated fictional invoice, and run the live synthetic eval. Compare results and cost with the mock baseline, then provision staging storage/Postgres/web/API/worker and verify the workflow on a public URL. Do not claim live model accuracy or production readiness until those checks pass.
 
-## Environment
-Local URL: `http://localhost:3300` (web), `http://localhost:8000` (API). GitHub: https://github.com/Abhinavsuri90/opspilot. Staging and production: unset. External accounts: GitHub configured; Railway unknown. Required environment variable names: see `.env.example`. Local demo: org `northwind`, email `northwind@example.com`, password from `DEMO_PASSWORD` (never store its value here).
+## Verification
 
-## How to run and test
-`make up`, `make lint typecheck test smoke`, `make smoke-ui`, `make gen-client`, and `make down`. The full check suite passed on 2026-09-26: four backend tests, two frontend tests, live API smoke, and browser login/logout. The GitHub CI run passed. On this Mac, set `DOCKER_CONFIG=/private/tmp/opspilot-docker-config` for Compose while Docker Desktop's credential helper hangs; this temporary config and its CLI plugin links were created during local verification. Host-side web checks require Node.js 22 and npm.
+`make up`, backend Ruff/mypy/seven tests, frontend lint/typecheck/two tests/build, `make smoke`, `make smoke-ui`, and `make eval` passed locally on 2026-09-26. The mock eval reported 100% exact field match and 100% grounding on generated documents only. CI status for the latest commit should be checked on GitHub after pushing.
 
-## Known issues and gotchas
-Staging requires a Railway project and access. Docker Desktop's credential helper hangs on public image pulls in this environment; a temporary empty Docker config works. The host has Python 3.13; containers use Python 3.12. FastAPI TestClient emits a dependency deprecation warning while tests pass.
+## Environment and decisions
 
-## Open questions for me
-Railway project choice and staging access details are needed. The user has been asked whether a project already exists.
+- Local web: `http://localhost:3300`; API: `http://localhost:8000`; repository: https://github.com/Abhinavsuri90/opspilot.
+- `.env.example` lists variable names. `.env` is ignored. API and worker use the restricted `opspilot_app` database role; migrations use the owner role. The OpenRouter key is passed only to the worker.
+- Local storage uses Adobe S3Mock (ADR 002); the worker polls the Postgres outbox directly (ADR 003). Redis dispatch remains a target design. See `README.md`, `SYSTEM_DESIGN.md`, `SPEC.md`, and `docs/deployment.md`.
+- On this Mac, if Docker Desktop's credential helper hangs during image pulls, set `DOCKER_CONFIG=/private/tmp/opspilot-docker-config` for Compose. This is a local workaround, not a repository requirement.

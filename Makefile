@@ -28,19 +28,20 @@ test: setup web-deps
 	cd apps/web && npm test
 
 lint: setup web-deps
-	docker compose run --rm api ruff check app tests alembic /workspace/scripts
+	docker compose run --rm api ruff check app tests alembic /workspace/scripts /workspace/evals
 	cd apps/web && npm run lint
 
 typecheck: setup web-deps
-	docker compose run --rm api mypy app tests /workspace/scripts
+	docker compose run --rm api mypy app tests /workspace/scripts /workspace/evals
 	cd apps/web && npm run typecheck
 
 eval:
-	@echo 'Extraction eval starts in Phase 1.'
+	@mkdir -p evals/reports
+	docker compose run --rm -v "$(CURDIR)/evals/reports:/workspace/evals/reports" worker python -m evals.run
 
 gen-client: setup web-deps
 	docker compose run --rm api python /workspace/scripts/export_openapi.py > apps/web/lib/openapi.json
-	cd apps/web && npx openapi-typescript lib/openapi.json -o lib/schema.d.ts
+	cd apps/web && npm run gen-client
 
 smoke: setup
 	docker compose run --rm admin python /workspace/scripts/smoke_test.py http://api:8000

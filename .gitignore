@@ -10,5 +10,5 @@ __pycache__/
 node_modules/
 .next/
 *.tsbuildinfo
-evals/reports/
+evals/reports/*
 !evals/reports/.gitkeep

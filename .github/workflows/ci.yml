@@ -29,9 +29,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install -e './apps/api[dev]'
-      - run: ruff check app tests alembic ../../scripts
+      - run: ruff check app tests alembic ../../scripts ../../evals
         working-directory: apps/api
-      - run: mypy app tests ../../scripts
+      - run: mypy app tests ../../scripts ../../evals
         working-directory: apps/api
       - run: alembic upgrade head
         working-directory: apps/api
@@ -39,6 +39,7 @@ jobs:
       - run: pytest -q
         working-directory: apps/api
       - run: sh scripts/ci_api_smoke.sh
+      - run: python -m evals.run --output-dir /tmp/opspilot-eval-reports
 
   web:
     runs-on: ubuntu-latest
