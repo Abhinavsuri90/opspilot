@@ -44,7 +44,7 @@ See [render.yaml](../render.yaml) and the [Render deployment runbook](deployment
 - The new onboarding suite passed against the local Docker Postgres database with migrations through `0005`: **18 passed**. It exercises signup validation, active admin/workflow creation, bounded literal organization search, pending login denial, approval, rejection, suspension and restoration, existing-email ownership, admin protection, tenant isolation, and suspension ordering against an in-flight authenticated transaction.
 - Ruff passed for the owned onboarding/authentication code, migration, models, throttle, and onboarding tests.
 - The Render YAML parses and passed a local structural check against Render's published schema. This is configuration validation, not a successful Render deployment.
-- The expanded local release passed80 Postgres API tests,16 web tests, lint/types, production builds and the complete fresh-company browser flow including two-page PDF rendering and concurrent editor conflicts. Current results and small local latency samples are recorded in `CONTEXT.md`, `PROGRESS.md` and `SYSTEM_DESIGN.md`. Check GitHub CI on the exact commit before deployment.
+- The expanded local release passed 80 Postgres API tests, 16 web tests, lint/types, production builds and the complete fresh-company browser flow including two-page PDF rendering and concurrent editor conflicts. Current results and small local latency samples are recorded in `CONTEXT.md`, `PROGRESS.md` and `SYSTEM_DESIGN.md`. Application commit `ad55d0f` passed [all four CI jobs](https://github.com/Abhinavsuri90/opspilot/actions/runs/36241455074). Check the latest commit's checks before deployment.
 
 Reproduce the focused integration test after local migrations:
 
