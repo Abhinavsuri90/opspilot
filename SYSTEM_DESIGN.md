@@ -23,7 +23,7 @@ Approval records a workflow decision. It does not pay an invoice, establish acco
 
 ```mermaid
 flowchart TB
-    Browser[Browser: register, dashboard, inbox, review, insights, admin]
+    Browser[Browser: public homepage, signup, login and workspace pages]
     Web[Public Next.js web and same-origin API proxy]
     API[Private FastAPI API]
     DB[(Postgres: restricted application role and tenant RLS)]
@@ -56,6 +56,43 @@ flowchart TB
 | Migration process | Schema and restricted-role grants | One serialized release step; owner credentials excluded from serving processes |
 
 There is no Redis dispatch, vector retrieval, event bus, or automatic model routing in this implementation. Local Compose contains optional infrastructure experiments, but the running workflow uses Postgres directly. This keeps the durable job and invoice transaction in one database. See [ADR 003](docs/adr/003-direct-outbox-polling.md).
+
+### Page map and entry journey
+
+All eight pages belong to one Next.js application. The public homepage explains the product before asking visitors to create an account. Its `#workspace`, `#workflow` and `#features` sections explain who uses the workspace, how an invoice moves through review and which tools are available.
+
+| Page | Audience and responsibility |
+| --- | --- |
+| `/` | Public product overview, role choices, workflow, features and FAQ |
+| `/register` | Public organization creation or membership request |
+| `/login` | Public organization selection and password authentication |
+| `/dashboard` | Approved members: authorized counts and recent invoices |
+| `/inbox` | Approved members: intake, search, evidence, full PDF, discussion and permitted review/access actions |
+| `/review` | Approved members: authorized pending invoices; decisions require an eligible reviewer or admin |
+| `/insights` | Approved members: authorized totals, categories and bounded questions |
+| `/admin` | Organization admins: membership lifecycle and category management |
+
+```mermaid
+flowchart TD
+    Home[Public homepage] --> Owner[Create organization]
+    Home --> Member[Join as member]
+    Home --> Reviewer[Join as reviewer]
+    Home --> Login[Sign in: organization, email, password]
+    Owner --> Create[API creates organization and active admin]
+    Member --> Pending[API creates pending membership]
+    Reviewer --> Pending
+    Pending --> Approval[Organization admin approves role]
+    Approval --> Login
+    Create --> Dashboard[Dashboard]
+    Login --> Check[API verifies password and active membership]
+    Check --> Dashboard
+    Dashboard --> Work[Inbox, Review and Insights]
+    Dashboard --> Admin[Admin: organization admins only]
+```
+
+The owner entry links to `/register?mode=create`; teammate entries link to `/register?mode=join&role=member` or `/register?mode=join&role=reviewer`. Query parameters only initialize the registration form. They cannot create an admin membership in another organization, approve a request or change an authenticated role. The API validates requested roles, and the organization admin controls membership decisions.
+
+There is one login flow for all roles. The browser uses the session returned by the API to present navigation and available actions. API authorization remains the enforcement point for protected data and mutations, including requests made directly without the UI. No separate admin-login credential store or per-role copy of the application exists.
 
 ## 3. Trust boundaries and authorization
 
@@ -312,7 +349,9 @@ API and worker connection pools must fit within the Postgres connection limit. I
 
 ## 9. Deployment and operations
 
-Render topology: public web service, private API service, background worker and managed Postgres in one region, with external private S3/R2 storage. The blueprint is [render.yaml](render.yaml). Database creation and owner-run migrations precede the Blueprint's application rollout. No seeded users are needed; the first real organization is created through `/register`.
+Render topology: public web service, private API service, background worker and managed Postgres in one region, with external private S3/R2 storage. The blueprint is [render.yaml](render.yaml). Database creation and owner-run migrations precede the Blueprint's application rollout. No seeded users are needed; visitors start at `/`, then create their first real organization through `/register?mode=create`.
+
+The web service deploys the homepage, registration, login and all five workspace pages in one release. API and worker run separately so serving pages, handling requests and extracting PDFs have distinct process boundaries. All browser requests use the public web origin and its `/api` proxy; the API stays on Render's private network. The initial rollout order is database and private storage, owner-run migrations, API and worker, web, then a hosted acceptance run. A working homepage alone does not verify signup, database access or background extraction.
 
 Operational responsibilities:
 
@@ -320,7 +359,7 @@ Operational responsibilities:
 2. Create a private bucket, scoped credentials, versioning/retention and backups appropriate to invoice data.
 3. Configure HTTPS origin and strong session secret; rotate any previously disclosed credentials.
 4. Verify `/readyz` from the private API shell (private services do not use a public HTTP health path).
-5. Run fresh organization/member/reviewer and PDF smoke flows on the actual deployed origin.
+5. Open the public homepage, follow each role entry, then run fresh organization/member/reviewer and PDF smoke flows on the actual deployed origin.
 6. Configure error-rate, latency, worker job-age, DB utilization and storage alerts with a recipient.
 7. Exercise backup restore into an isolated database and verify application consistency before promising an RPO/RTO.
 8. Disable automatic release until schema compatibility, checks and rollback procedure are reviewed.
@@ -329,6 +368,7 @@ There is no tested production restore, observed availability history, centralize
 
 ## 10. Verification and review checklist
 
+- Public homepage, working role entry links, shared login/register navigation and mobile layout (`npm run test:e2e:public` from `apps/web`).
 - Registration transaction, pending denial, admin approval, rejection, role protection and suspension.
 - Existing-email password verification before joining/creating another organization.
 - Cross-organization read/write denial using the restricted database role.

@@ -6,10 +6,11 @@
 
 Built with Next.js, React, TanStack Query, FastAPI, Postgres row-level security and S3-compatible storage. Extraction runs asynchronously through a durable Postgres outbox. Optional OpenRouter extraction accepts a configurable model; human review and totals operate independently of model access.
 
-![OpsPilot organization dashboard](docs/assets/dashboard.png)
+![OpsPilot public landing page](docs/assets/landing.png)
 
 ## What works
 
+- Public product homepage with workflow explanations and separate entry points for organization owners, members and reviewers.
 - Organization registration and company selection at login/join; admin approval for joining members/reviewers.
 - Admin-managed invoice categories and membership approval, role selection, rejection and suspension.
 - PDF upload, tenant-specific deduplication, background extraction, source evidence and retry.
@@ -31,10 +32,10 @@ LLM_PROVIDER=rules OPENROUTER_API_KEY= make up
 
 This builds the services, starts Postgres/storage, applies migrations and waits for the application. It creates `.env` from `.env.example` only when missing. It preserves existing data and does **not** create demo accounts.
 
-1. Open [localhost:3300/register](http://localhost:3300/register).
-2. Choose **Create organization**, enter a name, unique slug, your email and a password of at least 12 characters. You become the organization admin.
+1. Open [localhost:3300](http://localhost:3300) for the product homepage and choose the organization-owner entry point.
+2. Create your organization with a name, unique slug, your email and a password of at least 12 characters. You become the organization admin.
 3. In **Admin**, create categories such as Travel, Software or Office supplies.
-4. In a separate browser profile/private window, open Register and request to join that organization as a reviewer or member.
+4. In a separate browser profile/private window, open the homepage and choose the member or reviewer entry point. Select your organization and submit a join request.
 5. As admin, approve the request in Admin. The teammate can then sign in using that organization, email and password.
 6. In **Inbox**, upload a supported PDF. Fictional [single-page](examples/northwind-invoice.pdf) and [two-page](examples/multipage-invoice.pdf) invoices are available for testing.
 7. After extraction, select **Full document** to inspect every PDF page. Save the category, reviewer, verified amount and currency. Add a comment and approve or reject.
@@ -49,15 +50,20 @@ make down   # stop services; retain database and original PDFs
 
 ## Pages
 
-| Route | Purpose |
-| --- | --- |
-| `/register` | Create an organization or request to join one |
-| `/login` | Select organization and sign in; pending accounts get an explanation |
-| `/dashboard` | Counts across all accessible invoices and recent activity |
-| `/inbox` | Upload, search, filter categories/status, paginate, inspect PDF/evidence, review, comment and manage access |
-| `/review` | Paginated queue of invoices awaiting a decision |
-| `/insights` | Verified currency totals, category distribution and bounded invoice questions |
-| `/admin` | Admin-only membership and category management |
+There are **eight pages**: three public entry pages and five workspace pages. They ship together in one web application.
+
+| Route | Access | Purpose |
+| --- | --- | --- |
+| `/` | Public | Product overview, workflow, features, role choices and frequently asked questions |
+| `/register` | Public | Create an organization or request to join one |
+| `/login` | Public | Select organization and sign in; pending accounts get an explanation |
+| `/dashboard` | Approved account | Counts across all accessible invoices and recent activity |
+| `/inbox` | Approved account | Upload, search, filter categories/status, paginate, inspect PDF/evidence, review, comment and manage access |
+| `/review` | Approved account | Paginated queue of accessible invoices awaiting a decision; actions depend on role and assignment |
+| `/insights` | Approved account | Verified currency totals, category distribution and bounded invoice questions |
+| `/admin` | Organization admin | Membership and category management |
+
+The homepage links to `/register?mode=create`, `/register?mode=join&role=member` and `/register?mode=join&role=reviewer`. These preselect the form; they do not grant permissions. Joining users remain pending until an admin approves their membership and role. Everyone uses the same `/login` page with their organization, email and password; the API checks their current membership and permissions.
 
 Admins can manage the organization. Reviewers can verify and decide eligible invoices. Members can upload and discuss accessible invoices. Viewers have read-only access. A restricted invoice remains visible to its uploader, assigned reviewer, admins and selected teammates. A shared link always requires an approved account with access.
 
@@ -94,7 +100,8 @@ make smoke
 make smoke-ui
 make smoke-tenants
 make smoke-workspace      # fresh organization -> membership -> category -> invoice decision
-cd apps/web && npm run test:e2e:errors
+(cd apps/web && npm run test:e2e:errors)
+(cd apps/web && npm run test:e2e:public) # homepage, role entry links, auth navigation and mobile layout
 ```
 
 `make demo` explicitly starts the stack and creates optional Northwind/Contoso sample accounts. Normal `make up` does not seed them. Existing seed passwords are preserved. Tests and sample PDFs are synthetic; automated success is not a measurement of extraction accuracy on customer invoices.
@@ -123,5 +130,7 @@ flowchart LR
 - [Render deployment](docs/deployment.md): private API, public web, worker, managed Postgres and external S3/R2.
 - [Architecture decisions](docs/adr/): tenant isolation, local storage, outbox and shared throttling.
 - [Product roadmap](SPEC.md): original broader vision; not a claim that all roadmap features exist.
+
+On Render, deploy all eight pages as the `opspilot-web` service. The API and extraction worker are separate services connected to Postgres and private PDF storage. The browser calls the web service's same-origin API proxy, so the private API does not need its own public domain. The [deployment guide](docs/deployment.md) explains the first release order and hosted checks.
 
 Remaining work before an unrestricted public service includes account email verification/recovery, stronger public signup abuse controls, isolated hostile-PDF parsing, operational alerts, backup restore validation and a real deployed acceptance test. There is no SSO, payment execution, ERP connector or arbitrary conversational assistant in the current application.

@@ -6,7 +6,7 @@ This runbook prepares a real organization signup deployment without seeded accou
 
 | Component | Render service | Configuration |
 | --- | --- | --- |
-| Website | Public web service | `infra/web.Dockerfile`; only public entry point |
+| Website | Public web service | `infra/web.Dockerfile`; homepage and all seven other pages; only public entry point |
 | API | Private service | `infra/api.Dockerfile`; restricted database role |
 | Extraction | Background worker | Same API image; `python -m app.worker` |
 | Database | Managed Render Postgres | Create before applying the Blueprint; same region as services |
@@ -15,6 +15,14 @@ This runbook prepares a real organization signup deployment without seeded accou
 The Blueprint places the three application services in Singapore. Pick another region before creation if appropriate, and place Postgres there too. Private services accept traffic from the private network; workers process jobs without accepting incoming connections. Our worker polls the Postgres outbox, so Redis is not needed. [Render private services](https://render.com/docs/private-services), [background workers](https://render.com/docs/background-workers).
 
 The order is **database → migrations → private API and worker → web → hosted acceptance tests**. Automatic Git deploys are disabled in the Blueprint to keep that order explicit. Review the paid service and database estimate in Render before provisioning; the file does not create free substitutes for the private API or worker.
+
+### One website, separate application services
+
+The eight frontend pages deploy together as `opspilot-web`: `/`, `/register`, `/login`, `/dashboard`, `/inbox`, `/review`, `/insights` and `/admin`. You do not create a Render service for each page. The homepage is public; workspace data requires an approved organization membership, and Admin requires an admin role.
+
+The backend is required for accounts, permissions, stored invoices, reviews and insights. `opspilot-api` runs privately, while `opspilot-worker` handles queued extraction. The web service forwards browser requests through its same-origin `/api` proxy to the private API. No public backend domain or browser-side API secret is needed for this topology.
+
+For the first deployment, create a new Render project, connect GitHub and grant access to `Abhinavsuri90/opspilot`. Complete the database and bucket steps below before applying the application Blueprint. Keep every service in that project and the same selected region.
 
 ## 1. Create the database and bucket
 
@@ -112,14 +120,15 @@ Expect `{"status":"ready"}`. The public Next.js `/api` proxy intentionally forwa
 
 In the public browser:
 
-1. Create a new organization and its admin account. Confirm Dashboard and Admin load with no seeded accounts.
-2. In a separate browser profile, request membership in that organization as a reviewer. Login must say approval is pending.
-3. In Admin, approve the applicant; sign in again in the applicant's profile. Confirm the role and visible documents are correct.
-4. Upload a new text-layer PDF. Wait for extraction, inspect the original PDF and evidence, categorize it, add a comment, and record a review decision with its reason where required.
-5. Ask for the amount and count awaiting review. Compare the answer with the visible authorized invoices and currencies.
-6. Exercise workspace and restricted sharing with a member account. Verify the user cannot retrieve an unshared invoice by URL or ID. Suspend the account in Admin and confirm its existing session loses access.
-7. Create a second organization; verify its invoices, members, categories, comments, and totals are isolated from the first organization.
-8. Restart the worker while an extraction is queued; verify it completes after the worker returns. Sign out and confirm protected pages require login.
+1. Open the public HTTPS origin at `/`. Check the homepage, section links, FAQ and mobile layout. Follow the owner, member and reviewer entry links; confirm the expected registration mode and requested role are selected. Test the Sign in link and navigation back to the homepage.
+2. Use the owner entry to create a new organization and its admin account. Confirm Dashboard and Admin load with no seeded accounts.
+3. In a separate browser profile, use the reviewer entry and request membership in that organization. Login must say approval is pending. Selecting a reviewer link must not grant access before approval.
+4. In Admin, approve the applicant; sign in again in the applicant's profile. Confirm the role and visible documents are correct.
+5. Upload a new text-layer PDF. Wait for extraction, inspect the original PDF and evidence, categorize it, add a comment, and record a review decision with its reason where required. Confirm Inbox, Review and Insights all load from their own URLs.
+6. Ask for the amount and count awaiting review. Compare the answer with the visible authorized invoices and currencies.
+7. Use the member entry to request another account, approve it, and exercise workspace and restricted sharing. Verify the user cannot retrieve an unshared invoice by URL or ID or perform admin actions. Suspend the account in Admin and confirm its existing session loses access.
+8. Create a second organization; verify its invoices, members, categories, comments, and totals are isolated from the first organization.
+9. Restart the worker while an extraction is queued; verify it completes after the worker returns. Sign out and confirm protected pages require login.
 
 Record the actual public URL, Git SHA, date, extraction mode, and outcomes in the project handoff only after these checks pass. The old demo-account smoke script is not a substitute for this fresh signup acceptance flow.
 

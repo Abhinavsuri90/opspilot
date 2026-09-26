@@ -1,5 +1,13 @@
 # Progress
 
+## 2026-09-26 — Public landing and organization entry flow
+
+- Added a public homepage with a responsive cream/teal design, clearly labeled product illustration, admin/member/reviewer entry cards, workflow guide, five workspace page explanations and accessible FAQ/navigation.
+- Connected role choices to registration form defaults and aligned login/register with a shared brand. Direct links, client navigation and browser history preserve correct entry behavior; invalid role values cannot create privileges. Sign-in remains common to all approved roles. Clicking the selected registration mode now preserves entered organization fields.
+- Added the public browser suite to CI and updated the system design with the eight-page map, entry-flow diagram and authorization boundaries. Render instructions explain that all frontend pages deploy as one web service with a separate private API and worker.
+- Verification: 16 web tests, ESLint, TypeScript, production Docker build, public browser suite and complete fresh-company/invoice-review browser suite passed. Visually reviewed desktop/mobile landing and authentication screens. Landing navigation passes at 390/320 px; login and all registration variants fit at 320 px. No live model call was used.
+- Application changes are in `a8dfad5`. Local homepage runs at http://localhost:3300. Public Render deployment remains the next step after the user registers/connects GitHub and supplies database/storage settings.
+
 ## 2026-09-26 — Organization onboarding and collaborative invoice review
 
 - Added real organization registration and pending member/reviewer requests, admin approvals/rejections/suspension, category management and role controls. Normal startup no longer seeds sample accounts.

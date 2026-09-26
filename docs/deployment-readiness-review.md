@@ -16,7 +16,7 @@ Reviewed 2026-09-26 for the organization onboarding and invoice collaboration re
 | Team collaboration | Comments, administrator reviewer assignment, workspace visibility, and restricted sharing with selected active members. Admins, the uploader, and assigned reviewer retain access under the documented rules. |
 | Categories | Administrators create, edit, and archive categories. Reviewers use the organization's available categories. |
 | Totals and questions | Accessible invoice counts, status/category summaries, and verified totals separated by currency. Structured invoice questions cite stored evidence; unsupported requests are explicitly declined. |
-| Browser flow | Login, registration, Dashboard, Inbox, Review, Insights, and Admin, with a same-origin API proxy and TanStack Query updates. |
+| Browser flow | Public homepage, login, registration, Dashboard, Inbox, Review, Insights, and Admin, with a same-origin API proxy and TanStack Query updates. Owner/member/reviewer links preselect signup forms; the API owns access decisions. |
 
 Money totals include manually verified amounts with explicit currencies. Unverified invoices are counted separately, and amounts in different currencies are not added together. Questions support the implemented invoice fields and current summaries; they are not a general-purpose finance assistant or date/vendor-filtered analytics engine.
 
@@ -40,6 +40,8 @@ Money totals include manually verified amounts with explicit currencies. Unverif
 See [render.yaml](../render.yaml) and the [Render deployment runbook](deployment.md). The Blueprint defines the public web service, private API, and background worker. Provision managed Render Postgres and a private external S3-compatible bucket first; run migrations without seeding hosted accounts. Creating the first organization through registration provides its administrator.
 
 ## Verification evidence
+
+- The later public-entry release passed web lint/types, all 16 unit tests, production Docker build, public navigation/role-selection browser checks, 390/320 px landing checks and the complete fresh-company workflow again. Landing and authentication screens were visually reviewed; login and registration fit 320 px. These are local results, not evidence of a hosted Render deployment.
 
 - The new onboarding suite passed against the local Docker Postgres database with migrations through `0005`: **18 passed**. It exercises signup validation, active admin/workflow creation, bounded literal organization search, pending login denial, approval, rejection, suspension and restoration, existing-email ownership, admin protection, tenant isolation, and suspension ordering against an in-flight authenticated transaction.
 - Ruff passed for the owned onboarding/authentication code, migration, models, throttle, and onboarding tests.
