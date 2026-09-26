@@ -512,15 +512,9 @@ Promote to production and verify every item below on the **live URL**. Mark each
 
 *Done when:* every box above is checked, and Claude has walked me through a complete live demo on the production URL: upload a document, review it, approve an action, and show the audit replay and the dashboard.
 
-## 10. Engagement kit (`docs/engagement/`)
+## 10. Future customer engagement kit
 
-Create these **templates**, with headings and guidance prompts only and no invented content. The developer fills them in with a real customer.
-
-- `discovery.md`: current workflow, stakeholders, pain points, volumes, systems involved, constraints
-- `success-plan.md`: target metrics, baseline measurements, timeline, risks
-- `weekly-update-template.md`
-- `handoff-runbook.md`
-- `field-feedback.md`: product gaps observed during deployment
+Before a real customer deployment, create customer-specific discovery notes, a success plan, weekly updates, a handoff runbook, and field-feedback records. Capture the workflow, stakeholders, measured baselines, target outcomes, operational owners, and product gaps. Keep customer data out of this public repository. Empty templates are omitted from the current prototype.
 
 ## 11. README
 

@@ -380,13 +380,13 @@ Documents are **untrusted input**. An invoice might contain text like "ignore pr
 
 ### Customer deployment playbook (first week on site)
 
-1. **Discovery.** Map the current workflow, volumes, systems and stakeholders (`docs/engagement/discovery.md`).
+1. **Discovery.** Map the current workflow, volumes, systems and stakeholders in customer-specific discovery notes kept outside this public repository.
 2. **Security review.** Data classification, residency, retention, SSO, network egress, support access (break-glass).
 3. **Configuration.** Document types, fields, rules, thresholds, destinations and policies, written as a WorkflowConfig.
 4. **Baseline.** Label 50 or more of *their* real documents and run the eval to get baseline accuracy.
 5. **Shadow mode.** The agent proposes actions but executes nothing. Compare against what humans actually did.
 6. **Gradual autonomy.** Flip selected action types from `needs_approval` to `auto`, with metrics as evidence.
-7. **Handoff.** Runbook, alerts routed to their team, success-plan review (`docs/engagement/handoff-runbook.md`).
+7. **Handoff.** Give the customer an operational runbook, alerts routed to their team, and a review of the success plan.
 
 ## 12. Security and threat model
 

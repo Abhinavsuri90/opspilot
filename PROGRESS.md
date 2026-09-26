@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-09-26 — Local walkthrough and complete route review
+
+- Rebuilt the local mock-provider stack and verified the browser at `http://localhost:3300/login`: sign-in, fresh PDF upload, extraction with evidence, retry UI, and logout passed. Refreshed the real dashboard and inbox screenshots in `docs/assets/`.
+- Audited all 10 explicit API routes. The Docker/Postgres suite passed 41 tests, including successful responses and unauthenticated, forbidden, malformed ID, invalid upload, quota/configuration, oversized request, rate-limit, and storage-error paths. Ruff and strict mypy passed.
+- The web suite passed 16 tests, lint, typecheck, and production build. A browser error-state run passed login, upload, list/detail, retry, permissions, session expiry, and long-list layout cases. The same-origin proxy now forwards `Sec-Fetch-Site` to the API.
+- Fixed the Inbox's excessive blank space with long document lists and made login input normalization/messages clearer. Added the browser error-state run to CI for subsequent pushes.
+- Removed five empty future customer-engagement Markdown templates and repaired their spec/design references. Kept the substantive design, ADR, deployment, handoff, and demo documents.
+- Public Railway deployment, OCR, review edits/approval, actions, and live OpenRouter accuracy remain unverified or unimplemented.
+
 ## 2026-09-26 — Second deployment and security review
 
 - Confirmed that the failed GitHub notification for `69ebf1b` was historical; its Python import issue was fixed in `45f4f3e`, whose three CI jobs passed. Added a fourth, full browser smoke job for the next push.

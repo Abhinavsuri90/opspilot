@@ -30,23 +30,33 @@ flowchart LR
 
 ## Run locally
 
-Docker Desktop and Docker Compose are required. Node.js 22 and npm are required for frontend checks and the browser smoke test.
+1. Start Docker Desktop. From the repository root, start the local stack with the deterministic mock (no model key needed):
 
 ```sh
-make up
+LLM_PROVIDER=mock OPENROUTER_API_KEY= make up
 ```
 
-Open `http://localhost:3300`. Sign in to organization `northwind` as `northwind@example.com` with `DEMO_PASSWORD` from your local `.env`. Open **Inbox**, download the fictional sample invoice from the page, and upload it. The browser uses the web service's same-origin `/api` proxy; the local API is also available at `http://localhost:8000`, with OpenAPI docs at `/docs`.
+2. Open `http://localhost:3300/login`. Sign in to organization `northwind` as `northwind@example.com` with the `DEMO_PASSWORD` value from your local `.env`. `make up` creates `.env` from `.env.example` only if it is missing; it does not replace an existing file.
+
+3. Open **Inbox**, download the fictional sample invoice from the page, and upload it. Wait for **Needs review**, then inspect the extracted values and their evidence. The local API is at `http://localhost:8000`, with interactive OpenAPI docs at `http://localhost:8000/docs`.
+
+4. To run automated checks, install Node.js 22 and npm, then use:
 
 ```sh
 make lint typecheck test
 make smoke
-make smoke-ui
-make eval
+LLM_PROVIDER=mock OPENROUTER_API_KEY= make smoke-ui
+LLM_PROVIDER=mock OPENROUTER_API_KEY= make eval
+cd apps/web && npm run test:e2e:errors
+```
+
+5. Stop the local services when finished:
+
+```sh
 make down
 ```
 
-`make up` creates `.env` from `.env.example` when needed, builds the services, starts local infrastructure, migrates the database, seeds fictional accounts, and waits for the web and API health checks. `make eval` writes a timestamped JSON and Markdown report to `evals/reports/` (ignored by Git). The CI mock baseline exercises the generated invoices and parser. It is **not** a measurement of AI accuracy on real invoices. `make smoke-ui` uses an installed Chrome by default; set `PLAYWRIGHT_CHROME_PATH` to another Chromium executable if needed.
+`make up` builds the services, starts local infrastructure, migrates the database, seeds fictional accounts, and waits for the web and API health checks. `make down` preserves local database and object-storage data for the next run. `make eval` writes a timestamped JSON and Markdown report to `evals/reports/` (ignored by Git). The CI mock baseline exercises the generated invoices and parser. It is **not** a measurement of AI accuracy on real invoices. `make smoke-ui` uses an installed Chrome by default; set `PLAYWRIGHT_CHROME_PATH` to another Chromium executable if needed.
 
 ## Optional OpenRouter extraction
 

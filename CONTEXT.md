@@ -2,13 +2,15 @@
 
 ## Last updated
 
-2026-09-26, after verified commit `217545a`. Run `git log -1 --oneline` for the current documentation commit.
+2026-09-26 15:47 IST, after verified commit `6431026`. Run `git log -1 --oneline` for the latest commit and confirm its CI run before deployment.
 
 ## Current status
 
 OpsPilot is a local Phase 1 invoice intake/extraction prototype. Authenticated tenants upload text-layer PDFs through a Next.js web app and same-origin API proxy. FastAPI stores documents in S3-compatible storage and queues extraction through a Postgres outbox. The worker records four fields with page-level evidence; the Inbox displays results and permits two manual retries of a failed document. A Postgres login attempt counter and raw-upload limit guard the public demo path. OpenRouter is optional; live extraction accuracy has not been tested. Public staging and the review/approval/action phases are pending.
 
 The screenshot of failed CI commit `69ebf1b` is historical. Commit `45f4f3e` passed all three then-existing jobs. The [new four-job CI run](https://github.com/Abhinavsuri90/opspilot/actions/runs/36233730171), including the full-stack browser smoke and Python dependency audit, passed at `217545a`.
+
+The latest local audit covers all 10 API routes and web error states. It adds endpoint contract tests, a browser error-state script, a proxy header fix, a bounded Inbox list, and refreshed screenshots. Five empty future engagement templates were removed. Every deployed commit must have a green CI run.
 
 ## Exact next step
 
@@ -18,9 +20,10 @@ The screenshot of failed CI commit `69ebf1b` is historical. Commit `45f4f3e` pas
 ## Files in play
 
 - `apps/api/`: migration `0003`, login throttle, upload/storage/integrity limits, tenant-fair worker, and tests.
-- `apps/web/`: session-aware queries, upload validation and role UX, focus styles, and tests.
+- `apps/web/`: session-aware queries, upload validation and role UX, proxy header forwarding, Inbox layout, and browser error tests.
 - `.github/workflows/ci.yml`, `infra/`, `Makefile`: pinned release dependencies, audits, ordered local startup, and browser CI.
-- `docs/deployment.md`, `docs/deployment-readiness-review.md`, `docs/demo-guide.md`, `SYSTEM_DESIGN.md`, ADR 003/004: deployment and design evidence.
+- `README.md`, `SPEC.md`, `SYSTEM_DESIGN.md`, `docs/assets/`, and `docs/engagement/`: local steps, honest scope, current screenshots, and removal of empty future templates.
+- `docs/deployment.md`, `docs/deployment-readiness-review.md`, `docs/demo-guide.md`, ADR 003/004: deployment and design evidence.
 
 ## Decisions and deviations
 
@@ -37,7 +40,7 @@ The screenshot of failed CI commit `69ebf1b` is historical. Commit `45f4f3e` pas
 
 ## How to run and test
 
-Run `LLM_PROVIDER=mock OPENROUTER_API_KEY= make up`, then `make smoke`, `make smoke-ui`, and `make eval` with the same mock override. `make lint typecheck test` runs backend and frontend checks. `make down` stops local services. The current local verification passed: 29 API tests, 12 web tests, Ruff, strict mypy, web lint/typecheck/build, API and browser smokes, and synthetic mock evaluation. The release dependency audit and full npm audit reported no known advisories at review time.
+Run `LLM_PROVIDER=mock OPENROUTER_API_KEY= make up`, then `make smoke` and `LLM_PROVIDER=mock OPENROUTER_API_KEY= make smoke-ui`. Run `cd apps/web && npm run test:e2e:errors` for the mocked browser error paths; `make lint typecheck test` runs code checks. `make down` stops local services without deleting persistent data. The latest local verification passed: 41 API tests across all 10 routes, 16 web tests, Ruff, strict mypy, web lint/typecheck/build, API and browser smokes, and the browser error-state script. The synthetic mock evaluation and dependency audits passed in the previous review; they are not live-model accuracy claims.
 
 ## Known issues and gotchas
 

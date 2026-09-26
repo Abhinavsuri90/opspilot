@@ -25,12 +25,14 @@ Local verification before public rollout: backend Ruff, strict mypy, and Postgre
 | Demo PDF was unavailable from a hosted web service | The sample is copied into the release web image and linked from the Inbox. |
 | A missing OpenRouter key left the worker looping as if healthy | The worker validates the configured provider at startup and exits on invalid configuration. |
 | Reseeding silently changed existing demo passwords and roles | Seed preserves existing users unless credential reset is explicitly requested. |
-| Cross-site state-changing requests lacked an explicit origin check | The API checks the configured web origin, and the web proxy forwards the browser Origin header. |
+| Cross-site state-changing requests lacked an explicit origin check | The API checks the configured web origin and browser site signal; the web proxy forwards `Origin` and `Sec-Fetch-Site`. |
 | Repeated login guesses and oversized direct API uploads had no shared guard | A Postgres-backed identity throttle limits login attempts across API replicas, and the API caps raw multipart requests before parsing. |
 | API and web tests could pass while the combined proxy, worker, and browser flow failed | CI now starts the full local Compose stack and runs the fresh-invoice browser smoke on Ubuntu Chrome. |
 | Python dependencies could change between identical release-image builds | A Python 3.12 Linux runtime lock pins exact package versions; the API image checks metadata consistency, and CI audits the lock with `pip-audit`. |
 | A GitHub-connected migration job could race application autodeploys | The Railway runbook keeps autodeploy disabled during bootstrap and requires migration success before application deployment. |
 | Rolling back a container could be mistaken for rolling back database state | The release runbook records commit tags and deployment IDs, and calls out that Railway image rollback does not reverse migrations. |
+| Long document histories stretched the result card into blank space | The Inbox scrolls the document list in a bounded area while the result card keeps its content height. |
+| API and browser error paths had uneven explicit coverage | Contract tests exercise all 10 API routes across the suite; a separate browser script checks login, upload, list/detail, retry, permissions, and session error states. |
 
 ## Still required before wider use
 
