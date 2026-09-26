@@ -48,16 +48,16 @@ def pdf_pages(data: bytes) -> list[str]:
     if not any(page.strip() for page in pages):
         raise ExtractionError("This PDF has no text layer; scanned files need OCR")
     if sum(len(page) for page in pages) > 50_000:
-        raise ExtractionError("This PDF has too much text for the current demo limit")
+        raise ExtractionError("This PDF has too much text for the 50,000 character limit")
     return pages
 
 
-class MockInvoiceProvider:
-    """Parse text-layer demo invoices; this is not an AI accuracy benchmark."""
+class RulesInvoiceProvider:
+    """Extract exact labeled fields from text PDFs; supports a bounded invoice format."""
 
-    name = "mock"
+    name = "rules"
     model = "invoice-pattern-v1"
-    prompt_version = "mock-v1"
+    prompt_version = "rules-v1"
     labels = {
         "vendor": "Vendor",
         "invoice_number": "Invoice Number",
@@ -87,8 +87,15 @@ class MockInvoiceProvider:
         return fields
 
 
+class MockInvoiceProvider(RulesInvoiceProvider):
+    """Deterministic provider retained for automated fixtures."""
+
+    name = "mock"
+    prompt_version = "mock-v1"
+
+
 class OpenRouterInvoiceProvider:
-    """Structured text extraction through OpenRouter; only synthetic data is used in demos."""
+    """Structured text extraction through OpenRouter with exact source validation."""
 
     name = "openrouter"
     prompt_version = "invoice-text-v1"
@@ -192,6 +199,8 @@ class OpenRouterInvoiceProvider:
 @lru_cache
 def get_provider() -> ExtractionProvider:
     settings = get_settings()
+    if settings.llm_provider == "rules":
+        return RulesInvoiceProvider()
     if settings.llm_provider == "mock":
         return MockInvoiceProvider()
     if settings.llm_provider == "openrouter":

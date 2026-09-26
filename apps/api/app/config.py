@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     s3_addressing_style: Literal["auto", "path", "virtual"] = "auto"
     s3_access_key_id: str = "local"
     s3_secret_access_key: str = "local"
-    llm_provider: str = "mock"
+    llm_provider: str = "rules"
     openrouter_api_key: str | None = None
     openrouter_model: str = "google/gemini-3.8-flash"
     max_documents_per_org: int = Field(default=100, ge=1, le=100_000)
