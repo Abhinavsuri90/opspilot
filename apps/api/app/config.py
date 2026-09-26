@@ -35,8 +35,23 @@ class Settings(BaseSettings):
                 raise ValueError("JWT_SECRET must be a strong deployment secret")
             if not self.cookie_secure:
                 raise ValueError("COOKIE_SECURE must be true outside development")
-            if not self.web_origin.startswith("https://"):
-                raise ValueError("WEB_ORIGIN must use HTTPS outside development")
+            web_origin = urlparse(self.web_origin)
+            if (
+                web_origin.scheme != "https"
+                or web_origin.hostname is None
+                or web_origin.username is not None
+                or web_origin.password is not None
+                or web_origin.path
+                or web_origin.params
+                or web_origin.query
+                or web_origin.fragment
+            ):
+                raise ValueError("WEB_ORIGIN must be an HTTPS origin outside development")
+            try:
+                if web_origin.port == 0:
+                    raise ValueError("WEB_ORIGIN must have a valid port")
+            except ValueError as exc:
+                raise ValueError("WEB_ORIGIN must have a valid port") from exc
             database = urlparse(self.database_url)
             if (
                 database.scheme not in {"postgres", "postgresql", "postgresql+psycopg"}

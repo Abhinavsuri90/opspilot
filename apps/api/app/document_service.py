@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import set_org_context
+from app.limits import MAX_UPLOAD_BYTES
 from app.llm.provider import ExtractionError, pdf_pages
 from app.models import AuditEvent, Document, ExtractedField, OutboxEvent
 from app.repositories import (
@@ -22,7 +23,6 @@ from app.repositories import (
 )
 from app.storage import ObjectStore
 
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_MANUAL_RETRIES = 2
 
 

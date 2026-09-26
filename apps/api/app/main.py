@@ -28,7 +28,6 @@ from app import document_service
 from app.config import get_settings
 from app.db import get_session, set_org_context
 from app.document_service import (
-    MAX_UPLOAD_BYTES,
     DocumentDetail,
     DocumentLimitReached,
     DocumentNotRetryable,
@@ -38,6 +37,8 @@ from app.document_service import (
     MissingWorkflowConfig,
     UploadResponse,
 )
+from app.limits import MAX_UPLOAD_BYTES, MAX_UPLOAD_REQUEST_BYTES
+from app.login_throttle import clear_attempts, reserve_attempt
 from app.models import Membership, Organization, User
 from app.repositories import (
     get_membership,
@@ -186,6 +187,47 @@ async def add_request_id(
             )
             denial.headers["X-Request-ID"] = request_id
             return denial
+    if request.method == "POST" and request.url.path == "/v1/documents":
+        declared_size = request.headers.get("content-length")
+        if declared_size is not None:
+            try:
+                too_large = int(declared_size) > MAX_UPLOAD_REQUEST_BYTES
+            except ValueError:
+                too_large = True
+            if too_large:
+                denial = JSONResponse(
+                    status_code=413,
+                    content={
+                        "error": {
+                            "code": "upload_too_large",
+                            "message": "Upload request exceeds the 10 MB PDF limit",
+                            "details": None,
+                        }
+                    },
+                )
+                denial.headers["X-Request-ID"] = request_id
+                return denial
+        # FastAPI parses multipart uploads before the endpoint executes. Cap
+        # the raw stream first, including requests without Content-Length.
+        chunks: list[bytes] = []
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_UPLOAD_REQUEST_BYTES:
+                denial = JSONResponse(
+                    status_code=413,
+                    content={
+                        "error": {
+                            "code": "upload_too_large",
+                            "message": "Upload request exceeds the 10 MB PDF limit",
+                            "details": None,
+                        }
+                    },
+                )
+                denial.headers["X-Request-ID"] = request_id
+                return denial
+            chunks.append(chunk)
+        request._body = b"".join(chunks)
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     return response
@@ -224,7 +266,8 @@ def readyz(session: Annotated[Session, Depends(get_session)]) -> dict[str, str]:
             text(
                 "SELECT d.id FROM organizations AS o, users AS u, memberships AS m, "
                 "workflow_configs AS w, audit_events AS a, documents AS d, "
-                "outbox_events AS e, extraction_runs AS r, extracted_fields AS f LIMIT 0"
+                "outbox_events AS e, extraction_runs AS r, extracted_fields AS f, "
+                "login_attempts AS l LIMIT 0"
             )
         )
     except SQLAlchemyError as exc:
@@ -236,6 +279,10 @@ def readyz(session: Annotated[Session, Depends(get_session)]) -> dict[str, str]:
 def login(
     body: LoginRequest, response: Response, session: Annotated[Session, Depends(get_session)]
 ) -> SessionResponse:
+    if not reserve_attempt(session, body.org_slug, body.email):
+        raise HTTPException(
+            status_code=429, detail="Too many login attempts; try again in 15 minutes"
+        )
     org = get_organization_by_slug(session, body.org_slug)
     user = get_user_by_email(session, body.email)
     # Keep the same public error for all credential failures.
@@ -247,6 +294,7 @@ def login(
     membership = get_membership(session, org.id, user.id)
     if membership is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    clear_attempts(session, body.org_slug, body.email)
     response.set_cookie(
         key="opspilot_session",
         value=make_session_token(user.id, org.id),

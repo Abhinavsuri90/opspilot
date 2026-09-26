@@ -28,6 +28,17 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class LoginAttempt(Base):
+    __tablename__ = "login_attempts"
+    __table_args__ = (Index("ix_login_attempts_window_started", "window_started_at"),)
+
+    # This is a hash of the normalized organization slug and email, so the
+    # throttle does not store raw identifiers from unauthenticated requests.
+    identity_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    attempts: Mapped[int] = mapped_column(nullable=False)
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Membership(Base):
     __tablename__ = "memberships"
     __table_args__ = (

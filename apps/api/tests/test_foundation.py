@@ -1,4 +1,5 @@
 import os
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -8,8 +9,9 @@ from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db import get_session, normalize_database_url, set_org_context
+from app.login_throttle import identity_hash
 from app.main import app
-from app.models import Membership, Organization
+from app.models import LoginAttempt, Membership, Organization
 
 
 def test_healthz() -> None:
@@ -70,9 +72,34 @@ def test_browser_post_rejects_untrusted_origin() -> None:
         assert client.post("/v1/auth/login", json={}).status_code == 422
 
 
+def test_upload_request_body_is_capped_before_multipart_parsing() -> None:
+    from app.limits import MAX_UPLOAD_REQUEST_BYTES
+
+    with TestClient(app) as client:
+        oversized = client.post(
+            "/v1/documents",
+            content=b"x" * (MAX_UPLOAD_REQUEST_BYTES + 1),
+            headers={"Content-Type": "application/octet-stream", "X-Request-ID": "too-large-123"},
+        )
+        assert oversized.status_code == 413
+        assert oversized.json()["error"]["code"] == "upload_too_large"
+        assert oversized.headers["x-request-id"] == "too-large-123"
+
+        streamed = client.post(
+            "/v1/documents",
+            content=iter([b"x" * MAX_UPLOAD_REQUEST_BYTES, b"x"]),
+            headers={"Transfer-Encoding": "chunked"},
+        )
+        assert streamed.status_code == 413
+
+        # A small body continues to authentication rather than being rejected.
+        assert client.post("/v1/documents", content=b"x").status_code == 401
+
+
 def test_readyz_fails_when_schema_is_missing() -> None:
     class MissingSchemaSession:
         def execute(self, statement: object) -> None:
+            assert "login_attempts" in str(statement)
             raise SQLAlchemyError("missing table")
 
     app.dependency_overrides[get_session] = lambda: MissingSchemaSession()
@@ -211,3 +238,65 @@ def test_tenant_context_expires_at_transaction_end() -> None:
         set_org_context(session, contoso.id)
         visible = session.scalars(select(Membership)).all()
         assert visible and all(row.org_id == contoso.id for row in visible)
+
+
+@pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
+def test_login_throttle_blocks_repeated_guesses_and_resets_after_success() -> None:
+    import uuid
+
+    from app.db import SessionLocal
+
+    unknown_email = f"absent-{uuid.uuid4().hex}@example.com"
+    with TestClient(app) as client:
+        for _ in range(10):
+            failed = client.post(
+                "/v1/auth/login",
+                json={
+                    "org_slug": "northwind",
+                    "email": unknown_email,
+                    "password": "wrong-password",
+                },
+            )
+            assert failed.status_code == 401
+        blocked = client.post(
+            "/v1/auth/login",
+            json={"org_slug": "northwind", "email": unknown_email, "password": "wrong-password"},
+        )
+        assert blocked.status_code == 429
+        with SessionLocal() as session:
+            row = session.get(LoginAttempt, identity_hash("northwind", unknown_email))
+            assert row is not None and row.attempts == 11
+        with SessionLocal() as session, session.begin():
+            row = session.get(LoginAttempt, identity_hash("northwind", unknown_email))
+            assert row is not None
+            row.window_started_at = datetime.now(UTC) - timedelta(minutes=16)
+        after_window = client.post(
+            "/v1/auth/login",
+            json={"org_slug": "northwind", "email": unknown_email, "password": "wrong-password"},
+        )
+        assert after_window.status_code == 401
+        with SessionLocal() as session:
+            row = session.get(LoginAttempt, identity_hash("northwind", unknown_email))
+            assert row is not None and row.attempts == 1
+
+        known_email = "northwind@example.com"
+        for _ in range(2):
+            assert client.post(
+                "/v1/auth/login",
+                json={
+                    "org_slug": "northwind",
+                    "email": known_email,
+                    "password": "wrong-password",
+                },
+            ).status_code == 401
+        success = client.post(
+            "/v1/auth/login",
+            json={
+                "org_slug": "northwind",
+                "email": known_email,
+                "password": os.environ["DEMO_PASSWORD"],
+            },
+        )
+        assert success.status_code == 200
+        with SessionLocal() as session:
+            assert session.get(LoginAttempt, identity_hash("northwind", known_email)) is None

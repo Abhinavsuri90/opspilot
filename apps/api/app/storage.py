@@ -6,9 +6,14 @@ from botocore.config import Config  # type: ignore[import-untyped]
 from botocore.exceptions import BotoCoreError, ClientError  # type: ignore[import-untyped]
 
 from app.config import get_settings
+from app.limits import MAX_UPLOAD_BYTES
 
 
 class StorageError(Exception):
+    pass
+
+
+class StoredDocumentTooLarge(StorageError):
     pass
 
 
@@ -28,6 +33,8 @@ class S3ObjectStore:
             "config": Config(
                 s3={"addressing_style": settings.s3_addressing_style},
                 retries={"max_attempts": 2},
+                connect_timeout=5,
+                read_timeout=30,
             ),
         }
         if settings.s3_access_key_id and settings.s3_secret_access_key:
@@ -46,7 +53,16 @@ class S3ObjectStore:
     def get(self, key: str) -> bytes:
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=key)
-            return bytes(response["Body"].read())
+            body = response["Body"]
+            try:
+                if response.get("ContentLength", 0) > MAX_UPLOAD_BYTES:
+                    raise StoredDocumentTooLarge("Stored document exceeds the 10 MB PDF limit")
+                data = bytes(body.read(MAX_UPLOAD_BYTES + 1))
+                if len(data) > MAX_UPLOAD_BYTES:
+                    raise StoredDocumentTooLarge("Stored document exceeds the 10 MB PDF limit")
+                return data
+            finally:
+                body.close()
         except (BotoCoreError, ClientError) as exc:
             raise StorageError("Object storage is unavailable") from exc
 

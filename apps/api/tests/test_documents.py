@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import threading
@@ -17,9 +18,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.db import SessionLocal, engine, set_org_context
 from app.llm.provider import ExtractionError, MockInvoiceProvider, OpenRouterInvoiceProvider
 from app.main import app
-from app.models import Document, ExtractionRun, OutboxEvent
+from app.models import Document, ExtractionRun, Organization, OutboxEvent
 from app.storage import get_store
-from app.worker import claim_next, complete, fail, process_one
+from app.worker import Claim, claim_next, complete, fail, process_one
 from app.worker import main as worker_main
 
 SAMPLE = Path(__file__).parents[3] / "examples" / "northwind-invoice.pdf"
@@ -212,6 +213,76 @@ def test_upload_dedup_extraction_and_tenant_visibility(monkeypatch: pytest.Monke
             assert all(row["id"] != document_id for row in client.get("/v1/documents").json())
     finally:
         del app.dependency_overrides[get_store]
+
+
+@pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
+def test_worker_rejects_corrupted_stored_document(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.worker.get_provider", MockInvoiceProvider)
+    store = MemoryStore()
+    app.dependency_overrides[get_store] = lambda: store
+    data = SAMPLE.read_bytes().replace(b"NW-2026-001", uuid.uuid4().hex[:11].upper().encode())
+    try:
+        with TestClient(app) as client:
+            login = client.post(
+                "/v1/auth/login",
+                json={
+                    "org_slug": "northwind",
+                    "email": "northwind@example.com",
+                    "password": os.environ["DEMO_PASSWORD"],
+                },
+            )
+            assert login.status_code == 200
+            uploaded = client.post(
+                "/v1/documents", files={"file": ("invoice.pdf", data, "application/pdf")}
+            )
+            assert uploaded.status_code == 202, uploaded.text
+            document_id = uuid.UUID(uploaded.json()["id"])
+            key = next(iter(store.objects))
+            store.objects[key] = data[:-1] + b"X"
+
+            assert process_one(store, document_id)
+            detail = client.get(f"/v1/documents/{document_id}")
+            assert detail.status_code == 200
+            assert detail.json()["status"] == "failed"
+            assert detail.json()["failure_reason"] == "Stored document failed integrity check"
+            assert detail.json()["fields"] == []
+    finally:
+        del app.dependency_overrides[get_store]
+
+
+@pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
+def test_worker_rotates_tenants_even_when_one_has_a_backlog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.worker.get_provider", MockInvoiceProvider)
+    monkeypatch.setattr("app.worker._last_org_id", None)
+    store = MemoryStore()
+    data = SAMPLE.read_bytes()
+    store.put("fairness.pdf", data)
+    with SessionLocal() as session:
+        org_ids = list(session.scalars(select(Organization.id).order_by(Organization.id)))
+    assert len(org_ids) >= 2
+
+    claimed_orgs: list[uuid.UUID] = []
+
+    def claim_with_backlog(org_id: uuid.UUID, document_id: uuid.UUID | None = None) -> Claim:
+        claimed_orgs.append(org_id)
+        return Claim(
+            org_id,
+            uuid.uuid4(),
+            uuid.uuid4(),
+            "fairness.pdf",
+            hashlib.sha256(data).hexdigest(),
+            len(data),
+            datetime.now(UTC),
+            1,
+        )
+
+    monkeypatch.setattr("app.worker.claim_next", claim_with_backlog)
+    monkeypatch.setattr("app.worker.complete", lambda claim, fields, provider: None)
+    assert process_one(store)
+    assert process_one(store)
+    assert claimed_orgs == org_ids[:2]
 
 
 @pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")

@@ -1,9 +1,11 @@
 """Small Postgres outbox worker for the first document workflow slice."""
 
+import hashlib
 import json
 import logging
 import time
 import uuid
+from bisect import bisect
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -25,10 +27,11 @@ from app.models import (
     Organization,
     OutboxEvent,
 )
-from app.storage import ObjectStore, StorageError, get_store
+from app.storage import ObjectStore, StorageError, StoredDocumentTooLarge, get_store
 
 logger = logging.getLogger(__name__)
 MAX_EXTRACTION_ATTEMPTS = 3
+_last_org_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -37,6 +40,8 @@ class Claim:
     event_id: uuid.UUID
     document_id: uuid.UUID
     storage_key: str
+    content_hash: str
+    size_bytes: int
     claimed_at: datetime
     attempts: int
 
@@ -95,7 +100,16 @@ def claim_next(org_id: uuid.UUID, document_id: uuid.UUID | None = None) -> Claim
         event.claimed_at = now
         event.attempts += 1
         session.add(audit(org_id, document.id, "document.extracting"))
-        return Claim(org_id, event.id, document.id, document.storage_key, now, event.attempts)
+        return Claim(
+            org_id,
+            event.id,
+            document.id,
+            document.storage_key,
+            document.content_hash,
+            document.size_bytes,
+            now,
+            event.attempts,
+        )
 
 
 def complete(claim: Claim, fields: list[ExtractedValue], provider: ExtractionProvider) -> None:
@@ -174,14 +188,21 @@ def fail(claim: Claim, reason: str, retryable: bool) -> None:
 def process_one(
     store: ObjectStore | None = None, document_id: uuid.UUID | None = None
 ) -> bool:
+    global _last_org_id
     object_store = store or get_store()
     provider = get_provider()
     with SessionLocal() as session:
         org_ids = list(session.scalars(select(Organization.id).order_by(Organization.id)))
+    # Starting at the same tenant after every job can starve later tenants if
+    # the first tenant has a continuous backlog. Rotate after each claim.
+    if _last_org_id is not None and org_ids:
+        pivot = bisect(org_ids, _last_org_id)
+        org_ids = org_ids[pivot:] + org_ids[:pivot]
     for org_id in org_ids:
         claim = claim_next(org_id, document_id)
         if claim is None:
             continue
+        _last_org_id = org_id
         if claim.attempts > MAX_EXTRACTION_ATTEMPTS:
             fail(
                 claim,
@@ -191,9 +212,17 @@ def process_one(
             return True
         try:
             data = object_store.get(claim.storage_key)
+            if (
+                len(data) != claim.size_bytes
+                or hashlib.sha256(data).hexdigest() != claim.content_hash
+            ):
+                fail(claim, "Stored document failed integrity check", retryable=False)
+                return True
             fields = provider.extract(data)
         except ExtractionError as exc:
             fail(claim, str(exc), retryable=False)
+        except StoredDocumentTooLarge:
+            fail(claim, "Stored document exceeds upload size limit", retryable=False)
         except (StorageError, ProviderUnavailable):
             fail(claim, "Storage or extraction provider was unavailable", retryable=True)
         except Exception:

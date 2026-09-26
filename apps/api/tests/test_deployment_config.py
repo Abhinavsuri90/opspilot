@@ -6,7 +6,7 @@ from pydantic import ValidationError
 
 from app.config import Settings
 from app.db import normalize_database_url
-from app.storage import S3ObjectStore
+from app.storage import S3ObjectStore, StoredDocumentTooLarge
 
 
 @pytest.mark.parametrize(
@@ -83,11 +83,67 @@ def test_deployment_requires_remote_storage_configuration() -> None:
         {"s3_endpoint_url": "http://s3mock:9090"},
         {"s3_secret_access_key": ""},
         {"web_origin": "http://localhost:3300"},
+        {"web_origin": "https://"},
+        {"web_origin": "https://example.test/path"},
+        {"web_origin": "https://example.test?next=bad"},
+        {"web_origin": "https://user@example.test"},
         {"database_url": "postgresql://opspilot_app:pass@localhost:5432/opspilot"},
         {"database_url": "postgresql://opspilot_owner:pass@db.internal:5432/opspilot"},
     ):
         with pytest.raises(ValidationError):
             Settings(_env_file=None, **(valid | changed))
+
+
+def test_s3_read_is_bounded_and_closes_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.limits import MAX_UPLOAD_BYTES
+
+    class FakeBody:
+        def __init__(self, data: bytes) -> None:
+            self.data = data
+            self.closed = False
+            self.read_size: int | None = None
+
+        def read(self, size: int) -> bytes:
+            self.read_size = size
+            return self.data[:size]
+
+        def close(self) -> None:
+            self.closed = True
+
+    class FakeClient:
+        def __init__(self, body: FakeBody, length: int | None = None) -> None:
+            self.body = body
+            self.length = length
+
+        def get_object(self, **kwargs: Any) -> dict[str, Any]:
+            response: dict[str, Any] = {"Body": self.body}
+            if self.length is not None:
+                response["ContentLength"] = self.length
+            return response
+
+    clients: list[FakeClient] = []
+
+    def fake_client(service_name: str, **kwargs: Any) -> FakeClient:
+        assert service_name == "s3"
+        return clients[-1]
+
+    monkeypatch.setattr("app.storage.boto3.client", fake_client)
+    good = FakeBody(b"small PDF")
+    clients.append(FakeClient(good))
+    assert S3ObjectStore().get("document") == b"small PDF"
+    assert good.read_size == MAX_UPLOAD_BYTES + 1 and good.closed
+
+    too_large = FakeBody(b"")
+    clients.append(FakeClient(too_large, MAX_UPLOAD_BYTES + 1))
+    with pytest.raises(StoredDocumentTooLarge, match="exceeds"):
+        S3ObjectStore().get("document")
+    assert too_large.read_size is None and too_large.closed
+
+    oversized_body = FakeBody(b"x" * (MAX_UPLOAD_BYTES + 1))
+    clients.append(FakeClient(oversized_body))
+    with pytest.raises(StoredDocumentTooLarge, match="exceeds"):
+        S3ObjectStore().get("document")
+    assert oversized_body.read_size == MAX_UPLOAD_BYTES + 1 and oversized_body.closed
 
 
 def test_iam_credentials_can_use_default_chain(monkeypatch: pytest.MonkeyPatch) -> None:
