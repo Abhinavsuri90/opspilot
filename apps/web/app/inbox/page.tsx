@@ -7,8 +7,7 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "@/lib/api";
 import { documentStatusLabel, isDocumentInProgress } from "@/lib/document-status";
 import { classifyRetryFailure } from "@/lib/retry";
-
-const MAX_PDF_SIZE = 10 * 1024 * 1024;
+import { validatePdfSelection } from "@/lib/upload";
 
 export default function InboxPage() {
   const router = useRouter();
@@ -25,6 +24,7 @@ export default function InboxPage() {
 
   const session = useQuery({
     queryKey: ["session"],
+    retry: false,
     queryFn: async () => {
       const result = await api.GET("/v1/auth/me");
       if (result.response.status === 401) throw new Error("Unauthorized");
@@ -34,7 +34,8 @@ export default function InboxPage() {
   });
 
   const documents = useQuery({
-    queryKey: ["documents"],
+    queryKey: ["documents", session.data?.org_id],
+    enabled: Boolean(session.data) && !session.isFetching && !session.isError,
     queryFn: async () => {
       const result = await api.GET("/v1/documents");
       if (result.response.status === 401) throw new Error("Unauthorized");
@@ -45,8 +46,8 @@ export default function InboxPage() {
   });
   const activeId = selectedId ?? documents.data?.[0]?.id;
   const detail = useQuery({
-    queryKey: ["document", activeId],
-    enabled: Boolean(activeId),
+    queryKey: ["document", activeId, session.data?.org_id],
+    enabled: Boolean(activeId) && Boolean(session.data) && !session.isFetching && !session.isError,
     queryFn: async () => {
       if (!activeId) throw new Error("No document selected");
       const result = await api.GET("/v1/documents/{document_id}", {
@@ -60,20 +61,18 @@ export default function InboxPage() {
   });
   useEffect(() => {
     if (session.error?.message === "Unauthorized" || documents.error?.message === "Unauthorized" || detail.error?.message === "Unauthorized") {
+      queryClient.clear();
       router.replace("/login");
     }
-  }, [session.error, documents.error, detail.error, router]);
+  }, [session.error, documents.error, detail.error, queryClient, router]);
 
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!file) return;
     setUploadMessage("");
-    if (!file.name.toLowerCase().endsWith(".pdf") || (file.type && file.type !== "application/pdf")) {
-      setError("Choose a PDF invoice.");
-      return;
-    }
-    if (file.size === 0 || file.size > MAX_PDF_SIZE) {
-      setError("Choose a PDF between 1 byte and 10 MB.");
+    const validationError = validatePdfSelection(file);
+    if (validationError) {
+      setError(validationError);
       return;
     }
     setUploading(true);
@@ -88,6 +87,7 @@ export default function InboxPage() {
         },
       });
       if (result.response.status === 401) {
+        queryClient.clear();
         router.replace("/login");
         return;
       }
@@ -96,7 +96,7 @@ export default function InboxPage() {
         setError(status === 403
           ? "Your account cannot upload invoices."
           : status === 409
-            ? "This workspace is not configured for invoice processing."
+            ? "This workspace cannot accept another invoice. Check its workflow configuration or document limit."
             : status === 400 || status === 413
               ? "The PDF could not be accepted. Use a text-layer PDF smaller than 10 MB."
               : "The upload service is temporarily unavailable. Please try again.");
@@ -126,6 +126,7 @@ export default function InboxPage() {
         params: { path: { document_id: id } },
       });
       if (result.response.status === 401) {
+        queryClient.clear();
         router.replace("/login");
         return;
       }
@@ -152,6 +153,22 @@ export default function InboxPage() {
     }
   }
 
+  const unauthorized = [session.error, documents.error, detail.error]
+    .some(queryError => queryError?.message === "Unauthorized");
+  if (unauthorized) {
+    return <main className="p-8 text-slate-500" role="status">Checking your session…</main>;
+  }
+  if (session.isError) {
+    return <main className="p-8">
+      <p role="alert">Could not load your workspace.</p>
+      <button type="button" onClick={() => session.refetch()} className="primary mt-4">Try again</button>
+    </main>;
+  }
+  if (session.isFetching || !session.data) {
+    return <main className="p-8 text-slate-500" role="status">Checking your session…</main>;
+  }
+  const canUpload = session.data.role === "admin" || session.data.role === "reviewer";
+
   return <main className="min-h-screen p-5 md:p-10">
     <div className="mx-auto max-w-6xl">
       <Link href="/dashboard" className="text-sm text-blue-700 hover:underline">← Dashboard</Link>
@@ -160,14 +177,14 @@ export default function InboxPage() {
         <h1 className="mt-2 text-3xl font-bold">Inbox</h1>
         <p className="mt-2 text-slate-600 dark:text-slate-300">Upload a text-layer PDF invoice to extract fields with evidence. Scanned PDFs need OCR, which is not yet available.</p>
       </div>
-      <form onSubmit={upload} className="card mb-7 flex flex-col gap-4 p-5 sm:flex-row sm:items-end">
+      {canUpload ? <form onSubmit={upload} className="card mb-7 flex flex-col gap-4 p-5 sm:flex-row sm:items-end">
         <div className="flex-1">
           <label htmlFor="invoice-file" className="mb-2 block text-sm font-semibold">Invoice PDF</label>
-          <input ref={fileInput} id="invoice-file" type="file" accept="application/pdf,.pdf" onChange={event => { setFile(event.target.files?.[0] ?? null); setError(""); }} className="field" />
+          <input ref={fileInput} id="invoice-file" type="file" accept="application/pdf,.pdf" disabled={uploading} onChange={event => { setFile(event.target.files?.[0] ?? null); setError(""); }} className="field" />
           <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">PDF only, up to 10 MB. <a href="/sample-invoice.pdf" download className="text-blue-700 underline dark:text-blue-300">Download sample invoice</a></p>
         </div>
         <button className="primary" disabled={!file || uploading} type="submit">{uploading ? "Uploading…" : "Upload invoice"}</button>
-      </form>
+      </form> : <p className="card mb-7 p-5 text-sm text-slate-600 dark:text-slate-300">Your workspace role can view invoices but cannot upload them.</p>}
       {error && <p role="alert" className="mb-5 rounded-lg bg-red-50 p-3 text-red-800">{error}</p>}
       {uploadMessage && <p role="status" className="mb-5 rounded-lg bg-green-50 p-3 text-green-900">{uploadMessage}</p>}
       {documents.isError && <p role="alert">Could not load documents. <button type="button" className="text-blue-700 underline dark:text-blue-300" onClick={() => documents.refetch()}>Try again</button></p>}

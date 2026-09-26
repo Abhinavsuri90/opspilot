@@ -29,9 +29,13 @@ export default function LoginPage() {
       if (result.error || !result.data) {
         setError(result.response.status === 401
           ? "Invalid organization, email, or password."
+          : result.response.status === 429
+            ? "Too many sign-in attempts. Please wait a few minutes before trying again."
           : "Sign in is temporarily unavailable. Please try again.");
         return;
       }
+      // A new login may belong to a different workspace. Discard cached documents first.
+      queryClient.clear();
       queryClient.setQueryData(["session"], result.data);
       router.replace("/dashboard");
     } catch {

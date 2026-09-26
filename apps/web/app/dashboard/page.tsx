@@ -15,6 +15,7 @@ export default function DashboardPage() {
   const [loggingOut, setLoggingOut] = useState(false);
   const session = useQuery({
     queryKey: ["session"],
+    retry: false,
     queryFn: async () => {
       const result = await api.GET("/v1/auth/me");
       if (result.response.status === 401) throw new Error("Unauthorized");
@@ -23,8 +24,11 @@ export default function DashboardPage() {
     },
   });
   useEffect(() => {
-    if (session.error?.message === "Unauthorized") router.replace("/login");
-  }, [session.error, router]);
+    if (session.error?.message === "Unauthorized") {
+      queryClient.clear();
+      router.replace("/login");
+    }
+  }, [session.error, queryClient, router]);
 
   async function signOut() {
     setLoggingOut(true);
@@ -43,10 +47,10 @@ export default function DashboardPage() {
   if (session.isError && session.error?.message !== "Unauthorized") {
     return <main className="p-8">
       <p role="alert">Could not load your workspace.</p>
-      <button onClick={() => session.refetch()} className="mt-4 primary">Try again</button>
+      <button type="button" onClick={() => session.refetch()} className="mt-4 primary">Try again</button>
     </main>;
   }
-  if (!session.data) return <div className="p-8 text-slate-500" role="status">Loading workspace…</div>;
+  if (session.isError || session.isFetching || !session.data) return <div className="p-8 text-slate-500" role="status">Loading workspace…</div>;
 
   return <div className="min-h-screen md:flex">
     <aside className="w-full border-b border-slate-200 bg-white p-5 md:min-h-screen md:w-64 md:border-b-0 md:border-r dark:bg-slate-900 dark:border-slate-700">
@@ -58,19 +62,19 @@ export default function DashboardPage() {
       </nav>
       <div className="mt-10 border-t border-slate-200 pt-5 text-sm dark:border-slate-700">
         <p className="font-semibold">{session.data.org_name}</p>
-        <p className="mt-1 text-slate-500">{session.data.email}</p>
-        <p className="mt-1 capitalize text-slate-500">{session.data.role}</p>
+        <p className="mt-1 text-slate-500 dark:text-slate-300">{session.data.email}</p>
+        <p className="mt-1 capitalize text-slate-500 dark:text-slate-300">{session.data.role}</p>
         {logoutError && <p role="alert" className="mt-4 text-red-700">{logoutError}</p>}
-        <button onClick={signOut} disabled={loggingOut} className="mt-4 text-blue-700 hover:underline dark:text-blue-300">{loggingOut ? "Signing out…" : "Sign out"}</button>
+        <button type="button" onClick={signOut} disabled={loggingOut} className="mt-4 text-blue-700 hover:underline dark:text-blue-300">{loggingOut ? "Signing out…" : "Sign out"}</button>
       </div>
     </aside>
     <main className="flex-1 p-6 md:p-10">
-      <div className="mb-8"><p className="text-sm font-semibold uppercase tracking-wider text-blue-700 dark:text-blue-300">Overview</p><h1 className="mt-2 text-3xl font-bold">Dashboard</h1><p className="mt-2 text-slate-500">Your document operations at a glance.</p></div>
+      <div className="mb-8"><p className="text-sm font-semibold uppercase tracking-wider text-blue-700 dark:text-blue-300">Overview</p><h1 className="mt-2 text-3xl font-bold">Dashboard</h1><p className="mt-2 text-slate-500 dark:text-slate-300">Your document operations at a glance.</p></div>
       <section className="card max-w-3xl p-8">
         <div className="mb-5 grid h-12 w-12 place-items-center rounded-xl bg-blue-50 text-2xl text-blue-800 dark:bg-slate-700">▣</div>
         <h2 className="text-xl font-semibold">Your workspace is ready</h2>
         <p className="mt-3 max-w-xl leading-7 text-slate-600 dark:text-slate-300">Upload a text-layer invoice to see tenant-isolated intake and evidence-backed field extraction. Human review and governed actions are still being built.</p>
-        <Link href="/inbox" className="mt-5 inline-block text-blue-700 hover:underline">Open inbox →</Link>
+        <Link href="/inbox" className="mt-5 inline-block text-blue-700 hover:underline dark:text-blue-300">Open inbox →</Link>
       </section>
     </main>
   </div>;
