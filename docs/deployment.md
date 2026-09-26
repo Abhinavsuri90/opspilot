@@ -1,58 +1,132 @@
-# Deploying OpsPilot
+# Deploy OpsPilot on Render
 
-**Status:** the Docker Compose workflow is verified locally. A public deployment has not been created or tested. Do not describe the app as production ready until the public URL, storage, worker, and browser workflow have been checked.
+This runbook prepares a real organization signup deployment without seeded accounts. The repository contains a [Render Blueprint](../render.yaml), but no hosted URL, Render database, or external bucket has been verified in this session. Successful local checks do not establish hosted reliability or model accuracy.
 
-## Choose a host
+## Services and release order
 
-| Option | Fit for the first public demo | Work left |
+| Component | Render service | Configuration |
 | --- | --- | --- |
-| [Railway](https://docs.railway.com/guides/docker-compose) | Recommended: web, private API and worker, Postgres, and an S3-compatible [Bucket](https://docs.railway.com/storage-buckets) in one project | Create services, secrets, and bucket; run migrations; verify public URL and spend |
-| [Render](https://render.com/docs/background-workers) | Viable web and background worker host | Add an external S3-compatible bucket and wire the services |
-| Single VM | Maximum control | Build a separate production Compose stack with TLS, backups, monitoring, patching, and no demo support services |
+| Website | Public web service | `infra/web.Dockerfile`; only public entry point |
+| API | Private service | `infra/api.Dockerfile`; restricted database role |
+| Extraction | Background worker | Same API image; `python -m app.worker` |
+| Database | Managed Render Postgres | Create before applying the Blueprint; same region as services |
+| PDFs | External private S3-compatible bucket | Cloudflare R2 or AWS S3; never a public invoice bucket |
 
-The repository's `docker-compose.yml` is **local development only**. It binds host ports to `127.0.0.1`, uses local demo secrets and S3Mock, and `make up` seeds fictional accounts. Do not publish those containers directly to the internet.
+The Blueprint places the three application services in Singapore. Pick another region before creation if appropriate, and place Postgres there too. Private services accept traffic from the private network; workers process jobs without accepting incoming connections. Our worker polls the Postgres outbox, so Redis is not needed. [Render private services](https://render.com/docs/private-services), [background workers](https://render.com/docs/background-workers).
 
-## Railway: first private demo
+The order is **database → migrations → private API and worker → web → hosted acceptance tests**. Automatic Git deploys are disabled in the Blueprint to keep that order explicit. Review the paid service and database estimate in Render before provisioning; the file does not create free substitutes for the private API or worker.
 
-The project owner needs to create or share a Railway project before these steps can be executed. The setup below uses Railway's dashboard; new services should not use legacy `railway.toml`/`railway.json`, which [Railway has deprecated for new projects](https://docs.railway.com/config-as-code).
+## 1. Create the database and bucket
 
-1. Connect the [GitHub repository](https://github.com/Abhinavsuri90/opspilot) to a Railway project. Leave each service's Root Directory at the default repository root: the Dockerfiles use paths under `apps/` and `infra/`, and the API image also copies `scripts/`. Set each service's Dockerfile Path explicitly (`infra/api.Dockerfile` or `infra/web.Dockerfile`). [Disable GitHub autodeploy](https://docs.railway.com/deployments/github-autodeploys) on the migration job and application services during the first rollout so the migration runs before the API and worker. When an ordered release process is in place, enable [Wait for CI](https://docs.railway.com/deployments/github-autodeploys) on the services that autodeploy from `main`.
-2. Add Railway Postgres and a Railway Storage Bucket. Enable [Postgres backups](https://docs.railway.com/guides/postgres-backups-restores) before public traffic. In the Postgres shell, run `SELECT current_user, rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user;`. Migration `0001` creates `opspilot_app` and needs `CREATEROLE`. Railway's default Postgres image likely permits this, but it has not been verified for this project.
-3. Generate a strong URL-safe `APP_DB_PASSWORD`, a strong `JWT_SECRET` (at least 32 characters), and a private `DEMO_PASSWORD` through Railway secrets. Do not paste them into GitHub, issues, chat, or committed files. Use a replacement OpenRouter key only after rotating the key previously shared in chat. Keep `LLM_PROVIDER=mock` for the first hosted smoke test. Reserve the web service's public domain before starting the API, so its exact `https://` origin can be set as `WEB_ORIGIN`.
-4. Create a **migration job** from `infra/api.Dockerfile` with no public domain and an owner-only `DATABASE_OWNER_URL` referencing Railway Postgres, plus `APP_DB_PASSWORD` and `DEMO_PASSWORD`. Use start command `sh -c 'alembic upgrade head && python /workspace/scripts/seed.py'`, set restart policy to Never, and keep GitHub autodeploy disabled. Deploy it manually from the intended commit and inspect a successful exit before starting the API and worker. This seed creates two fictional demo accounts. Later seed runs preserve existing passwords and roles unless `RESET_DEMO_CREDENTIALS=1` is explicitly set. Railway service deployments do not provide a migration gate merely because they share a repository; [Wait for CI alone does not order migrations](https://docs.railway.com/deployments/github-autodeploys).
-5. Create a private **API** service from `infra/api.Dockerfile`. Set `PORT=8000`, `ENVIRONMENT=staging`, `COOKIE_SECURE=true`, `WEB_ORIGIN` to the exact public web origin, and `JWT_SECRET`. Set `DATABASE_URL` to a `postgresql+psycopg://` URL for the restricted `opspilot_app` role, using Railway Postgres host, port, database, and the URL-safe `APP_DB_PASSWORD`. Configure the bucket variables below. Set `MAX_DOCUMENTS_PER_ORG` to a small demo cap (the default is 100). Do **not** give the API the owner database URL or an OpenRouter key. Use `/readyz` as the deployment health path. The image listens on Railway's `PORT` and runs as a nonroot user.
-6. Create a private **worker** service from `infra/api.Dockerfile` with start command `python -m app.worker`. Give it the same restricted DB and bucket settings, `ENVIRONMENT=staging`, `COOKIE_SECURE=true`, `WEB_ORIGIN`, `JWT_SECRET`, and `LLM_PROVIDER=mock`. Do not assign it a public domain. Keep the OpenRouter key only on this service when live extraction is enabled.
-7. Configure the public **web** service from `infra/web.Dockerfile`. Set `API_INTERNAL_URL=http://${{api.RAILWAY_PRIVATE_DOMAIN}}:8000`, substituting the actual API service reference shown in Railway. No API URL is embedded into the browser build. Give only the web service a public domain; use `/login` as its deployment health path. Set the API and worker `WEB_ORIGIN` to that domain's exact `https://` origin.
+Create a Render Postgres database named `opspilot` using PostgreSQL 16, in the selected region. Choose a paid database plan for persistent hosting and backup recovery. In **Connect**, find the external owner URL for the one-off migration and the internal host/database for runtime services. Temporarily allow only your own IP for external database access. Render provides separate internal and external URLs; services in the same account and region should use the internal URL. [Render Postgres connections](https://render.com/docs/postgresql-creating-connecting).
 
-For both API and worker, map the Railway Bucket's [reference variables](https://docs.railway.com/storage-buckets) to:
+The initial migration creates `opspilot_app`, a restricted database login. Check the owner connection before migration:
 
-| OpsPilot variable | Railway Bucket variable | Setting |
-| --- | --- | --- |
-| `S3_BUCKET` | `BUCKET` | Bucket name |
-| `S3_REGION` | `REGION` | Bucket region |
-| `S3_ENDPOINT_URL` | `ENDPOINT` | Full S3 endpoint |
-| `S3_ACCESS_KEY_ID` | `ACCESS_KEY_ID` | Secret reference |
-| `S3_SECRET_ACCESS_KEY` | `SECRET_ACCESS_KEY` | Secret reference |
-| `S3_ADDRESSING_STYLE` | Bucket Credentials tab | `virtual` for new Railway Buckets; older buckets may require `path`; local S3Mock uses `path` |
+```sql
+SELECT current_user, rolcreaterole
+FROM pg_roles
+WHERE rolname = current_user;
+```
 
-The migration job needs only the database owner URL and demo bootstrap secrets; it does not need bucket or model credentials. The API and worker must not receive `DATABASE_OWNER_URL`.
+`rolcreaterole` must be true, or the owner must otherwise have permission to create the application role. Stop and resolve permissions if the migration fails; assigning the owner credential to the API would bypass the intended isolation. Creating a role requires the corresponding Postgres privilege. [Postgres CREATE ROLE](https://www.postgresql.org/docs/17/sql-createrole.html). Directly created application roles are not Render-managed default credentials. [Render database credentials](https://render.com/docs/postgresql-credentials).
 
-## Release order and recovery
+Create a private bucket such as `opspilot-invoices-production`. For R2, create bucket-scoped credentials with object read/write permission. Copy the S3 endpoint, Access Key ID, and Secret Access Key into Render's secret inputs. Typical R2 settings are:
 
-For the first release, wait for the GitHub CI checks to pass on one commit. Deploy the migration job from that commit and confirm success, then deploy the API and worker, then the web service. Run the hosted browser smoke below before sharing the URL. Record the commit SHA and Railway deployment IDs; after the hosted check passes, create an annotated Git tag such as `demo-v0.1.0` on that exact commit. Keep application autodeploy disabled until the migration-first sequence is automated or every schema change has been reviewed for compatibility with the previous app image.
+```dotenv
+S3_BUCKET=opspilot-invoices-production
+S3_REGION=auto
+S3_ENDPOINT_URL=https://YOUR_ACCOUNT_ID.r2.cloudflarestorage.com
+S3_ADDRESSING_STYLE=path
+```
 
-Before a later schema migration, make a Postgres backup and verify the migration job's commit. If an app release fails, [Railway's Rollback action](https://docs.railway.com/deployments/deployment-actions) restores a previous image and its variables, subject to the plan's image retention period. It does **not** reverse database migrations or remove data written by the new version. Roll back the web, API, and worker to compatible versions, and restore the database only through an explicit, tested recovery plan. If the older image has expired, Railway's Redeploy action rebuilds from the selected deployment's source. Keep the Git tag and CI result as the long-lived release record.
+Use the endpoint actually shown for your bucket, including any jurisdiction-specific endpoint. Do not use a public `r2.dev` download URL as the S3 API endpoint. [Cloudflare R2 S3 API](https://developers.cloudflare.com/r2/api/), [R2 boto3 configuration](https://developers.cloudflare.com/r2/examples/aws/boto3/).
 
-The API release image installs versions from `infra/api-requirements.lock`. CI uses the same constraints and runs [pip-audit](https://github.com/pypa/pip-audit) against the pinned runtime set. Run `make lock-api` to resolve and write a new lock in a Python 3.12 Linux container, then run the audit, release-image build, backend tests, and browser smoke before releasing a dependency update. The lock pins versions but does not yet pin wheel hashes or the base-image digest.
+## 2. Run migrations once, with separate credentials
 
-## Verify the hosted app
+Use Docker Desktop on your computer, from the intended Git commit. Keep the migration inputs in a temporary file outside the repository; Docker reads the values without placing them in the command arguments. Generate a strong URL-safe `APP_DB_PASSWORD` in your password manager. Keep that value because the runtime database URL will use it.
 
-Use the public web URL in a browser. Sign in with the private demo password, download the fictional invoice from the Inbox, upload it, wait for `needs_review`, inspect the evidence, and sign out. Run the browser smoke against the public URL with `WEB_BASE_URL` and `DEMO_PASSWORD` supplied through your local environment. The browser smoke exercises `/api` through the web service, including cookies and PDF upload; the API can stay private.
+```bash
+cd /Users/abhinavsuri/Desktop/opspilot
+docker build --target runtime -f infra/api.Dockerfile -t opspilot-migrate .
+install -m 600 /dev/null /tmp/opspilot-render-migration.env
+open -e /tmp/opspilot-render-migration.env
+```
 
-Check the API, worker, and web logs for errors. Test one failed-document retry, restart the worker during a queued extraction, and confirm the job recovers. Record the URL, date, CI run, and outcome in `PROGRESS.md` only after these checks pass. Keep the model on `mock` until this infrastructure path is stable; then configure a **new** OpenRouter key only on the worker and run the live synthetic eval before making accuracy claims.
+In that local editor, enter these three names with your own values:
 
-Railway [healthchecks gate new deployments](https://docs.railway.com/deployments/healthchecks), but do not continuously monitor the worker or bucket. Add uptime/worker alerts and a pending-extraction-age check for anything beyond a private demo. Configure [usage alerts](https://docs.railway.com/pricing/cost-control); usage varies with always-on services, bucket storage, and model calls.
+```dotenv
+DATABASE_OWNER_URL=postgresql://RENDER_OWNER:OWNER_PASSWORD@EXTERNAL_DB_HOST/opspilot?sslmode=require
+APP_DB_PASSWORD=YOUR_GENERATED_URL_SAFE_PASSWORD
+ENVIRONMENT=development
+```
 
-## Single-VM path
+`ENVIRONMENT=development` here only lets the migration command import settings without runtime storage configuration. This container runs Alembic and exits; it does not run the web app. URL-encode special characters in database URL passwords, or use a URL-safe generated password. The actual database name may differ from `opspilot`; copy it from Render.
 
-The development Compose file is intentionally bound to localhost and includes services that should not be internet-facing. Before using a VM, create a separate production Compose stack with only web/API/worker, a managed or hardened Postgres and S3 bucket, a TLS reverse proxy, backups with a restore test, restricted firewall rules, non-demo credentials, and monitoring. This path remains unimplemented.
+```bash
+docker run --rm --env-file /tmp/opspilot-render-migration.env opspilot-migrate alembic upgrade head
+docker run --rm --env-file /tmp/opspilot-render-migration.env opspilot-migrate alembic current
+rm /tmp/opspilot-render-migration.env
+```
+
+Proceed after `alembic current` reports the repository's head revision. Do not run `scripts/seed.py` against the hosted database. Close external database access again after the migration; reopen your own IP temporarily for future migrations. A later migration uses the same separate process after a backup.
+
+## 3. Apply the application Blueprint
+
+In Render, choose **New → Blueprint**, connect this repository, and select the tested commit's branch and `render.yaml`. Leave the repository root as the Docker build context. The final API Docker stage is the nonroot runtime image.
+
+Supply these values when prompted:
+
+| Variable | Value and destination |
+| --- | --- |
+| `DATABASE_URL` | API: internal database URL with username **`opspilot_app`**, its generated password, and `?sslmode=require` |
+| `WEB_ORIGIN` | API: exact public HTTPS web origin, with no path or trailing slash |
+| `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT_URL` | API: private bucket settings above |
+| `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | API: private object credentials |
+| `LLM_PROVIDER` | Worker defaults to `rules` for supported labeled-text invoices; choose `openrouter` for model extraction after setting its credentials |
+
+For example, the runtime database URL has the shape `postgresql://opspilot_app:APP_PASSWORD@INTERNAL_DB_HOST/opspilot?sslmode=require`. Do not paste the Render owner connection string into this field. The application rejects a production database URL whose username is not `opspilot_app`.
+
+The Blueprint generates `JWT_SECRET` on the API and references the same value from the worker. It also copies API database/storage settings to the worker. `DATABASE_OWNER_URL` and `APP_DB_PASSWORD` belong only to the separate migration operation. The web service needs only the API's private address, which the Blueprint supplies automatically.
+
+If the final web hostname is unknown before the first deploy, enter your intended HTTPS origin, then replace it with the exact assigned `onrender.com` origin in the API settings once Render shows it. Sync/redeploy the worker to refresh its reference too. Finish this before trying signup. A mismatch returns a request-origin error. Changing to a custom domain later also requires updating this origin.
+
+Render prompts for `sync: false` variables on initial Blueprint creation only. New variables added to an existing Blueprint need to be entered manually; `sync: false` does not work inside environment groups. References refresh on Blueprint sync. [Render Blueprint environment variables](https://render.com/docs/blueprint-spec), [secrets configuration](https://render.com/docs/configure-environment-variables).
+
+## 4. Choose extraction mode
+
+`rules` runs a deterministic extractor for labeled text invoices without external model calls. Signup, persistence, permissions, review, and sharing all use the real application and database. For real model extraction, add a newly issued `OPENROUTER_API_KEY` and an available `OPENROUTER_MODEL` ID to **the worker only**, set its `LLM_PROVIDER=openrouter`, and redeploy it. Verify the model's current ID and support for the requested structured response on OpenRouter before choosing it; the repository default is not a measured best model. Revoke the key previously posted in chat before using a replacement.
+
+The live provider sends PDF text to the model service and can incur charges. Upload a fresh, fictional invoice and confirm its output before using private business invoices. Uploaded PDFs need selectable text; scanned images require OCR, which is not implemented. Invoice questions use stored, authorized invoice data; do not describe them as unlimited general-purpose AI chat.
+
+## 5. Verify the hosted application
+
+Render's private-service health probe is TCP only. The Blueprint therefore configures `/login` as the public web health path and does not pretend it can configure an HTTP `/readyz` probe for the private API. [Render health checks](https://render.com/docs/health-checks).
+
+After API startup, run this in the **API service's Render Shell**:
+
+```bash
+python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=5).read().decode())"
+```
+
+Expect `{"status":"ready"}`. The public Next.js `/api` proxy intentionally forwards only `/v1` routes, so `/api/readyz` is not a public health URL.
+
+In the public browser:
+
+1. Create a new organization and its admin account. Confirm Dashboard and Admin load with no seeded accounts.
+2. In a separate browser profile, request membership in that organization as a reviewer. Login must say approval is pending.
+3. In Admin, approve the applicant; sign in again in the applicant's profile. Confirm the role and visible documents are correct.
+4. Upload a new text-layer PDF. Wait for extraction, inspect the original PDF and evidence, categorize it, add a comment, and record a review decision with its reason where required.
+5. Ask for the amount and count awaiting review. Compare the answer with the visible authorized invoices and currencies.
+6. Exercise workspace and restricted sharing with a member account. Verify the user cannot retrieve an unshared invoice by URL or ID. Suspend the account in Admin and confirm its existing session loses access.
+7. Create a second organization; verify its invoices, members, categories, comments, and totals are isolated from the first organization.
+8. Restart the worker while an extraction is queued; verify it completes after the worker returns. Sign out and confirm protected pages require login.
+
+Record the actual public URL, Git SHA, date, extraction mode, and outcomes in the project handoff only after these checks pass. The old demo-account smoke script is not a substitute for this fresh signup acceptance flow.
+
+## Operations and later releases
+
+Keep GitHub checks passing on the exact release commit. Before a schema change, make and verify a database backup, run migrations with the owner-only process, then deploy API, worker, and web. Render supports a pre-deploy command, but this Blueprint deliberately keeps the owner credential out of runtime services; moving migrations into an automated pipeline needs a separate protected migration job. [Render deploy lifecycle](https://render.com/docs/deploys).
+
+An image rollback does not undo schema migrations or newly written invoices. Retain compatible release images and test database and object recovery. Configure spend alerts, web uptime checks, extraction backlog monitoring, and edge rate limits for signup/login before inviting a wider audience. The database signup throttle remains shared across all API instances, but a proxy's network address can represent many users.
+
+Email verification, self-service password recovery, a measured live-model evaluation, scanned-PDF OCR, and a verified hosted backup/restore remain deployment/product gaps. Hosting the services does not complete those workflows.

@@ -1,5 +1,7 @@
 # OpsPilot: Product & Technical Spec
 
+> Historical product roadmap. The current implemented scope is documented in [README.md](README.md) and [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md). Roadmap features below are not release claims.
+
 ## 1. What we're building
 
 OpsPilot is a **governed AI back-office agent** for small and mid-size businesses.

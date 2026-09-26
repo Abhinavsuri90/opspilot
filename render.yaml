@@ -1,0 +1,124 @@
+# First create Render Postgres and run owner-only migrations as described in
+# docs/deployment.md. Supply its INTERNAL URL with user opspilot_app below.
+# Applying this Blueprint provisions paid services; review Render's estimate.
+services:
+  - type: pserv
+    name: opspilot-api
+    runtime: docker
+    plan: 0.5c-512mb
+    region: singapore
+    dockerfilePath: ./infra/api.Dockerfile
+    dockerContext: .
+    autoDeployTrigger: "off"
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: ENVIRONMENT
+        value: production
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: JWT_SECRET
+        generateValue: true
+      - key: WEB_ORIGIN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: S3_BUCKET
+        sync: false
+      - key: S3_REGION
+        sync: false
+      - key: S3_ENDPOINT_URL
+        sync: false
+      - key: S3_ADDRESSING_STYLE
+        value: path
+      - key: S3_ACCESS_KEY_ID
+        sync: false
+      - key: S3_SECRET_ACCESS_KEY
+        sync: false
+      - key: MAX_DOCUMENTS_PER_ORG
+        value: "10000"
+
+  - type: worker
+    name: opspilot-worker
+    runtime: docker
+    plan: 0.5c-512mb
+    region: singapore
+    dockerfilePath: ./infra/api.Dockerfile
+    dockerContext: .
+    dockerCommand: python -m app.worker
+    autoDeployTrigger: "off"
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: JWT_SECRET
+        fromService:
+          type: pserv
+          name: opspilot-api
+          envVarKey: JWT_SECRET
+      - key: WEB_ORIGIN
+        fromService:
+          type: pserv
+          name: opspilot-api
+          envVarKey: WEB_ORIGIN
+      - key: DATABASE_URL
+        fromService:
+          type: pserv
+          name: opspilot-api
+          envVarKey: DATABASE_URL
+      - key: S3_BUCKET
+        fromService:
+          type: pserv
+          name: opspilot-api
+          envVarKey: S3_BUCKET
+      - key: S3_REGION
+        fromService:
+          type: pserv
+          name: opspilot-api
+          envVarKey: S3_REGION
+      - key: S3_ENDPOINT_URL
+        fromService:
+          type: pserv
+          name: opspilot-api
+          envVarKey: S3_ENDPOINT_URL
+      - key: S3_ADDRESSING_STYLE
+        fromService:
+          type: pserv
+          name: opspilot-api
+          envVarKey: S3_ADDRESSING_STYLE
+      - key: S3_ACCESS_KEY_ID
+        fromService:
+          type: pserv
+          name: opspilot-api
+          envVarKey: S3_ACCESS_KEY_ID
+      - key: S3_SECRET_ACCESS_KEY
+        fromService:
+          type: pserv
+          name: opspilot-api
+          envVarKey: S3_SECRET_ACCESS_KEY
+      # Choose rules for labeled text invoices or openrouter for model extraction.
+      # Add a rotated OPENROUTER_API_KEY and selected OPENROUTER_MODEL only to worker.
+      - key: LLM_PROVIDER
+        value: rules
+
+  - type: web
+    name: opspilot-web
+    runtime: docker
+    plan: 0.5c-512mb
+    region: singapore
+    dockerfilePath: ./infra/web.Dockerfile
+    dockerContext: .
+    # Render does not interpolate variables inside YAML values. The shell adds
+    # the HTTP scheme at process start; the browser still calls same-origin /api.
+    dockerCommand: sh -c 'export API_INTERNAL_URL="http://$API_PRIVATE_HOSTPORT"; exec node server.js'
+    healthCheckPath: /login
+    autoDeployTrigger: "off"
+    envVars:
+      - key: PORT
+        value: "10000"
+      - key: API_PRIVATE_HOSTPORT
+        fromService:
+          type: pserv
+          name: opspilot-api
+          property: hostport
