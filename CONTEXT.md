@@ -1,6 +1,6 @@
 # Current handoff
 
-Updated 2026-09-26 for the public landing and signup release. Implementation commit: `a8dfad5`; the following documentation commit records this handoff.
+Updated 2026-09-26 for the complete Oracle walkthrough and production VM files. Previous verified application release: `c92450d`; application implementation: `a8dfad5`. The Oracle configuration has been tested locally, but no Oracle resources have been provisioned by this work.
 
 ## Implemented
 
@@ -18,17 +18,27 @@ Final local verification: 80 Postgres API tests; Python lint and strict types; 1
 
 ## Deployment
 
-Owner chose a new Render project and will register/connect GitHub. render.yaml and docs/deployment.md define one public web service for all eight pages, a separate private API and background worker; create/migrate managed Postgres first and supply private S3/R2 credentials. The local application is running at http://localhost:3300 using rules extraction. No hosted URL/account connection or live OpenRouter evaluation has been verified. An earlier OpenRouter key was disclosed in chat; it was not used by this work. Require a rotated key in ignored local environment or Render worker secrets before live model tests.
+Owner reports completing the guide through Step 3: Render account/project setup and a Postgres database on the Free plan, with connection credentials saved privately. Region, database privileges and connectivity have not been independently verified. Storage, migrations and application deployment remain pending. The owner now explicitly requires free hosting and allows card verification, but no paid plan. Do not provision the existing Blueprint: its web/API/worker all use paid plans. Render Free Postgres expires after 30 days and has no backups.
+
+Recommended alternative, pending signup/capacity: Oracle Always Free A1 VM, self-managed PostgreSQL, private object storage and HTTPS ingress. Current official allowance is 2 OCPUs/12 GB, not the older 4/24 figure. Free capacity is not guaranteed; idle instances can be reclaimed; no uptime SLA. Production Compose is prepared below; hosted verification still depends on account capacity and credentials. Fallback is one combined Render Free web service plus Supabase Free Postgres/storage. It requires process supervision, bounded memory, restricted-role pooler support, S3 compatibility validation and disabling Supabase Data API. Render sleep stops the worker; do not promise identical availability. Continuous worker polling makes Neon compute-hour quotas a poor fit. Details and official sources are in docs/deployment.md.
+
+Oracle production Compose is now implemented in infra/oracle: separate Caddy/web/API/worker/Postgres, only TCP80/443 published, private database network, persistent data/TLS volumes, rotated Docker logs, container memory limits, owner-only migration profile, secure cookies and restricted runtime role. init_env.py generates private secrets without printing them and refuses overwrites; ops selects the production files; backup.sh writes a validated database archive; check_storage.py verifies a tiny synthetic PDF round trip once real credentials exist. No storage SDK change was needed: current OCI supports the pinned SDK's checksum trailers. ADR005 records the single-VM tradeoff.
+
+Oracle local verification: API/web production builds; Caddy config; fresh PostgreSQL16 migrations through0005; API/web/Caddy health; HTTPS homepage and organization registration through Caddy with Secure/HttpOnly cookie; authenticated proxy requests;403 wrong-origin and401 anonymous denials; restricted role has no superuser/BYPASSRLS; backup helper and restore into a separate database preserve schema and the synthetic organization. Private env creation/600 mode/no secret output/overwrite refusal, shell syntax and Python lint/format passed. TLS used a local test certificate; public CA issuance, actual OCI S3 and cloud firewall remain unverified. Existing application source was not changed.
+
+render.yaml retains the paid Render reference with one public web service for all eight pages, a separate private API and background worker. The local application is running at http://localhost:3300 using rules extraction. No hosted URL/account connection or live OpenRouter evaluation has been verified. An earlier OpenRouter key was disclosed in chat; it was not used by this work. Require a rotated key in ignored local environment or host worker secrets before live model tests. Rules extraction avoids model charges but only supports labeled text invoices.
 
 ## Exact next step
 
-Confirm the latest GitHub checks, then use docs/deployment.md with the user's new Render account: private database/bucket setup, owner-only migrations, Blueprint provisioning, secrets/origin, and hosted acceptance. All frontend routes deploy together; the API and worker have separate services. Do not seed the hosted database.
+The user requested the entire Oracle guide in chat. Follow docs/deployment.md from signup through compartment, manual public VCN, A1 Ubuntu24.04 ARM VM, SSH, DuckDNS, private bucket/scoped Customer Secret Key, Docker install, clone, private config helper, build/migrate/start, real storage/TLS/browser verification and backups. First confirm signup and actual A1 Running capacity in the home region, staying on Free Tier. Keep secrets on the VM or in a password manager. All eight pages deploy together. Do not seed the hosted database. Use the managed fallback if free VM capacity cannot be obtained.
 
 ## Important files
 
 - SYSTEM_DESIGN.md: current architecture, permissions, data model, failure handling, concurrency, latency targets and capacity assumptions.
 - README.md: local signup steps, pages, checks and limits.
-- docs/deployment.md and render.yaml: Render deployment procedure.
+- docs/deployment.md: free hosting comparison and paid Render reference; render.yaml: paid Render configuration.
+- infra/oracle/: production Compose, Caddy, private configuration setup, command wrapper, database backup and scoped storage check.
+- docs/adr/005-free-vm-deployment.md: free VM choice and operational tradeoffs.
 - apps/api/app/auth.py, onboarding.py, invoice_workflows.py: organization access and collaboration.
 - apps/web/components/InvoiceWorkspace.tsx: review/discussion/sharing UI.
 - apps/web/scripts/e2e-workspace.mjs: fresh company acceptance flow and small sequential latency smoke.
@@ -41,6 +51,6 @@ Start Docker Desktop, then `LLM_PROVIDER=rules OPENROUTER_API_KEY= make up`. Ope
 
 ## Remaining operational gates
 
-Render project/access, private storage, hosted acceptance test, fresh model key/model evaluation if enabled, email verification/password recovery, owner recovery/transfer, trusted edge abuse controls, hostile PDF isolation, backups/restore, alerts and measured production load. SPEC.md is the historical roadmap; it is not the release status. See docs/deployment-readiness-review.md.
+Free host signup/capacity, production host configuration, private storage, hosted acceptance test, fresh model key/model evaluation if enabled, email verification/password recovery, owner recovery/transfer, trusted edge abuse controls, hostile PDF isolation, backups/restore, alerts and measured production load. SPEC.md is the historical roadmap; it is not the release status. See docs/deployment-readiness-review.md.
 
 The old demo-guide.md was removed because README and SYSTEM_DESIGN now provide the maintained walkthrough and interview material. PROGRESS.md retains historical entries; read the newest entry first.

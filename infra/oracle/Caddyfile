@@ -1,0 +1,24 @@
+{
+	servers {
+		protocols h1 h2
+	}
+}
+
+{$OPSPILOT_DOMAIN} {
+	encode zstd gzip
+	# Match the web proxy's bounded multipart upload size.
+	request_body {
+		max_size 11MB
+	}
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		-Server
+	}
+	reverse_proxy web:3000 {
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 70s
+		}
+	}
+}

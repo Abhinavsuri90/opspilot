@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OPSPILOT_INFRA_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec docker compose \
+  --env-file "$OPSPILOT_INFRA_DIR/.env" \
+  -f "$OPSPILOT_INFRA_DIR/compose.yaml" "$@"

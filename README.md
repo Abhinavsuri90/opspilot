@@ -20,7 +20,7 @@ Built with Next.js, React, TanStack Query, FastAPI, Postgres row-level security 
 - SQL-backed questions about counts, totals, categories and extracted invoice fields with citations.
 - Restricted runtime database role, tenant RLS, optimistic versions and append-only history.
 
-Public deployment is not yet verified. [Render setup](docs/deployment.md) and [the system design](SYSTEM_DESIGN.md) explain the deployment path, operational limits and scaling choices.
+Public deployment is not yet verified. [Oracle Free Tier setup and the paid Render alternative](docs/deployment.md) and [the system design](SYSTEM_DESIGN.md) explain the deployment paths, operational limits and scaling choices.
 
 ## Start locally with your own organization
 
@@ -127,10 +127,10 @@ flowchart LR
 ```
 
 - [System design](SYSTEM_DESIGN.md): implemented architecture, data model, permissions, concurrency, recovery, latency targets and capacity calculations.
-- [Render deployment](docs/deployment.md): private API, public web, worker, managed Postgres and external S3/R2.
+- [Deployment](docs/deployment.md): Oracle VM with private API/worker/Postgres and OCI PDF storage; paid Render alternative.
 - [Architecture decisions](docs/adr/): tenant isolation, local storage, outbox and shared throttling.
 - [Product roadmap](SPEC.md): original broader vision; not a claim that all roadmap features exist.
 
-On Render, deploy all eight pages as the `opspilot-web` service. The API and extraction worker are separate services connected to Postgres and private PDF storage. The browser calls the web service's same-origin API proxy, so the private API does not need its own public domain. The [deployment guide](docs/deployment.md) explains the first release order and hosted checks.
+All eight pages deploy as one Next.js service. On Oracle, `infra/oracle/compose.yaml` adds Caddy HTTPS, separate private API/worker containers and persistent PostgreSQL. The browser uses the web service's same-origin API proxy; the API has no public port. The [deployment guide](docs/deployment.md) covers signup, free resource limits, private storage, migrations, backups and hosted checks. Oracle availability and hosted behavior remain to be verified. The existing Render Blueprint uses paid plans.
 
 Remaining work before an unrestricted public service includes account email verification/recovery, stronger public signup abuse controls, isolated hostile-PDF parsing, operational alerts, backup restore validation and a real deployed acceptance test. There is no SSO, payment execution, ERP connector or arbitrary conversational assistant in the current application.

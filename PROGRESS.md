@@ -1,5 +1,12 @@
 # Progress
 
+## 2026-09-26 — Oracle Free Tier deployment preparation
+
+- Owner requires $0 hosting; card verification is allowed, paid plans are not. Researched current official limits and selected Oracle A1 as the first option, subject to signup/capacity. Retained Render+Supabase as an unimplemented fallback with sleep/worker limitations. The existing paid Render Blueprint is explicitly marked unsuitable for this budget.
+- Added production Compose with Caddy HTTPS, private API/worker/Postgres, persistent volumes, bounded logs/memory and isolated migrations. Added private configuration generation, a consistent command wrapper, database backup helper and known-key S3 check. Runtime retains restricted database credentials; optional model secrets stay on the worker. Nested environment files are excluded from Docker builds.
+- Expanded the existing deployment guide with account/network/SSH/DNS/bucket/IAM setup, Docker install, exact startup and migration commands, hosted acceptance, backup/restore and maintenance. Updated README/system design and ADR005. All pages and application behavior are unchanged.
+- Verified production image builds, Caddy validation, migrations on isolated PostgreSQL16, local HTTPS signup/proxy/cookies and authorization error cases, restricted role privileges, backup and isolated restore, secret setup/overwrite protection, Python lint/format and shell syntax. No live model calls or Oracle credentials were used. Hosted capacity, public certificates, private bucket round trip and complete hosted invoice workflow remain to verify in the owner's account.
+
 ## 2026-09-26 — Public landing and organization entry flow
 
 - Added a public homepage with a responsive cream/teal design, clearly labeled product illustration, admin/member/reviewer entry cards, workflow guide, five workspace page explanations and accessible FAQ/navigation.

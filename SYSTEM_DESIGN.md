@@ -1,6 +1,6 @@
 # OpsPilot system design
 
-A multi-organization invoice review application. This document describes the implemented architecture and identifies proposed changes explicitly. Deployment instructions are in [the Render runbook](docs/deployment.md). Product scope and page walkthroughs are in [README.md](README.md).
+A multi-organization invoice review application. This document describes the implemented architecture and identifies proposed changes explicitly. Deployment instructions are in [the hosting runbook](docs/deployment.md). Product scope and page walkthroughs are in [README.md](README.md).
 
 ## 1. Problem and scope
 
@@ -349,7 +349,11 @@ API and worker connection pools must fit within the Postgres connection limit. I
 
 ## 9. Deployment and operations
 
-Render topology: public web service, private API service, background worker and managed Postgres in one region, with external private S3/R2 storage. The blueprint is [render.yaml](render.yaml). Database creation and owner-run migrations precede the Blueprint's application rollout. No seeded users are needed; visitors start at `/`, then create their first real organization through `/register?mode=create`.
+The current budget is $0. [Oracle Compose](infra/oracle/compose.yaml) runs Caddy, Next.js, API, worker and self-managed PostgreSQL on one Always Free VM, with a private OCI PDF bucket. Caddy alone publishes80/443. Separate Docker networks isolate database ingress; runtime API/worker credentials remain restricted. Named volumes preserve PostgreSQL and TLS state. Logs rotate and each container has a memory limit. A one-shot migration profile receives owner credentials. Configuration generation and database backup helpers live alongside the Compose file. See [ADR005](docs/adr/005-free-vm-deployment.md). Actual Oracle capacity, storage permissions, public TLS and hosted acceptance remain unverified.
+
+This VM preserves process separation but shares one failure domain. It has no high availability, automatic failover or guaranteed free capacity. Free-provider limits are documented in the runbook; the99.9% target above is not a measured guarantee for this topology. Backup files must be copied off the VM; PDFs and configuration require separate copies. Worker status must be verified by job progress, not merely a running process.
+
+Alternative paid Render topology: public web service, private API service, background worker and managed Postgres in one region, with external private S3/R2 storage. The blueprint is [render.yaml](render.yaml). Database creation and owner-run migrations precede the Blueprint's application rollout. No seeded users are needed; visitors start at `/`, then create their first real organization through `/register?mode=create`.
 
 The web service deploys the homepage, registration, login and all five workspace pages in one release. API and worker run separately so serving pages, handling requests and extracting PDFs have distinct process boundaries. All browser requests use the public web origin and its `/api` proxy; the API stays on Render's private network. The initial rollout order is database and private storage, owner-run migrations, API and worker, web, then a hosted acceptance run. A working homepage alone does not verify signup, database access or background extraction.
 
