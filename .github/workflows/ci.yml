@@ -18,6 +18,7 @@ jobs:
           --health-cmd "pg_isready -U opspilot_owner -d opspilot"
           --health-interval 3s --health-timeout 3s --health-retries 20
     env:
+      PYTHONPATH: ${{ github.workspace }}
       DATABASE_OWNER_URL: postgresql+psycopg://opspilot_owner:owner_ci_password@localhost:5432/opspilot
       DATABASE_URL: postgresql+psycopg://opspilot_app:app_ci_password@localhost:5432/opspilot
       APP_DB_PASSWORD: app_ci_password
