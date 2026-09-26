@@ -80,6 +80,8 @@ try {
   });
 
   await page.goto(`${baseURL}/login`);
+  await page.getByLabel("Organization").fill("northwind");
+  await page.getByLabel("Email").fill("northwind@example.com");
   await page.getByLabel("Password", { exact: true }).fill("mock-password");
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.getByRole("alert").getByText("Invalid organization, email, or password.").waitFor();

@@ -172,7 +172,7 @@ export default function InboxPage() {
       setSelectedId(result.data.id);
       setUploadMessage(result.data.duplicate
         ? "This invoice was already uploaded. Its existing result is open below."
-        : "Invoice uploaded. Extraction is in progress; the result will appear below.");
+        : "Invoice uploaded. Track its status and review the result below.");
       setFile(null);
       if (fileInput.current) fileInput.current.value = "";
       await queryClient.invalidateQueries({ queryKey: ["documents"] });

@@ -14,6 +14,8 @@ const browser = await chromium.launch({ executablePath, headless: true });
 try {
   const page = await browser.newPage();
   await page.goto(`${baseURL}/login`, { waitUntil: "networkidle" });
+  await page.getByLabel("Organization").fill("northwind");
+  await page.getByLabel("Email").fill("northwind@example.com");
   await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL(`${baseURL}/dashboard`);

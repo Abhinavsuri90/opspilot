@@ -1,4 +1,4 @@
-.PHONY: setup web-deps up down logs migrate seed test lint typecheck eval gen-client smoke smoke-ui smoke-tenants lock-api
+.PHONY: setup web-deps up demo down logs migrate seed test lint typecheck eval gen-client smoke smoke-ui smoke-tenants smoke-workspace lock-api
 
 setup:
 	@test -f .env || cp .env.example .env
@@ -13,8 +13,10 @@ up: setup
 	docker compose build
 	docker compose up -d postgres s3mock
 	$(MAKE) migrate
-	$(MAKE) seed
 	docker compose up -d --wait --wait-timeout 90 api worker web
+
+demo: up
+	$(MAKE) seed
 
 down:
 	docker compose down
@@ -56,3 +58,6 @@ smoke-ui: setup web-deps
 
 smoke-tenants: setup web-deps
 	cd apps/web && node --env-file=../../.env scripts/e2e-tenants.mjs
+
+smoke-workspace: setup web-deps
+	cd apps/web && node scripts/e2e-workspace.mjs
