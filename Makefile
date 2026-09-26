@@ -1,4 +1,4 @@
-.PHONY: setup web-deps up down logs migrate seed test lint typecheck eval gen-client smoke smoke-ui
+.PHONY: setup web-deps up down logs migrate seed test lint typecheck eval gen-client smoke smoke-ui lock-api
 
 setup:
 	@test -f .env || cp .env.example .env
@@ -6,9 +6,12 @@ setup:
 web-deps:
 	cd apps/web && npm ci --no-audit --no-fund
 
+lock-api:
+	sh infra/refresh-api-lock.sh
+
 up: setup
 	docker compose build
-	docker compose up -d postgres redis s3mock mailpit
+	docker compose up -d postgres s3mock
 	$(MAKE) migrate
 	$(MAKE) seed
 	docker compose up -d --wait --wait-timeout 90 api worker web

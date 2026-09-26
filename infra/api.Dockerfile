@@ -6,9 +6,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /workspace
 COPY apps/api/pyproject.toml /workspace/apps/api/pyproject.toml
-RUN python -c "import pathlib, subprocess, tomllib; p = tomllib.loads(pathlib.Path('/workspace/apps/api/pyproject.toml').read_text()); subprocess.check_call(['pip', 'install', '--no-cache-dir', 'setuptools>=75', 'wheel', *p['project']['dependencies']])"
+COPY infra/api-requirements.lock /workspace/infra/api-requirements.lock
+RUN pip install --no-cache-dir -r /workspace/infra/api-requirements.lock
 COPY apps/api/app /workspace/apps/api/app
-RUN pip install --no-deps --no-build-isolation -e /workspace/apps/api
+RUN pip install --no-deps --no-build-isolation -e /workspace/apps/api && pip check
 COPY apps/api/alembic /workspace/apps/api/alembic
 COPY apps/api/alembic.ini /workspace/apps/api/alembic.ini
 COPY scripts/__init__.py scripts/seed.py /workspace/scripts/
