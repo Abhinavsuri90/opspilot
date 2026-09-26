@@ -1,4 +1,5 @@
 import { chromium } from "playwright-core";
+import { fileURLToPath } from "node:url";
 
 const baseURL = process.env.WEB_BASE_URL ?? "http://localhost:3300";
 const password = process.env.DEMO_PASSWORD;
@@ -20,11 +21,22 @@ try {
   if (process.env.E2E_SCREENSHOT) {
     await page.screenshot({ path: process.env.E2E_SCREENSHOT, fullPage: true });
   }
+  await page.getByRole("link", { name: "Open inbox" }).click();
+  await page.waitForURL(`${baseURL}/inbox`);
+  const sample = fileURLToPath(new URL("../../../examples/northwind-invoice.pdf", import.meta.url));
+  await page.getByLabel("Invoice PDF").setInputFiles(sample);
+  await page.getByRole("button", { name: "Upload invoice" }).click();
+  await page.getByText("NW-2026-001", { exact: true }).waitFor({ timeout: 30000 });
+  if (process.env.E2E_INBOX_SCREENSHOT) {
+    await page.getByRole("region", { name: "Extraction result" }).screenshot({ path: process.env.E2E_INBOX_SCREENSHOT });
+  }
+  await page.getByRole("link", { name: /Dashboard/ }).click();
+  await page.waitForURL(`${baseURL}/dashboard`);
   await page.getByRole("button", { name: "Sign out" }).click();
   await page.waitForURL(`${baseURL}/login`);
   await page.goto(`${baseURL}/dashboard`);
   await page.waitForURL(`${baseURL}/login`);
-  console.log("Browser login, dashboard, and logout passed");
+  console.log("Browser login, invoice upload, extraction, and logout passed");
 } finally {
   await browser.close();
 }

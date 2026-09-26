@@ -1,6 +1,7 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
@@ -51,7 +52,9 @@ export default function DashboardPage() {
     <aside className="w-full border-b border-slate-200 bg-white p-5 md:min-h-screen md:w-64 md:border-b-0 md:border-r dark:bg-slate-900 dark:border-slate-700">
       <div className="mb-9 flex items-center gap-3"><span className="grid h-9 w-9 place-items-center rounded-lg bg-blue-900 text-white font-bold">O</span><strong className="text-xl">OpsPilot</strong></div>
       <nav aria-label="Main navigation" className="space-y-1">
-        {navigation.map(item => <span key={item} className={`nav-link ${item === "Dashboard" ? "active" : "opacity-60"}`}>{item}</span>)}
+        {navigation.map(item => item === "Dashboard" || item === "Inbox"
+          ? <Link key={item} href={item === "Dashboard" ? "/dashboard" : "/inbox"} className={`nav-link ${item === "Dashboard" ? "active" : ""}`}>{item}</Link>
+          : <span key={item} className="nav-link opacity-60">{item}</span>)}
       </nav>
       <div className="mt-10 border-t border-slate-200 pt-5 text-sm dark:border-slate-700">
         <p className="font-semibold">{session.data.org_name}</p>
@@ -66,7 +69,8 @@ export default function DashboardPage() {
       <section className="card max-w-3xl p-8">
         <div className="mb-5 grid h-12 w-12 place-items-center rounded-xl bg-blue-50 text-2xl text-blue-800 dark:bg-slate-700">▣</div>
         <h2 className="text-xl font-semibold">Your workspace is ready</h2>
-        <p className="mt-3 max-w-xl leading-7 text-slate-500">Document intake, extraction, review, and governed actions will appear here as they are built in the next phases. No activity has been recorded yet.</p>
+        <p className="mt-3 max-w-xl leading-7 text-slate-500">Upload a synthetic text-layer invoice to see tenant-isolated intake and deterministic field extraction. Human review and governed actions are still being built.</p>
+        <Link href="/inbox" className="mt-5 inline-block text-blue-700 hover:underline">Open inbox →</Link>
       </section>
     </main>
   </div>;
