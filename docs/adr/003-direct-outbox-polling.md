@@ -8,7 +8,7 @@ The target design uses a Postgres outbox dispatcher to publish committed jobs to
 
 ## Decision
 
-Write the document and outbox event in the same database transaction. A dedicated worker polls unpublished extraction events using the restricted app database role. It sets the tenant context for each organization, claims an event with row locking, and writes the extraction result and audit event before marking the outbox event complete. Failed storage or provider calls retry with a short delay; claims older than five minutes can be reclaimed.
+Write the document and outbox event in the same database transaction. A dedicated worker polls unpublished extraction events using the restricted app database role. It rotates its starting organization after each claim so one tenant's continuous backlog does not always precede another's. It sets the tenant context for each organization, claims an event with row locking, and writes the extraction result and audit event before marking the outbox event complete. Failed storage or provider calls retry with a short delay; claims older than five minutes can be reclaimed.
 
 ## Consequences
 

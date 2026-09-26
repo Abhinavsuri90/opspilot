@@ -72,6 +72,8 @@ docker compose run --rm -v "$PWD/evals/reports:/workspace/evals/reports" worker 
 
 The model ID is a starting choice because OpenRouter [lists it with structured JSON support](https://openrouter.ai/google/gemini-3.8-flash); the project has not benchmarked it against alternatives. The worker sends extracted PDF text to OpenRouter, so only send data you are authorized to share. Do not commit `.env` or paste keys into issues, commits, or chats.
 
+For a short walkthrough and honest interview talking points, use the [demo guide](docs/demo-guide.md).
+
 ## Current limits and design
 
 - Uploads accept PDFs up to 10 MB. Extraction currently accepts unencrypted PDFs with a text layer, up to 10 pages and 50,000 extracted characters. Scanned PDFs need OCR or a vision path. Failed documents can be retried from the Inbox. A per-organization document cap limits demo storage growth (`MAX_DOCUMENTS_PER_ORG`, default 100).

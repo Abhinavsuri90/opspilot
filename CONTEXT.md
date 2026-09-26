@@ -2,23 +2,52 @@
 
 ## Last updated
 
-2026-09-26. Check `git log -1 --oneline` for the latest commit.
+2026-09-26, after implementation commit `280b1d7`. Run `git log -1 --oneline` for the current documentation commit.
 
 ## Current status
 
-The local app supports authenticated, tenant-isolated PDF invoice intake, S3-compatible storage, a Postgres outbox worker, evidence-bearing extraction, and an inbox with failed-job retry. Browser requests use a same-origin web proxy to the private API. The worker defaults to a deterministic mock. OpenRouter is optional and has fake-HTTP contract coverage; no live model call has been made. The sample and 20-invoice eval set are fictional text-layer PDFs. Public staging, OCR, human review/approval, and actions are pending.
+OpsPilot is a local Phase 1 invoice intake/extraction prototype. Authenticated tenants upload text-layer PDFs through a Next.js web app and same-origin API proxy. FastAPI stores documents in S3-compatible storage and queues extraction through a Postgres outbox. The worker records four fields with page-level evidence; the Inbox displays results and permits two manual retries of a failed document. A Postgres login attempt counter and raw-upload limit guard the public demo path. OpenRouter is optional; live extraction accuracy has not been tested. Public staging and the review/approval/action phases are pending.
 
-## Next step
+The screenshot of failed CI commit `69ebf1b` is historical. Commit `45f4f3e` passed all three then-existing jobs. A new full-stack browser CI job and Python dependency audit have been added and need a green run on the current push before release.
 
-Obtain a Railway project link/access from the owner, then follow `docs/deployment.md`: provision Postgres and Bucket, run the migration/bootstrap job, deploy private API and worker plus public web, and run the browser smoke against its public URL. Keep the worker on mock until that path is verified. Rotate the OpenRouter key previously shared in chat; place a new key only in a secret environment, then run the live synthetic eval. Do not claim live model accuracy or production readiness until those checks pass.
+## Exact next step
 
-## Verification
+1. Push the current commits and confirm API, web, release-images, and browser-smoke jobs all pass on the same GitHub commit.
+2. Obtain the owner's Railway project link or invite. Follow [docs/deployment.md](docs/deployment.md): provision Postgres and Bucket, run migration/bootstrap first, deploy private API/worker and public web, then run the browser smoke against the public URL.
+3. Record the verified hosted URL, CI run, backup/restore status, and remaining limitations in `PROGRESS.md`. Keep `LLM_PROVIDER=mock` until the infrastructure demo is stable. Rotate the previously shared OpenRouter key before optional live-model evaluation; never send the replacement in chat or commit it.
 
-`make up`, backend Ruff/mypy/24 tests, frontend lint/typecheck/10 tests and production build, `make smoke`, `make smoke-ui` with a fresh invoice, and `make eval` passed locally on 2026-09-26. The nonroot release API image built and imported successfully. The mock eval reported 100% exact field match and 100% grounding on generated documents only. Production npm audit showed zero advisories at the time of review. Check GitHub CI after pushing the new commits.
+## Files in play
 
-## Environment and decisions
+- `apps/api/`: migration `0003`, login throttle, upload/storage/integrity limits, tenant-fair worker, and tests.
+- `apps/web/`: session-aware queries, upload validation and role UX, focus styles, and tests.
+- `.github/workflows/ci.yml`, `infra/`, `Makefile`: pinned release dependencies, audits, ordered local startup, and browser CI.
+- `docs/deployment.md`, `docs/deployment-readiness-review.md`, `docs/demo-guide.md`, `SYSTEM_DESIGN.md`, ADR 003/004: deployment and design evidence.
 
-- Local web: `http://localhost:3300`; API: `http://localhost:8000`; repository: https://github.com/Abhinavsuri90/opspilot.
-- `.env.example` lists variable names. `.env` is ignored. API and worker use the restricted `opspilot_app` database role; migrations use the owner role. The OpenRouter key is passed only to the worker.
-- Local storage uses Adobe S3Mock (ADR 002); the worker polls the Postgres outbox directly (ADR 003). Redis dispatch remains a target design. See `README.md`, `SYSTEM_DESIGN.md`, `SPEC.md`, `docs/deployment.md`, and `docs/deployment-readiness-review.md`.
-- On this Mac, if Docker Desktop's credential helper hangs during image pulls, set `DOCKER_CONFIG=/private/tmp/opspilot-docker-config` for Compose. This is a local workaround, not a repository requirement.
+## Decisions and deviations
+
+- The worker polls the transactional Postgres outbox directly before the planned Redis dispatcher ([ADR 003](docs/adr/003-direct-outbox-polling.md)). It rotates its starting tenant after each claim.
+- Login throttling uses a shared Postgres identity counter rather than process memory ([ADR 004](docs/adr/004-postgres-login-throttle.md)); an edge per-IP limit remains a deployment task.
+- Local storage uses Adobe S3Mock ([ADR 002](docs/adr/002-local-s3-emulator.md)). The target Railway deployment uses a private S3-compatible Bucket.
+- The current inbox is a holding state for human review; editing, approval, actions, OCR, confidence scoring, and the later `SPEC.md` phases are not implemented.
+
+## Environment
+
+- Local web: `http://localhost:3300`; local API: `http://localhost:8000`. Staging and production: no verified URLs. Repository: https://github.com/Abhinavsuri90/opspilot.
+- Required deployment variable **names** are listed in `.env.example` and the deployment runbook. Key names include `DATABASE_URL`, `DATABASE_OWNER_URL` (migration job only), `APP_DB_PASSWORD`, `JWT_SECRET`, `DEMO_PASSWORD`, `WEB_ORIGIN`, `API_INTERNAL_URL`, `S3_BUCKET`, `S3_REGION`, `S3_ENDPOINT_URL`, `S3_ADDRESSING_STYLE`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `LLM_PROVIDER`, and optional `OPENROUTER_API_KEY`/`OPENROUTER_MODEL` (worker only).
+- Local fictional accounts: `northwind@example.com` in `northwind` and `contoso@example.com` in `contoso`; passwords are supplied through the ignored `.env`. No Railway account or project access has been supplied in this session.
+
+## How to run and test
+
+Run `LLM_PROVIDER=mock OPENROUTER_API_KEY= make up`, then `make smoke`, `make smoke-ui`, and `make eval` with the same mock override. `make lint typecheck test` runs backend and frontend checks. `make down` stops local services. The current local verification passed: 29 API tests, 12 web tests, Ruff, strict mypy, web lint/typecheck/build, API and browser smokes, and synthetic mock evaluation. The release dependency audit and full npm audit reported no known advisories at review time.
+
+## Known issues and gotchas
+
+- A public URL, actual Railway Bucket, backup restore, alerts, and live OpenRouter call have not been verified. Do not claim production readiness or AI accuracy.
+- Login identity throttling can be used to cause a temporary lockout; use an edge per-IP limit/WAF before sharing a demo account widely. Document retention/deletion and real-customer privacy controls are still missing.
+- The worker accepts only unencrypted text-layer PDFs up to the documented limits. Scanned documents need OCR.
+- Docker Desktop on this Mac may need `DOCKER_CONFIG=/private/tmp/opspilot-docker-config` during image pulls if its credential helper hangs. Do not commit that local workaround.
+
+## Open questions for the owner
+
+- Which Railway project should host the first private public demo? Share a project URL or invite, not credentials.
+- Should the first hosted demo stay on deterministic mock extraction? This is recommended until the hosted browser workflow passes; live-model evaluation can follow with a rotated key stored only as a worker secret.

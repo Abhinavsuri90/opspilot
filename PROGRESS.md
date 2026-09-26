@@ -1,5 +1,14 @@
 # Progress
 
+## 2026-09-26 — Second deployment and security review
+
+- Confirmed that the failed GitHub notification for `69ebf1b` was historical; its Python import issue was fixed in `45f4f3e`, whose three CI jobs passed. Added a fourth, full browser smoke job for the next push.
+- Bounded raw API upload requests before multipart parsing, enforced bounded S3 reads and document hash/size checks in the worker, tightened production origin validation, added a shared Postgres login attempt limit and migration, and rotated worker tenant selection to avoid starvation.
+- Cleared browser query data across login/logout/session expiry, gated protected invoice queries on a valid session, aligned upload controls with role permissions, clarified upload/rate-limit errors, and improved keyboard focus visibility.
+- Pinned the Python 3.12 runtime dependency set, added `pip check` and `pip-audit` in CI, and added a Compose browser smoke job. The local runtime audit and the full frontend npm audit reported no known advisories at review time. The first run of the new CI job is pending this push.
+- Local checks passed after the fixes: 29 Postgres API tests, Ruff, strict mypy, 12 web tests, web lint/typecheck/build, the full Compose startup, API smoke, fresh-invoice browser smoke including retry/logout, and the synthetic mock eval. The mock eval's 100% exact match and grounding apply only to generated invoices, not live AI accuracy.
+- Public deployment remains unverified. A Railway project/access, Postgres and Bucket setup, migration-first rollout, hosted browser smoke, backups/alerts, and a rotated OpenRouter key for optional live-model testing remain the next work.
+
 ## 2026-09-26 — Deployment readiness and full local review
 
 - Reviewed the API, worker, web, Docker images, Compose startup, Railway options, and public demo path. Findings and remaining gates are in `docs/deployment-readiness-review.md`.
