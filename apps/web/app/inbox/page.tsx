@@ -193,14 +193,14 @@ export default function InboxPage() {
           <h2 className="mb-4 text-lg font-semibold">Recent documents</h2>
           {documents.isLoading && <p role="status">Loading documents…</p>}
           {documents.data?.length === 0 && <p className="text-slate-600 dark:text-slate-300">No documents yet. Download the sample invoice above, then upload it to try the workflow.</p>}
-          <div className="space-y-2">
+          <div className="max-h-[65vh] space-y-2 overflow-y-auto pr-1" aria-label="Document list">
             {documents.data?.map(item => <button key={item.id} type="button" aria-pressed={activeId === item.id} onClick={() => { setSelectedId(item.id); setUploadMessage(""); setRetryResult(null); }} className={`w-full rounded-lg border p-3 text-left hover:bg-blue-50 dark:hover:bg-slate-700 ${activeId === item.id ? "border-blue-500 dark:border-blue-400" : "border-slate-200 dark:border-slate-700"}`}>
               <span className="block font-semibold break-all">{item.filename}</span>
               <span className="mt-1 block text-sm text-slate-600 dark:text-slate-300">{documentStatusLabel(item.status)} · {new Date(item.created_at).toLocaleString()}</span>
             </button>)}
           </div>
         </section>
-        <section className="card p-5" aria-label="Extraction result">
+        <section className="card self-start p-5" aria-label="Extraction result">
           <h2 className="mb-4 text-lg font-semibold">Extraction result</h2>
           {!activeId && <p className="text-slate-600 dark:text-slate-300">Select a document to see its fields.</p>}
           {detail.isLoading && activeId && <p role="status">Loading result…</p>}

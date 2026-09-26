@@ -17,4 +17,17 @@ describe("login form validation", () => {
       password: "",
     }).success).toBe(false);
   });
+
+  it("normalizes organization and email as the API does", () => {
+    const parsed = loginSchema.parse({
+      org_slug: " Northwind ",
+      email: " Northwind@Example.com ",
+      password: "kept as typed",
+    });
+    expect(parsed).toEqual({
+      org_slug: "northwind",
+      email: "northwind@example.com",
+      password: "kept as typed",
+    });
+  });
 });

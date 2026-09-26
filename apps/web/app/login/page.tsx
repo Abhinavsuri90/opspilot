@@ -30,7 +30,7 @@ export default function LoginPage() {
         setError(result.response.status === 401
           ? "Invalid organization, email, or password."
           : result.response.status === 429
-            ? "Too many sign-in attempts. Please wait a few minutes before trying again."
+            ? "Too many sign-in attempts. Please wait 15 minutes before trying again."
           : "Sign in is temporarily unavailable. Please try again.");
         return;
       }

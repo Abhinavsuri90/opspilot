@@ -38,7 +38,7 @@ async function forward(request: NextRequest, context: RouteContext): Promise<Res
   }
 
   const headers = new Headers();
-  for (const name of ["accept", "content-type", "cookie", "origin", "x-request-id"]) {
+  for (const name of ["accept", "content-type", "cookie", "origin", "sec-fetch-site", "x-request-id"]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }

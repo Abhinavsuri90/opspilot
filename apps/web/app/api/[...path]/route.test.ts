@@ -44,7 +44,7 @@ describe("same-origin API proxy", () => {
     form.set("file", new File(["%PDF-1.4 sample"], "invoice.pdf", { type: "application/pdf" }));
     const request = new NextRequest("http://localhost:3300/api/v1/documents", {
       method: "POST",
-      headers: { origin: "http://localhost:3300" },
+      headers: { origin: "http://localhost:3300", "sec-fetch-site": "same-origin" },
       body: form,
     });
 
@@ -53,6 +53,7 @@ describe("same-origin API proxy", () => {
     const [, init] = fetchMock.mock.calls[0];
     expect(new Headers(init?.headers).get("content-type")).toContain("multipart/form-data; boundary=");
     expect(new Headers(init?.headers).get("origin")).toBe("http://localhost:3300");
+    expect(new Headers(init?.headers).get("sec-fetch-site")).toBe("same-origin");
     expect(Buffer.from(init?.body as ArrayBuffer).toString()).toContain("invoice.pdf");
     expect(response.status).toBe(202);
     expect(response.headers.get("set-cookie")).toContain("opspilot_session=token");
@@ -81,6 +82,42 @@ describe("same-origin API proxy", () => {
     const response = await POST(request, { params: Promise.resolve({ path: ["v1", "documents"] }) });
 
     expect(response.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("preserves the browser's cross-site signal so the API can reject a write", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 403 }));
+    const request = new NextRequest("http://localhost:3300/api/v1/auth/logout", {
+      method: "POST",
+      headers: { "sec-fetch-site": "cross-site" },
+    });
+
+    const response = await POST(request, { params: Promise.resolve({ path: ["v1", "auth", "logout"] }) });
+
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get("sec-fetch-site")).toBe("cross-site");
+    expect(response.status).toBe(403);
+  });
+
+  it("rejects an oversized streamed upload without Content-Length", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const request = new NextRequest("http://localhost:3300/api/v1/documents", {
+      method: "POST",
+      body: new Uint8Array(11 * 1024 * 1024 + 1),
+    });
+
+    const response = await POST(request, { params: Promise.resolve({ path: ["v1", "documents"] }) });
+
+    expect(response.status).toBe(413);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("does not forward paths outside the versioned API", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const request = new NextRequest("http://localhost:3300/api/private");
+
+    const response = await GET(request, { params: Promise.resolve({ path: ["private"] }) });
+
+    expect(response.status).toBe(404);
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

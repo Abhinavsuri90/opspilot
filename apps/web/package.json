@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:e2e": "node scripts/e2e-smoke.mjs",
+    "test:e2e:errors": "node scripts/e2e-errors.mjs",
     "gen-client": "node scripts/gen-client.mjs"
   },
   "dependencies": {
