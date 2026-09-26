@@ -92,6 +92,11 @@ jobs:
       - run: make smoke-ui
         env:
           PLAYWRIGHT_CHROME_PATH: /usr/bin/google-chrome
+      - run: npm run test:e2e:errors
+        working-directory: apps/web
+        env:
+          WEB_BASE_URL: http://localhost:3300
+          PLAYWRIGHT_CHROME_PATH: /usr/bin/google-chrome
       - name: Show service logs on failure
         if: failure()
         run: docker compose logs --tail=150 api worker web postgres s3mock
