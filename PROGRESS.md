@@ -1,5 +1,13 @@
 # Progress
 
+## 2026-09-26 — Deployment readiness and full local review
+
+- Reviewed the API, worker, web, Docker images, Compose startup, Railway options, and public demo path. Findings and remaining gates are in `docs/deployment-readiness-review.md`.
+- Fixed same-origin auth proxy, runtime API URL, Railway-compatible S3 addressing and Postgres URLs, schema-aware readiness, release image port/nonroot behavior, local-only support ports, ordered migration startup, worker lease races, invalid PDF intake, a document quota, and bounded manual retry.
+- Improved Inbox upload errors, hosted sample download, extraction polling, failed-job retry, and browser smoke so each run verifies a fresh extraction.
+- Local verification passed: backend Ruff/mypy/24 Postgres tests, frontend lint/typecheck/10 tests and production image build, API smoke, browser login/upload/extraction/retry/logout, release API image import as UID 10001, and synthetic mock eval. Production npm audit reported zero advisories at the time of review.
+- Public Railway deployment and live OpenRouter evaluation are still unverified. They need a Railway project, bucket, secrets, migration/bootstrap job, rotated model key, and public URL smoke test.
+
 ## 2026-09-26 — Local invoice extraction slice verified
 
 - Added text-layer PDF upload, S3-compatible storage, content-hash deduplication, tenant-scoped document and extraction tables, and a transactional outbox worker with retry and stale-claim recovery.

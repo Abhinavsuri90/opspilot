@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      - "${POSTGRES_HOST_PORT:-55432}:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-55432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -17,7 +17,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
 
   s3mock:
     image: adobe/s3mock:latest
@@ -28,21 +28,22 @@ services:
       COM_ADOBE_TESTING_S3MOCK_STORE_ROOT: /data
       COM_ADOBE_TESTING_S3MOCK_STORE_RETAIN_FILES_ON_EXIT: "true"
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - s3mock_data:/data
 
   mailpit:
     image: axllent/mailpit:latest
     ports:
-      - "8025:8025"
-      - "1025:1025"
+      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:1025:1025"
 
   api:
     image: opspilot-api:latest
     build:
       context: .
       dockerfile: infra/api.Dockerfile
+      target: development
     environment:
       DATABASE_URL: postgresql+psycopg://opspilot_app:${APP_DB_PASSWORD}@postgres:5432/${POSTGRES_DB}
       JWT_SECRET: ${JWT_SECRET}
@@ -52,17 +53,19 @@ services:
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://s3mock:9090}
       S3_BUCKET: ${S3_BUCKET:-documents}
       S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-local}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-local}
+      MAX_DOCUMENTS_PER_ORG: ${MAX_DOCUMENTS_PER_ORG:-100}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
       s3mock:
         condition: service_started
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"]
       interval: 5s
       retries: 10
 
@@ -78,11 +81,6 @@ services:
       WEB_ORIGIN: ${WEB_ORIGIN}
       COOKIE_SECURE: ${COOKIE_SECURE}
       ENVIRONMENT: ${ENVIRONMENT}
-      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://s3mock:9090}
-      S3_BUCKET: ${S3_BUCKET:-documents}
-      S3_REGION: ${S3_REGION:-us-east-1}
-      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-local}
-      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-local}
     depends_on:
       postgres:
         condition: service_healthy
@@ -100,6 +98,7 @@ services:
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://s3mock:9090}
       S3_BUCKET: ${S3_BUCKET:-documents}
       S3_REGION: ${S3_REGION:-us-east-1}
+      S3_ADDRESSING_STYLE: ${S3_ADDRESSING_STYLE:-path}
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-local}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-local}
       LLM_PROVIDER: ${LLM_PROVIDER:-mock}
@@ -115,15 +114,17 @@ services:
     build:
       context: .
       dockerfile: infra/web.Dockerfile
-      args:
-        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
     environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      API_INTERNAL_URL: ${API_INTERNAL_URL:-http://api:8000}
     ports:
-      - "${WEB_HOST_PORT:-3300}:3000"
+      - "127.0.0.1:${WEB_HOST_PORT:-3300}:3000"
     depends_on:
       api:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 5s
+      retries: 10
 
 volumes:
   postgres_data:

@@ -7,9 +7,11 @@ web-deps:
 	cd apps/web && npm ci --no-audit --no-fund
 
 up: setup
-	docker compose up --build -d
+	docker compose build
+	docker compose up -d postgres redis s3mock mailpit
 	$(MAKE) migrate
 	$(MAKE) seed
+	docker compose up -d --wait --wait-timeout 90 api worker web
 
 down:
 	docker compose down
@@ -47,4 +49,4 @@ smoke: setup
 	docker compose run --rm admin python /workspace/scripts/smoke_test.py http://api:8000
 
 smoke-ui: setup web-deps
-	@set -a; . ./.env; set +a; cd apps/web && npm run test:e2e
+	cd apps/web && node --env-file=../../.env scripts/e2e-smoke.mjs

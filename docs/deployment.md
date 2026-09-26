@@ -1,19 +1,50 @@
-# Deployment runbook (staging preparation)
+# Deploying OpsPilot
 
-Railway staging and the single-VM option are planned. Neither is verified yet.
+**Status:** the Docker Compose workflow is verified locally. A public deployment has not been created or tested. Do not describe the app as production ready until the public URL, storage, worker, and browser workflow have been checked.
 
-## Railway staging
+## Choose a host
 
-1. Create a Railway project with a Postgres 16 service. Set up a database owner credential for migrations and a restricted app credential from migration `0001`. The migration requires `CREATEROLE` privileges to create `opspilot_app`; use an administrative connection for the initial migration.
-2. Provision an S3-compatible bucket and give the API and worker only the object permissions they need. Set `S3_BUCKET`, `S3_REGION`, `S3_ACCESS_KEY_ID`, and `S3_SECRET_ACCESS_KEY` on those services. Set `S3_ENDPOINT_URL` for an S3-compatible provider; leave it unset for AWS S3. Confirm upload and download behavior against this bucket before calling staging verified.
-3. Create an API service from `infra/api.Dockerfile`. Set only the restricted `DATABASE_URL`, `JWT_SECRET`, `WEB_ORIGIN`, `COOKIE_SECURE=true`, `ENVIRONMENT=staging`, and the storage variables. Do not use the local development values. The API service must not receive the owner database URL or a model API key.
-4. Run `alembic upgrade head` as a one-off job with `DATABASE_OWNER_URL` and `APP_DB_PASSWORD`, then run `python /workspace/scripts/seed.py` only for a private staging environment. Keep owner credentials scoped to these one-off jobs.
-5. Create a worker service from the same API image with command `python -m app.worker`, the restricted `DATABASE_URL`, and the storage variables. Set `LLM_PROVIDER=mock` for initial staging. For real extraction, supply a new `OPENROUTER_API_KEY` through Railway secrets, set `LLM_PROVIDER=openrouter`, and choose `OPENROUTER_MODEL`; do not give the key to the API or web service.
-6. Create a web service from `infra/web.Dockerfile`. Set build arg and runtime `NEXT_PUBLIC_API_BASE_URL` to the public API URL. Set `WEB_ORIGIN` on the API to the public web URL.
-7. Verify `/healthz`, `/readyz`, login, and `/v1/auth/me` with `scripts/smoke_test.py`. Also upload a fictional text-layer invoice and verify it reaches `needs_review` with evidence. Record the URLs and date in `CONTEXT.md` and `PROGRESS.md` after the checks actually pass.
+| Option | Fit for the first public demo | Work left |
+| --- | --- | --- |
+| [Railway](https://docs.railway.com/guides/docker-compose) | Recommended: web, private API and worker, Postgres, and an S3-compatible [Bucket](https://docs.railway.com/storage-buckets) in one project | Create services, secrets, and bucket; run migrations; verify public URL and spend |
+| [Render](https://render.com/docs/background-workers) | Viable web and background worker host | Add an external S3-compatible bucket and wire the services |
+| Single VM | Maximum control | Build a separate production Compose stack with TLS, backups, monitoring, patching, and no demo support services |
 
-The API image currently includes test dependencies and owner tooling. Split migration into a separate release image before production. Compose already keeps owner credentials out of the normal API and worker processes. The local direct outbox polling design is documented in [ADR 003](adr/003-direct-outbox-polling.md); add scaling and operational safeguards before production.
+The repository's `docker-compose.yml` is **local development only**. It binds host ports to `127.0.0.1`, uses local demo secrets and S3Mock, and `make up` seeds fictional accounts. Do not publish those containers directly to the internet.
 
-## Single-VM option
+## Railway: first private demo
 
-Install Docker Engine and Compose, put environment variables in a secret file outside the repository, and run the Compose services behind a reverse proxy such as Caddy with HTTPS. Replace development passwords, restrict database and infrastructure ports to localhost or a private network, then run `make migrate`, `make seed` only for a demo environment, and the smoke test. A complete customer-hosted runbook will be written before go-live.
+The project owner needs to create or share a Railway project before these steps can be executed. The setup below uses Railway's dashboard; new services should not use legacy `railway.toml`/`railway.json`, which [Railway has deprecated for new projects](https://docs.railway.com/config-as-code).
+
+1. Connect the [GitHub repository](https://github.com/Abhinavsuri90/opspilot) to a Railway project. Leave each service's Root Directory at the default repository root: both Dockerfiles copy files from `apps/`, `scripts/`, and `examples/`. Enable [Wait for CI](https://docs.railway.com/deployments/github-autodeploys) before later automatic deployments.
+2. Add Railway Postgres and a Railway Storage Bucket. Enable [Postgres backups](https://docs.railway.com/guides/postgres-backups-restores) before public traffic. In the Postgres shell, run `SELECT current_user, rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user;`. Migration `0001` creates `opspilot_app` and needs `CREATEROLE`. Railway's default Postgres image likely permits this, but it has not been verified for this project.
+3. Generate a strong URL-safe `APP_DB_PASSWORD`, a strong `JWT_SECRET` (at least 32 characters), and a private `DEMO_PASSWORD` through Railway secrets. Do not paste them into GitHub, issues, chat, or committed files. Use a replacement OpenRouter key only after rotating the key previously shared in chat. Keep `LLM_PROVIDER=mock` for the first hosted smoke test.
+4. Create a **migration job** from `infra/api.Dockerfile` with no public domain and an owner-only `DATABASE_OWNER_URL` referencing Railway Postgres, plus `APP_DB_PASSWORD` and `DEMO_PASSWORD`. Use start command `sh -c 'alembic upgrade head && python /workspace/scripts/seed.py'`, set restart policy to Never, deploy it once, and inspect a successful exit. This seed creates two fictional demo accounts. Later seed runs preserve existing passwords and roles unless `RESET_DEMO_CREDENTIALS=1` is explicitly set. For future schema changes, run the migration job before deploying the API and worker; Railway's GitHub service deployments are [independent](https://docs.railway.com/deployments/deployment-actions).
+5. Create a private **API** service from `infra/api.Dockerfile`. Set `PORT=8000`, `ENVIRONMENT=staging`, `COOKIE_SECURE=true`, `WEB_ORIGIN` to the exact public web origin, and `JWT_SECRET`. Set `DATABASE_URL` to a `postgresql+psycopg://` URL for the restricted `opspilot_app` role, using Railway Postgres host, port, database, and the URL-safe `APP_DB_PASSWORD`. Configure the bucket variables below. Set `MAX_DOCUMENTS_PER_ORG` to a small demo cap (the default is 100). Do **not** give the API the owner database URL or an OpenRouter key. Use `/readyz` as the deployment health path. The image listens on Railway's `PORT` and runs as a nonroot user.
+6. Create a private **worker** service from `infra/api.Dockerfile` with start command `python -m app.worker`. Give it the same restricted DB and bucket settings, `ENVIRONMENT=staging`, `COOKIE_SECURE=true`, `WEB_ORIGIN`, `JWT_SECRET`, and `LLM_PROVIDER=mock`. Do not assign it a public domain. Keep the OpenRouter key only on this service when live extraction is enabled.
+7. Create the public **web** service from `infra/web.Dockerfile`. Set `API_INTERNAL_URL=http://${{api.RAILWAY_PRIVATE_DOMAIN}}:8000`, substituting the actual API service reference shown in Railway. No API URL is embedded into the browser build. Give only the web service a public domain; use `/login` as its deployment health path. Update the API and worker `WEB_ORIGIN` to that domain's exact `https://` origin.
+
+For both API and worker, map the Railway Bucket's [reference variables](https://docs.railway.com/storage-buckets) to:
+
+| OpsPilot variable | Railway Bucket variable | Setting |
+| --- | --- | --- |
+| `S3_BUCKET` | `BUCKET` | Bucket name |
+| `S3_REGION` | `REGION` | Bucket region |
+| `S3_ENDPOINT_URL` | `ENDPOINT` | Full S3 endpoint |
+| `S3_ACCESS_KEY_ID` | `ACCESS_KEY_ID` | Secret reference |
+| `S3_SECRET_ACCESS_KEY` | `SECRET_ACCESS_KEY` | Secret reference |
+| `S3_ADDRESSING_STYLE` | Bucket Credentials tab | `virtual` for new Railway Buckets; older buckets may require `path`; local S3Mock uses `path` |
+
+The migration job needs only the database owner URL and demo bootstrap secrets; it does not need bucket or model credentials. The API and worker must not receive `DATABASE_OWNER_URL`.
+
+## Verify the hosted app
+
+Use the public web URL in a browser. Sign in with the private demo password, download the fictional invoice from the Inbox, upload it, wait for `needs_review`, inspect the evidence, and sign out. Run the browser smoke against the public URL with `WEB_BASE_URL` and `DEMO_PASSWORD` supplied through your local environment. The browser smoke exercises `/api` through the web service, including cookies and PDF upload; the API can stay private.
+
+Check the API, worker, and web logs for errors. Test one failed-document retry, restart the worker during a queued extraction, and confirm the job recovers. Record the URL, date, CI run, and outcome in `PROGRESS.md` only after these checks pass. Keep the model on `mock` until this infrastructure path is stable; then configure a **new** OpenRouter key only on the worker and run the live synthetic eval before making accuracy claims.
+
+Railway [healthchecks gate new deployments](https://docs.railway.com/deployments/healthchecks), but do not continuously monitor the worker or bucket. Add uptime/worker alerts and a pending-extraction-age check for anything beyond a private demo. Configure [usage alerts](https://docs.railway.com/pricing/cost-control); usage varies with always-on services, bucket storage, and model calls.
+
+## Single-VM path
+
+The development Compose file is intentionally bound to localhost and includes services that should not be internet-facing. Before using a VM, create a separate production Compose stack with only web/API/worker, a managed or hardened Postgres and S3 bucket, a TLS reverse proxy, backups with a restore test, restricted firewall rules, non-demo credentials, and monitoring. This path remains unimplemented.

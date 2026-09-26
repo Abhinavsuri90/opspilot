@@ -9,7 +9,7 @@
 | Area | Current status |
 | --- | --- |
 | Auth, memberships, tenant isolation, audit | Working locally; Postgres integration tests |
-| PDF upload, object storage, durable outbox, worker | Working locally; browser smoke test |
+| PDF upload, object storage, durable outbox, worker, failed-job retry | Working locally; browser smoke test |
 | Extraction provider | Deterministic local mock by default; optional OpenRouter adapter tested with a fake HTTP response |
 | Evaluation | 20 generated text-layer invoices; mock baseline in CI; live model run available locally |
 | Human review, approval, actions, scanned PDFs | Planned |
@@ -17,7 +17,8 @@
 
 ```mermaid
 flowchart LR
-  W[Next.js inbox] --> A[FastAPI API]
+  B[Browser] --> W[Next.js inbox and /api proxy]
+  W --> A[Private FastAPI API]
   A --> S[(S3-compatible storage)]
   A --> P[(Postgres with tenant RLS)]
   P --> O[Transactional outbox]
@@ -35,7 +36,7 @@ Docker Desktop and Docker Compose are required. Node.js 22 and npm are required 
 make up
 ```
 
-Open `http://localhost:3300`. Sign in to organization `northwind` as `northwind@example.com` with `DEMO_PASSWORD` from your local `.env`. Open **Inbox** and upload [the fictional sample invoice](examples/northwind-invoice.pdf). The API is at `http://localhost:8000`, with OpenAPI docs at `/docs`.
+Open `http://localhost:3300`. Sign in to organization `northwind` as `northwind@example.com` with `DEMO_PASSWORD` from your local `.env`. Open **Inbox**, download the fictional sample invoice from the page, and upload it. The browser uses the web service's same-origin `/api` proxy; the local API is also available at `http://localhost:8000`, with OpenAPI docs at `/docs`.
 
 ```sh
 make lint typecheck test
@@ -45,7 +46,7 @@ make eval
 make down
 ```
 
-`make up` creates `.env` from `.env.example` when needed, builds the services, migrates the database, and seeds fictional accounts. `make eval` writes a timestamped JSON and Markdown report to `evals/reports/` (ignored by Git). The CI mock baseline exercises the generated invoices and parser. It is **not** a measurement of AI accuracy on real invoices.
+`make up` creates `.env` from `.env.example` when needed, builds the services, starts local infrastructure, migrates the database, seeds fictional accounts, and waits for the web and API health checks. `make eval` writes a timestamped JSON and Markdown report to `evals/reports/` (ignored by Git). The CI mock baseline exercises the generated invoices and parser. It is **not** a measurement of AI accuracy on real invoices. `make smoke-ui` uses an installed Chrome by default; set `PLAYWRIGHT_CHROME_PATH` to another Chromium executable if needed.
 
 ## Optional OpenRouter extraction
 
@@ -73,7 +74,7 @@ The model ID is a starting choice because OpenRouter [lists it with structured J
 
 ## Current limits and design
 
-- Uploads accept PDFs up to 10 MB. Extraction currently accepts unencrypted PDFs with a text layer, up to 10 pages and 50,000 extracted characters. Scanned PDFs need OCR or a vision path.
+- Uploads accept PDFs up to 10 MB. Extraction currently accepts unencrypted PDFs with a text layer, up to 10 pages and 50,000 extracted characters. Scanned PDFs need OCR or a vision path. Failed documents can be retried from the Inbox. A per-organization document cap limits demo storage growth (`MAX_DOCUMENTS_PER_ORG`, default 100).
 - The worker polls the Postgres outbox directly. This provides a durable first slice; Redis queue dispatch, richer state transitions, provider routing, confidence scoring, review edits, and actions remain to be built. See [ADR 003](docs/adr/003-direct-outbox-polling.md).
 - Application database access uses a restricted role plus Postgres row-level security. Migrations and seeding use a separate owner connection. Local storage is Adobe S3Mock; deployments should use S3 or R2.
-- Staging and production are not deployed or verified. See the [deployment runbook](docs/deployment.md) and [system design](SYSTEM_DESIGN.md). The full roadmap is in [SPEC.md](SPEC.md).
+- Staging and production are not deployed or verified. The [deployment runbook](docs/deployment.md) recommends Railway for the first private demo and lists the exact service, secret, bucket, and smoke-test setup. The [readiness review](docs/deployment-readiness-review.md) records the problems fixed and the remaining gates. The target architecture is in [SYSTEM_DESIGN.md](SYSTEM_DESIGN.md), and the full roadmap is in [SPEC.md](SPEC.md).
