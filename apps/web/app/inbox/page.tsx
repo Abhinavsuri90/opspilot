@@ -1,18 +1,39 @@
 "use client";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { AppShell } from "@/components/AppShell";
 import { api } from "@/lib/api";
 import { documentStatusLabel, isDocumentInProgress } from "@/lib/document-status";
 import { classifyRetryFailure } from "@/lib/retry";
 import { validatePdfSelection } from "@/lib/upload";
 
+type StatusFilter = "all" | "in_progress" | "needs_review" | "failed";
+
+const statusFilters: { value: StatusFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "in_progress", label: "In progress" },
+  { value: "needs_review", label: "Needs review" },
+  { value: "failed", label: "Failed" },
+];
+
+function StatusBadge({ status }: { status: string }) {
+  const tone = status === "needs_review"
+    ? "border-amber-200 bg-amber-50 text-amber-800"
+    : status === "failed"
+      ? "border-rose-200 bg-rose-50 text-rose-700"
+      : "border-blue-200 bg-blue-50 text-blue-700";
+  return <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-bold capitalize ${tone}`}>
+    <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />{documentStatusLabel(status)}
+  </span>;
+}
+
 export default function InboxPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
   const fileInput = useRef<HTMLInputElement>(null);
+  const deepLinkApplied = useRef(false);
   const [file, setFile] = useState<File | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -21,6 +42,9 @@ export default function InboxPage() {
   const [retryingId, setRetryingId] = useState<string | null>(null);
   const [retryResult, setRetryResult] = useState<{ id: string; error: boolean; message: string } | null>(null);
   const [exhaustedRetryIds, setExhaustedRetryIds] = useState<Set<string>>(() => new Set());
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [dragging, setDragging] = useState(false);
 
   const session = useQuery({
     queryKey: ["session"],
@@ -35,7 +59,7 @@ export default function InboxPage() {
 
   const documents = useQuery({
     queryKey: ["documents", session.data?.org_id],
-    enabled: Boolean(session.data) && !session.isFetching && !session.isError,
+    enabled: Boolean(session.data) && !session.isError,
     queryFn: async () => {
       const result = await api.GET("/v1/documents");
       if (result.response.status === 401) throw new Error("Unauthorized");
@@ -47,7 +71,7 @@ export default function InboxPage() {
   const activeId = selectedId ?? documents.data?.[0]?.id;
   const detail = useQuery({
     queryKey: ["document", activeId, session.data?.org_id],
-    enabled: Boolean(activeId) && Boolean(session.data) && !session.isFetching && !session.isError,
+    enabled: Boolean(activeId) && Boolean(session.data) && !session.isError,
     queryFn: async () => {
       if (!activeId) throw new Error("No document selected");
       const result = await api.GET("/v1/documents/{document_id}", {
@@ -65,6 +89,40 @@ export default function InboxPage() {
       router.replace("/login");
     }
   }, [session.error, documents.error, detail.error, queryClient, router]);
+
+  useEffect(() => {
+    if (deepLinkApplied.current) return;
+    const requestedId = new URLSearchParams(window.location.search).get("document");
+    if (requestedId && documents.data?.some(item => item.id === requestedId)) {
+      setSelectedId(requestedId);
+      deepLinkApplied.current = true;
+    }
+  }, [documents.data]);
+
+  const visibleDocuments = useMemo(() => (documents.data ?? []).filter(item => {
+    const matchesSearch = item.filename.toLowerCase().includes(search.trim().toLowerCase());
+    const matchesStatus = statusFilter === "all"
+      || (statusFilter === "in_progress" && isDocumentInProgress(item.status))
+      || item.status === statusFilter;
+    return matchesSearch && matchesStatus;
+  }), [documents.data, search, statusFilter]);
+
+  const counts = useMemo(() => ({
+    total: documents.data?.length ?? 0,
+    inProgress: documents.data?.filter(item => isDocumentInProgress(item.status)).length ?? 0,
+    needsReview: documents.data?.filter(item => item.status === "needs_review").length ?? 0,
+    failed: documents.data?.filter(item => item.status === "failed").length ?? 0,
+  }), [documents.data]);
+
+  function acceptDroppedFile(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setDragging(false);
+    if (!event.dataTransfer.files.length) return;
+    const selected = event.dataTransfer.files[0];
+    setFile(selected);
+    setError("");
+    if (fileInput.current) fileInput.current.value = "";
+  }
 
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -164,65 +222,89 @@ export default function InboxPage() {
       <button type="button" onClick={() => session.refetch()} className="primary mt-4">Try again</button>
     </main>;
   }
-  if (session.isFetching || !session.data) {
+  if (session.isPending || !session.data) {
     return <main className="p-8 text-slate-500" role="status">Checking your session…</main>;
   }
   const canUpload = session.data.role === "admin" || session.data.role === "reviewer";
 
-  return <main className="min-h-screen p-5 md:p-10">
-    <div className="mx-auto max-w-6xl">
-      <Link href="/dashboard" className="text-sm text-blue-700 hover:underline">← Dashboard</Link>
-      <div className="mt-6 mb-8">
-        <p className="text-sm font-semibold uppercase tracking-wider text-blue-700">Document operations</p>
-        <h1 className="mt-2 text-3xl font-bold">Inbox</h1>
-        <p className="mt-2 text-slate-600 dark:text-slate-300">Upload a text-layer PDF invoice to extract fields with evidence. Scanned PDFs need OCR, which is not yet available.</p>
-      </div>
-      {canUpload ? <form onSubmit={upload} className="card mb-7 flex flex-col gap-4 p-5 sm:flex-row sm:items-end">
-        <div className="flex-1">
-          <label htmlFor="invoice-file" className="mb-2 block text-sm font-semibold">Invoice PDF</label>
-          <input ref={fileInput} id="invoice-file" type="file" accept="application/pdf,.pdf" disabled={uploading} onChange={event => { setFile(event.target.files?.[0] ?? null); setError(""); }} className="field" />
-          <p className="mt-2 text-xs text-slate-600 dark:text-slate-300">PDF only, up to 10 MB. <a href="/sample-invoice.pdf" download className="text-blue-700 underline dark:text-blue-300">Download sample invoice</a></p>
+  return <AppShell session={session.data} active="inbox">
+    <div className="mx-auto max-w-[1440px] space-y-6 pb-10">
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <p className="eyebrow">Document operations / Inbox</p>
+          <h1 className="mt-2 text-3xl font-bold tracking-tight text-slate-900 md:text-4xl">Invoice inbox</h1>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-600">Upload a text-layer PDF, follow extraction, and inspect every field against its source text.</p>
         </div>
-        <button className="primary" disabled={!file || uploading} type="submit">{uploading ? "Uploading…" : "Upload invoice"}</button>
-      </form> : <p className="card mb-7 p-5 text-sm text-slate-600 dark:text-slate-300">Your workspace role can view invoices but cannot upload them.</p>}
-      {error && <p role="alert" className="mb-5 rounded-lg bg-red-50 p-3 text-red-800">{error}</p>}
-      {uploadMessage && <p role="status" className="mb-5 rounded-lg bg-green-50 p-3 text-green-900">{uploadMessage}</p>}
-      {documents.isError && <p role="alert">Could not load documents. <button type="button" className="text-blue-700 underline dark:text-blue-300" onClick={() => documents.refetch()}>Try again</button></p>}
-      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.3fr)]">
-        <section className="card p-5" aria-label="Documents">
-          <h2 className="mb-4 text-lg font-semibold">Recent documents</h2>
-          {documents.isLoading && <p role="status">Loading documents…</p>}
-          {documents.data?.length === 0 && <p className="text-slate-600 dark:text-slate-300">No documents yet. Download the sample invoice above, then upload it to try the workflow.</p>}
-          <div className="max-h-[65vh] space-y-2 overflow-y-auto pr-1" aria-label="Document list">
-            {documents.data?.map(item => <button key={item.id} type="button" aria-pressed={activeId === item.id} onClick={() => { setSelectedId(item.id); setUploadMessage(""); setRetryResult(null); }} className={`w-full rounded-lg border p-3 text-left hover:bg-blue-50 dark:hover:bg-slate-700 ${activeId === item.id ? "border-blue-500 dark:border-blue-400" : "border-slate-200 dark:border-slate-700"}`}>
-              <span className="block font-semibold break-all">{item.filename}</span>
-              <span className="mt-1 block text-sm text-slate-600 dark:text-slate-300">{documentStatusLabel(item.status)} · {new Date(item.created_at).toLocaleString()}</span>
+        <div className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600">{session.data.org_name} workspace</div>
+      </header>
+
+      <div className="grid gap-3 sm:grid-cols-3" aria-label="Recent document summary">
+        <div className="card flex items-center gap-4 p-4"><span className="grid h-11 w-11 place-items-center rounded-xl bg-blue-50 text-xl text-blue-700" aria-hidden="true">↗</span><div><p className="text-xs font-semibold text-slate-500">In progress</p><p className="text-2xl font-bold text-slate-900">{counts.inProgress}</p></div></div>
+        <div className="card flex items-center gap-4 p-4"><span className="grid h-11 w-11 place-items-center rounded-xl bg-amber-50 text-xl text-amber-700" aria-hidden="true">◎</span><div><p className="text-xs font-semibold text-slate-500">Needs review</p><p className="text-2xl font-bold text-slate-900">{counts.needsReview}</p></div></div>
+        <div className="card flex items-center gap-4 p-4"><span className="grid h-11 w-11 place-items-center rounded-xl bg-rose-50 text-xl text-rose-700" aria-hidden="true">!</span><div><p className="text-xs font-semibold text-slate-500">Failed</p><p className="text-2xl font-bold text-slate-900">{counts.failed}</p></div></div>
+      </div>
+      <p className="-mt-4 text-xs text-slate-500">Counts cover the {counts.total} most recent documents shown here (up to 50).</p>
+
+      {canUpload ? <form onSubmit={upload} className="card overflow-hidden">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:px-6">
+          <div><h2 className="text-base font-bold text-slate-900">Add an invoice</h2><p className="mt-0.5 text-xs text-slate-500">PDF only · maximum 10 MB · text layer required</p></div>
+          <a href="/sample-invoice.pdf" download className="secondary text-sm">Download sample invoice</a>
+        </div>
+        <div className="grid gap-5 p-5 sm:p-6 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-center">
+          <div onDragOver={event => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={acceptDroppedFile} className={`rounded-2xl border-2 border-dashed p-4 transition-colors ${dragging ? "border-blue-500 bg-blue-50" : "border-slate-200 bg-slate-50/60"}`}>
+            <label htmlFor="invoice-file" className="mb-2 block text-sm font-semibold text-slate-800">Invoice PDF</label>
+            <input ref={fileInput} id="invoice-file" type="file" accept="application/pdf,.pdf" disabled={uploading} onChange={event => { setFile(event.target.files?.[0] ?? null); setError(""); }} className="block w-full cursor-pointer text-sm text-slate-600 file:mr-4 file:rounded-lg file:border-0 file:bg-white file:px-3 file:py-2 file:font-semibold file:text-blue-700 hover:file:bg-blue-50" />
+            <p className="mt-2 text-xs text-slate-500">{file ? `Selected: ${file.name}` : "Choose a file or drag it here. Scanned PDFs need OCR and cannot be extracted yet."}</p>
+          </div>
+          <button className="primary w-full lg:w-auto" disabled={!file || uploading} type="submit">{uploading ? "Uploading…" : "Upload invoice"}<span aria-hidden="true">→</span></button>
+        </div>
+      </form> : <p className="card p-5 text-sm text-slate-600">Your workspace role can view invoices but cannot upload them.</p>}
+
+      {error && <p role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{error}</p>}
+      {uploadMessage && <p role="status" className="rounded-xl border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">{uploadMessage}</p>}
+
+      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(320px,.9fr)_minmax(0,1.1fr)]">
+        <section className="card min-w-0 overflow-hidden" aria-label="Documents">
+          <div className="border-b border-slate-100 p-5 sm:p-6">
+            <div className="flex items-center justify-between gap-3"><div><p className="eyebrow">Queue</p><h2 className="mt-1 text-lg font-bold text-slate-900">Recent documents</h2></div><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">{counts.total} items</span></div>
+            <label htmlFor="document-search" className="sr-only">Search documents</label>
+            <input id="document-search" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search by filename" className="field mt-5 text-sm" />
+            <div role="group" aria-label="Filter documents by status" className="mt-3 flex flex-wrap gap-2">
+              {statusFilters.map(option => <button key={option.value} type="button" aria-pressed={statusFilter === option.value} onClick={() => setStatusFilter(option.value)} className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${statusFilter === option.value ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>{option.label}</button>)}
+            </div>
+          </div>
+          {documents.isError && <p role="alert" className="m-5 rounded-xl bg-rose-50 p-4 text-sm text-rose-800">Could not load documents. <button type="button" className="font-bold underline" onClick={() => documents.refetch()}>Try again</button></p>}
+          {documents.isLoading && <p role="status" className="p-6 text-sm text-slate-500">Loading documents…</p>}
+          {documents.data?.length === 0 && <div className="p-8 text-center"><div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-blue-50 text-2xl text-blue-700" aria-hidden="true">▤</div><p className="mt-4 font-semibold text-slate-900">No documents yet.</p><p className="mt-1 text-sm text-slate-500">Download the sample invoice above, then upload it to try the workflow.</p></div>}
+          {Boolean(documents.data?.length) && visibleDocuments.length === 0 && <p className="p-6 text-sm text-slate-500">No documents match this search or status. Clear the filter to see your queue.</p>}
+          <div className="max-h-[65vh] overflow-y-auto" aria-label="Document list">
+            {visibleDocuments.map(item => <button key={item.id} type="button" aria-pressed={activeId === item.id} onClick={() => { setSelectedId(item.id); setUploadMessage(""); setRetryResult(null); }} className={`block w-full border-b border-slate-100 px-5 py-4 text-left transition-colors last:border-b-0 hover:bg-blue-50/70 ${activeId === item.id ? "border-l-4 border-l-blue-600 bg-blue-50/70 pl-4" : ""}`}>
+              <span className="flex min-w-0 flex-wrap items-center justify-between gap-2"><span className="min-w-0 break-all text-sm font-bold text-slate-900">{item.filename}</span><StatusBadge status={item.status} /></span>
+              <span className="mt-2 block text-xs text-slate-500">{new Date(item.created_at).toLocaleString()} · {Math.max(1, Math.ceil(item.size_bytes / 1024))} KB</span>
             </button>)}
           </div>
         </section>
-        <section className="card self-start p-5" aria-label="Extraction result">
-          <h2 className="mb-4 text-lg font-semibold">Extraction result</h2>
-          {!activeId && <p className="text-slate-600 dark:text-slate-300">Select a document to see its fields.</p>}
-          {detail.isLoading && activeId && <p role="status">Loading result…</p>}
-          {detail.isError && <p role="alert">Could not load this document. <button type="button" className="text-blue-700 underline dark:text-blue-300" onClick={() => detail.refetch()}>Try again</button></p>}
-          {detail.data && <div>
-            <p className="font-semibold break-all">{detail.data.filename}</p>
-            <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">Status: <span className="capitalize">{documentStatusLabel(detail.data.status)}</span> · Workflow config v{detail.data.workflow_config_version}{detail.data.provider && ` · Provider: ${detail.data.provider}`}</p>
-            {isDocumentInProgress(detail.data.status) && <p role="status" className="mt-4 rounded-lg bg-blue-50 p-3 text-sm text-blue-900">Extraction is running. This page updates automatically.</p>}
-            {detail.data.failure_reason && <p role="alert" className="mt-4 text-red-700">{detail.data.failure_reason}</p>}
-            {detail.data.status === "failed" && (session.data?.role === "admin" || session.data?.role === "reviewer") && <button type="button" className="primary mt-4" disabled={retryingId !== null || exhaustedRetryIds.has(detail.data.id)} onClick={retryFailedDocument}>{retryingId === detail.data.id ? "Queueing retry…" : exhaustedRetryIds.has(detail.data.id) ? "Retry limit reached" : "Retry extraction"}</button>}
-            {retryResult?.id === detail.data.id && <p role={retryResult.error ? "alert" : "status"} className={`mt-4 rounded-lg p-3 text-sm ${retryResult.error ? "bg-red-50 text-red-800" : "bg-green-50 text-green-900"}`}>{retryResult.message}</p>}
-            {detail.data.status === "needs_review" && <p className="mt-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-900">Fields are extracted. Human review and approval are coming in the next phase.</p>}
-            <dl className="mt-5 space-y-4">
-              {detail.data.fields.map(field => <div key={field.name} className="border-b border-slate-200 pb-3">
-                <dt className="text-sm font-semibold capitalize">{field.name.replaceAll("_", " ")}</dt>
-                <dd className="mt-1 break-words text-lg">{field.value}</dd>
-                <dd className="mt-1 break-words text-xs text-slate-600 dark:text-slate-300">Evidence: “{field.evidence}” · page {field.page_number}</dd>
-              </div>)}
-            </dl>
-          </div>}
+
+        <section className="card min-w-0 self-start overflow-hidden" aria-label="Extraction result">
+          <div className="border-b border-slate-100 p-5 sm:p-6"><p className="eyebrow">Document detail</p><h2 className="mt-1 text-lg font-bold text-slate-900">Extraction result</h2></div>
+          <div className="p-5 sm:p-6">
+            {!activeId && <p className="text-sm text-slate-500">Select a document to see its fields.</p>}
+            {detail.isLoading && activeId && <p role="status" className="text-sm text-slate-500">Loading result…</p>}
+            {detail.isError && <p role="alert" className="rounded-xl bg-rose-50 p-4 text-sm text-rose-800">Could not load this document. <button type="button" className="font-bold underline" onClick={() => detail.refetch()}>Try again</button></p>}
+            {detail.data && <div className="space-y-5">
+              <div className="flex flex-wrap items-start justify-between gap-3"><div className="min-w-0"><p className="break-all text-lg font-bold text-slate-900">{detail.data.filename}</p><p className="mt-1 text-xs text-slate-500">Status: <span className="capitalize">{documentStatusLabel(detail.data.status)}</span> · Workflow v{detail.data.workflow_config_version}{detail.data.provider && ` · Provider: ${detail.data.provider}`}</p></div><StatusBadge status={detail.data.status} /></div>
+              {isDocumentInProgress(detail.data.status) && <p role="status" className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-900">Extraction is running. This result updates automatically.</p>}
+              {detail.data.failure_reason && <p role="alert" className="rounded-xl border border-rose-100 bg-rose-50 p-4 text-sm text-rose-800">{detail.data.failure_reason}</p>}
+              {detail.data.status === "failed" && canUpload && <button type="button" className="primary" disabled={retryingId !== null || exhaustedRetryIds.has(detail.data.id)} onClick={retryFailedDocument}>{retryingId === detail.data.id ? "Queueing retry…" : exhaustedRetryIds.has(detail.data.id) ? "Retry limit reached" : "Retry extraction"}</button>}
+              {retryResult?.id === detail.data.id && <p role={retryResult.error ? "alert" : "status"} className={`rounded-xl p-4 text-sm ${retryResult.error ? "bg-rose-50 text-rose-800" : "bg-emerald-50 text-emerald-900"}`}>{retryResult.message}</p>}
+              {detail.data.status === "needs_review" && <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><strong>Evidence ready.</strong> The fields below were extracted and checked against the PDF. Human edits and approval are planned, so this is an inspection view today.</p>}
+              {detail.data.fields.length > 0 && <div><h3 className="mb-3 text-xs font-bold uppercase tracking-[.12em] text-slate-500">Extracted fields and evidence</h3><dl className="grid gap-3 sm:grid-cols-2">
+                {detail.data.fields.map(field => <div key={field.name} className="min-w-0 rounded-xl border border-slate-200 bg-slate-50/70 p-4"><dt className="text-xs font-bold uppercase tracking-wide text-slate-500">{field.name.replaceAll("_", " ")}</dt><dd className="mt-2 break-words text-base font-bold text-slate-900">{field.value}</dd><dd className="mt-3 border-t border-slate-200 pt-3 text-xs leading-5 text-slate-600"><span className="font-bold text-blue-700">Evidence · page {field.page_number}</span><br />“{field.evidence}”</dd></div>)}
+              </dl></div>}
+            </div>}
+          </div>
         </section>
       </div>
     </div>
-  </main>;
+  </AppShell>;
 }

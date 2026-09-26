@@ -14,14 +14,19 @@ const browser = await chromium.launch({ executablePath, headless: true });
 try {
   const page = await browser.newPage();
   await page.goto(`${baseURL}/login`, { waitUntil: "networkidle" });
-  await page.getByLabel("Password").fill(password);
+  await page.getByLabel("Password", { exact: true }).fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL(`${baseURL}/dashboard`);
-  await page.getByRole("heading", { name: "Your workspace is ready" }).waitFor();
+  await page.getByRole("heading", { name: "Dashboard" }).waitFor();
+  await page.getByText("Loading documents…").waitFor({ state: "hidden" });
   if (process.env.E2E_SCREENSHOT) {
     await page.screenshot({ path: process.env.E2E_SCREENSHOT, fullPage: true });
   }
-  await page.getByRole("link", { name: "Open inbox" }).click();
+  await page.getByRole("link", { name: "Admin", exact: true }).click();
+  await page.waitForURL(`${baseURL}/admin`);
+  await page.getByRole("heading", { name: "Member directory" }).waitFor();
+  await page.getByRole("region", { name: "Member directory" }).getByText("northwind@example.com").waitFor();
+  await page.getByRole("link", { name: "Inbox", exact: true }).click();
   await page.waitForURL(`${baseURL}/inbox`);
   const sampleLink = page.getByRole("link", { name: "Download sample invoice" });
   const sampleUrl = new URL(await sampleLink.getAttribute("href"), baseURL);
@@ -48,7 +53,7 @@ try {
   await page.getByRole("region", { name: "Extraction result" })
     .getByText(invoiceNumber, { exact: true }).waitFor({ timeout: 30000 });
   if (process.env.E2E_INBOX_SCREENSHOT) {
-    await page.getByRole("region", { name: "Extraction result" }).screenshot({ path: process.env.E2E_INBOX_SCREENSHOT });
+    await page.screenshot({ path: process.env.E2E_INBOX_SCREENSHOT, fullPage: true });
   }
 
   // Exercise the retry control with a failed document without changing demo data.

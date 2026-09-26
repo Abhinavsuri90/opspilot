@@ -80,7 +80,7 @@ try {
   });
 
   await page.goto(`${baseURL}/login`);
-  await page.getByLabel("Password").fill("mock-password");
+  await page.getByLabel("Password", { exact: true }).fill("mock-password");
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.getByRole("alert").getByText("Invalid organization, email, or password.").waitFor();
 
@@ -95,11 +95,15 @@ try {
   loginStatus = 200;
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL(`${baseURL}/dashboard`);
-  await page.getByRole("heading", { name: "Your workspace is ready" }).waitFor();
+  await page.getByRole("heading", { name: "Dashboard" }).waitFor();
+
+  await page.goto(`${baseURL}/admin`);
+  await page.getByRole("heading", { name: "Admin access required" }).waitFor();
+  await page.getByRole("link", { name: "Return to dashboard" }).click();
 
   await page.getByRole("button", { name: "Sign out" }).click();
   await page.getByRole("alert").getByText("Could not sign out. Please try again.").waitFor();
-  await page.getByRole("link", { name: "Open inbox" }).click();
+  await page.getByRole("link", { name: "Open inbox", exact: true }).first().click();
   await page.waitForURL(`${baseURL}/inbox`);
   await page.getByRole("alert").getByText(/Could not load documents/).waitFor();
 
@@ -165,6 +169,12 @@ try {
   if (scrollHeight <= clientHeight || !result || result.height > 900) {
     throw new Error("The Inbox layout did not contain a long document list");
   }
+  await page.getByRole("searchbox", { name: "Search documents" }).fill("invoice-39.pdf");
+  await page.waitForFunction(() => document.querySelectorAll('[aria-label="Document list"] button').length === 1);
+  if (await list.getByRole("button").count() !== 1) {
+    throw new Error("The document search did not narrow the list");
+  }
+  await page.getByRole("searchbox", { name: "Search documents" }).fill("");
 
   sessionRole = "viewer";
   await page.reload();
