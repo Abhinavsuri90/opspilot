@@ -13,14 +13,13 @@ def identity_hash(org_slug: str, email: str) -> str:
     return hashlib.sha256(f"{org_slug}\0{email}".encode()).hexdigest()
 
 
-def reserve_attempt(session: Session, org_slug: str, email: str) -> bool:
+def reserve_attempt(
+    session: Session, org_slug: str, email: str, *, limit: int = MAX_ATTEMPTS_PER_WINDOW
+) -> bool:
     """Count an attempt before password work; commit so failures persist."""
     key = identity_hash(org_slug, email)
     session.execute(
-        text(
-            "DELETE FROM login_attempts "
-            "WHERE window_started_at < now() - interval '1 day'"
-        )
+        text("DELETE FROM login_attempts WHERE window_started_at < now() - interval '1 day'")
     )
     attempts = session.scalar(
         text(
@@ -36,7 +35,7 @@ def reserve_attempt(session: Session, org_slug: str, email: str) -> bool:
         {"key": key},
     )
     session.commit()
-    return attempts is not None and attempts <= MAX_ATTEMPTS_PER_WINDOW
+    return attempts is not None and attempts <= limit
 
 
 def clear_attempts(session: Session, org_slug: str, email: str) -> None:

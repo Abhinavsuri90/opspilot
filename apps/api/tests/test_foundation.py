@@ -300,3 +300,19 @@ def test_login_throttle_blocks_repeated_guesses_and_resets_after_success() -> No
         assert success.status_code == 200
         with SessionLocal() as session:
             assert session.get(LoginAttempt, identity_hash("northwind", known_email)) is None
+
+
+def test_request_timing_and_json_body_limit() -> None:
+    with TestClient(app) as client:
+        health = client.get("/healthz", headers={"X-Request-ID": "timing-check"})
+        assert health.status_code == 200
+        assert health.headers["server-timing"].startswith("api;dur=")
+        assert float(health.headers["server-timing"].split("=")[1]) >= 0
+        assert health.headers["x-request-id"] == "timing-check"
+        oversized = client.post(
+            "/v1/auth/register-organization",
+            content=b"x" * (64 * 1024 + 1),
+            headers={"content-type": "application/json"},
+        )
+        assert oversized.status_code == 413
+        assert oversized.json()["error"]["code"] == "request_too_large"

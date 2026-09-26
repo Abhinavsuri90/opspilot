@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import set_org_context
+from app.invoice_workflows import accessible_document_clause, can_access_document
 from app.limits import MAX_UPLOAD_BYTES
 from app.llm.provider import ExtractionError, pdf_pages
 from app.models import AuditEvent, Document, ExtractedField, OutboxEvent
@@ -19,11 +20,15 @@ from app.repositories import (
     latest_extraction_run,
     latest_workflow_config,
     list_document_fields,
-    list_documents,
 )
 from app.storage import ObjectStore
+from app.workflow_models import InvoiceMetadata
 
 MAX_MANUAL_RETRIES = 2
+
+
+class DocumentAccessDenied(Exception):
+    pass
 
 
 class InvalidDocument(Exception):
@@ -109,11 +114,12 @@ def upload(
     user_id: uuid.UUID,
     filename: str,
     data: bytes,
+    role: str = "member",
 ) -> UploadResponse:
     if not data or len(data) > MAX_UPLOAD_BYTES:
         raise InvalidDocument("PDF must be between 1 byte and 10 MB")
     if not data.startswith(b"%PDF-"):
-        raise InvalidDocument("Only PDF files are supported in this demo")
+        raise InvalidDocument("Only PDF files are supported")
 
     basename = filename.replace("\\", "/").split("/")[-1]
     safe_name = "".join(char if char.isprintable() else "_" for char in basename)[:255]
@@ -121,6 +127,8 @@ def upload(
     digest = hashlib.sha256(data).hexdigest()
     existing = get_document_by_hash(session, org_id, digest)
     if existing is not None:
+        if not can_access_document(session, org_id, user_id, role, existing):
+            raise DocumentAccessDenied("This file already exists and is not accessible") from None
         return UploadResponse(**summary(existing).model_dump(), duplicate=True)
 
     try:
@@ -138,6 +146,8 @@ def upload(
     session.scalar(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": lock_id})
     existing = get_document_by_hash(session, org_id, digest)
     if existing is not None:
+        if not can_access_document(session, org_id, user_id, role, existing):
+            raise DocumentAccessDenied("This file already exists and is not accessible") from None
         return UploadResponse(**summary(existing).model_dump(), duplicate=True)
     count = session.scalar(
         select(func.count()).select_from(Document).where(Document.org_id == org_id)
@@ -189,17 +199,54 @@ def upload(
         existing = get_document_by_hash(session, org_id, digest)
         if existing is None:
             raise
+        if not can_access_document(session, org_id, user_id, role, existing):
+            raise DocumentAccessDenied("This file already exists and is not accessible") from None
         return UploadResponse(**summary(existing).model_dump(), duplicate=True)
     return UploadResponse(**summary(document).model_dump(), duplicate=False)
 
 
-def browse(session: Session, org_id: uuid.UUID) -> list[DocumentSummary]:
-    return [summary(document) for document in list_documents(session, org_id)]
+def browse(
+    session: Session,
+    org_id: uuid.UUID,
+    user_id: uuid.UUID,
+    role: str,
+    *,
+    offset: int = 0,
+    limit: int = 50,
+    status: str | None = None,
+    category_id: uuid.UUID | None = None,
+    q: str | None = None,
+) -> list[DocumentSummary]:
+    query = select(Document).where(accessible_document_clause(org_id, user_id, role))
+    if status == "in_progress":
+        query = query.where(Document.status.in_(("queued", "extracting", "validating")))
+    elif status:
+        query = query.where(Document.status == status)
+    if category_id:
+        query = query.where(
+            Document.id.in_(
+                select(InvoiceMetadata.document_id).where(
+                    InvoiceMetadata.org_id == org_id, InvoiceMetadata.category_id == category_id
+                )
+            )
+        )
+    if q:
+        query = query.where(Document.filename.icontains(q, autoescape=True))
+    documents = session.scalars(
+        query.order_by(Document.created_at.desc(), Document.id.desc()).offset(offset).limit(limit)
+    )
+    return [summary(document) for document in documents]
 
 
-def read(session: Session, org_id: uuid.UUID, document_id: uuid.UUID) -> DocumentDetail | None:
+def read(
+    session: Session,
+    org_id: uuid.UUID,
+    document_id: uuid.UUID,
+    user_id: uuid.UUID,
+    role: str,
+) -> DocumentDetail | None:
     document = get_document_by_id(session, org_id, document_id)
-    if document is None:
+    if document is None or not can_access_document(session, org_id, user_id, role, document):
         return None
     run = latest_extraction_run(session, org_id, document_id)
     return detail(
@@ -210,14 +257,18 @@ def read(session: Session, org_id: uuid.UUID, document_id: uuid.UUID) -> Documen
 
 
 def retry(
-    session: Session, org_id: uuid.UUID, user_id: uuid.UUID, document_id: uuid.UUID
+    session: Session,
+    org_id: uuid.UUID,
+    user_id: uuid.UUID,
+    document_id: uuid.UUID,
+    role: str = "member",
 ) -> DocumentSummary | None:
     document = session.scalar(
         select(Document)
         .where(Document.org_id == org_id, Document.id == document_id)
         .with_for_update()
     )
-    if document is None:
+    if document is None or not can_access_document(session, org_id, user_id, role, document):
         return None
     if document.status != "failed":
         raise DocumentNotRetryable("Only failed documents can be retried")

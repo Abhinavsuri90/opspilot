@@ -44,9 +44,7 @@ def clear_route_overrides() -> Any:
         ),
     ],
 )
-def test_protected_routes_require_a_session(
-    method: str, path: str, kwargs: dict[str, Any]
-) -> None:
+def test_protected_routes_require_a_session(method: str, path: str, kwargs: dict[str, Any]) -> None:
     app.dependency_overrides[get_store] = lambda: object()
     with TestClient(app) as client:
         response = client.request(method, path, **kwargs)
@@ -70,8 +68,8 @@ def test_read_only_member_cannot_manage_documents_or_members(
         SimpleNamespace(role="viewer"),
     )
     app.dependency_overrides[get_store] = lambda: object()
-    monkeypatch.setattr(document_service, "browse", lambda session, org: [])
-    monkeypatch.setattr(document_service, "read", lambda session, org, document: None)
+    monkeypatch.setattr(document_service, "browse", lambda session, org, user, role, **kwargs: [])
+    monkeypatch.setattr(document_service, "read", lambda session, org, document, user, role: None)
 
     denied_routes: list[tuple[str, str, dict[str, Any]]] = [
         ("GET", "/v1/organization/members", {}),
@@ -107,8 +105,7 @@ def test_document_routes_reject_malformed_ids() -> None:
             assert invalid.status_code == 422
             assert invalid.json()["error"]["code"] == "validation_error"
             assert any(
-                item["field"] == "path.document_id"
-                for item in invalid.json()["error"]["details"]
+                item["field"] == "path.document_id" for item in invalid.json()["error"]["details"]
             )
 
 

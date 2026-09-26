@@ -16,6 +16,7 @@ class Organization(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     slug: Mapped[str] = mapped_column(String(80), unique=True)
     name: Mapped[str] = mapped_column(String(200))
+    default_currency: Mapped[str] = mapped_column(String(3), default="USD", server_default="USD")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -44,12 +45,18 @@ class Membership(Base):
     __table_args__ = (
         UniqueConstraint("org_id", "user_id", name="uq_membership_org_user"),
         Index("ix_memberships_org_role", "org_id", "role"),
+        Index("ix_memberships_org_status", "org_id", "status"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     role: Mapped[str] = mapped_column(String(30), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", server_default="active")
+    requested_role: Mapped[str | None] = mapped_column(String(30))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    decided_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
 
 
 class WorkflowConfig(Base):
@@ -78,6 +85,7 @@ class AuditEvent(Base):
 class Document(Base):
     __tablename__ = "documents"
     __table_args__ = (
+        UniqueConstraint("org_id", "id", name="uq_documents_org_id"),
         UniqueConstraint("org_id", "content_hash", name="uq_documents_org_hash"),
         Index("ix_documents_org_status_created", "org_id", "status", "created_at"),
     )
