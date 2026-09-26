@@ -86,10 +86,10 @@ A document can also move to `failed` (retryable) or `dead_lettered`. Every trans
 
 **LLM layer**
 - A provider abstraction in `apps/api/app/llm/`, with three providers:
-  - Anthropic (default)
+  - OpenRouter hosted models (default)
   - OpenAI-compatible (also covers local open-weight models via Ollama)
   - Mock (deterministic, used in tests and load tests)
-- Model names come from env vars, e.g. `LLM_TIER1_MODEL=claude-haiku-4-5` and `LLM_TIER2_MODEL=claude-sonnet-5`.
+- Model names come from env vars: `LLM_TIER1_MODEL` for a fast, low-cost model and `LLM_TIER2_MODEL` for a stronger model.
 
 **Auth**
 - Email and password with argon2 hashing
@@ -125,7 +125,6 @@ opspilot/
   docker-compose.yml
   Makefile
   .env.example
-  CLAUDE.md
   SPEC.md
   SYSTEM_DESIGN.md
   CONTEXT.md
@@ -306,7 +305,7 @@ A **weekly ROI report** runs on Celery beat and sends an HTML email to org admin
 
 ### 5.13 Private mode
 
-A per-org setting chooses the provider: `anthropic` or `openai_compatible`. With a local open-weight model via Ollama, no document data leaves the deployment. The eval report compares accuracy and cost across providers.
+A per-org setting chooses the provider: `openrouter` or `openai_compatible`. With a local open-weight model via Ollama, no document data leaves the deployment. The eval report compares accuracy and cost across providers.
 
 ### 5.14 MCP server (Phase 9)
 
@@ -360,7 +359,7 @@ Authenticated with an org API key.
   It writes `evals/reports/<timestamp>.json` and `.md`, and compares against `evals/baseline.json`.
 - **CI:**
   - The full pipeline always runs with the Mock provider, so tests are deterministic.
-  - On pull requests that touch prompts or extraction, if an `ANTHROPIC_API_KEY` secret exists, run a 20-document subset against the real model.
+  - On pull requests that touch prompts or extraction, if an `OPENROUTER_API_KEY` secret exists, run a 20-document subset against the real model.
   - Fail the build if accuracy drops more than 2 points below the baseline.
 - **UI:** `/evals` shows the latest report.
 
@@ -410,7 +409,7 @@ Every phase ends with:
 
 **Phase 1: Intake & extraction**
 - Upload, storage, queue and worker
-- LLM provider abstraction (Anthropic and Mock)
+- LLM provider abstraction (OpenRouter and Mock)
 - Invoice extraction with evidence
 - Synthetic data generator
 - Eval runner v1
@@ -512,7 +511,7 @@ Promote to production and verify every item below on the **live URL**. Mark each
 - [ ] `docs/deployment.md` complete for both Railway and the single-VM Docker Compose option
 - [ ] README updated with the live demo link, recruiter login, and real metrics (or honest `[TODO]` placeholders)
 
-*Done when:* every box above is checked, and Claude has walked me through a complete live demo on the production URL: upload a document, review it, approve an action, and show the audit replay and the dashboard.
+*Done when:* every box above is checked, and I have run a complete live demo on the production URL: upload a document, review it, approve an action, and show the audit replay and the dashboard.
 
 ## 10. Future customer engagement kit
 
