@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import Protocol
+from typing import Any, Protocol
 
 import boto3  # type: ignore[import-untyped]
 from botocore.config import Config  # type: ignore[import-untyped]
@@ -22,14 +22,18 @@ class S3ObjectStore:
     def __init__(self) -> None:
         settings = get_settings()
         self.bucket = settings.s3_bucket
-        self.client = boto3.client(
-            "s3",
-            endpoint_url=settings.s3_endpoint_url,
-            region_name=settings.s3_region,
-            aws_access_key_id=settings.s3_access_key_id,
-            aws_secret_access_key=settings.s3_secret_access_key,
-            config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 2}),
-        )
+        client_options: dict[str, Any] = {
+            "endpoint_url": settings.s3_endpoint_url,
+            "region_name": settings.s3_region,
+            "config": Config(
+                s3={"addressing_style": settings.s3_addressing_style},
+                retries={"max_attempts": 2},
+            ),
+        }
+        if settings.s3_access_key_id and settings.s3_secret_access_key:
+            client_options["aws_access_key_id"] = settings.s3_access_key_id
+            client_options["aws_secret_access_key"] = settings.s3_secret_access_key
+        self.client = boto3.client("s3", **client_options)
 
     def put(self, key: str, data: bytes) -> None:
         try:

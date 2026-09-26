@@ -28,6 +28,7 @@ from app.models import (
 from app.storage import ObjectStore, StorageError, get_store
 
 logger = logging.getLogger(__name__)
+MAX_EXTRACTION_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -100,8 +101,10 @@ def claim_next(org_id: uuid.UUID, document_id: uuid.UUID | None = None) -> Claim
 def complete(claim: Claim, fields: list[ExtractedValue], provider: ExtractionProvider) -> None:
     with SessionLocal() as session, session.begin():
         set_org_context(session, claim.org_id)
-        event = session.get(OutboxEvent, claim.event_id)
-        document = session.get(Document, claim.document_id)
+        # Serialize completion with lease reclamation. Reading the lease without
+        # a lock can let an old worker commit after another worker reclaims it.
+        event = session.get(OutboxEvent, claim.event_id, with_for_update=True)
+        document = session.get(Document, claim.document_id, with_for_update=True)
         if (
             event is None
             or document is None
@@ -145,8 +148,8 @@ def fail(claim: Claim, reason: str, retryable: bool) -> None:
     now = datetime.now(UTC)
     with SessionLocal() as session, session.begin():
         set_org_context(session, claim.org_id)
-        event = session.get(OutboxEvent, claim.event_id)
-        document = session.get(Document, claim.document_id)
+        event = session.get(OutboxEvent, claim.event_id, with_for_update=True)
+        document = session.get(Document, claim.document_id, with_for_update=True)
         if (
             event is None
             or document is None
@@ -156,7 +159,7 @@ def fail(claim: Claim, reason: str, retryable: bool) -> None:
         ):
             return
         document.updated_at = now
-        if retryable and claim.attempts < 3:
+        if retryable and claim.attempts < MAX_EXTRACTION_ATTEMPTS:
             document.status = "queued"
             event.available_at = now + timedelta(seconds=2**claim.attempts)
             event.claimed_at = None
@@ -179,6 +182,13 @@ def process_one(
         claim = claim_next(org_id, document_id)
         if claim is None:
             continue
+        if claim.attempts > MAX_EXTRACTION_ATTEMPTS:
+            fail(
+                claim,
+                "Extraction attempt limit reached after worker interruption",
+                retryable=False,
+            )
+            return True
         try:
             data = object_store.get(claim.storage_key)
             fields = provider.extract(data)
@@ -197,6 +207,9 @@ def process_one(
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    # Invalid provider configuration is a deployment error, not a recoverable
+    # document error. Let the process exit so the platform reports it clearly.
+    get_provider()
     while True:
         try:
             worked = process_one()

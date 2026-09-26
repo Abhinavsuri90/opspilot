@@ -20,6 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, EmailStr, field_validator
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -29,6 +30,9 @@ from app.db import get_session, set_org_context
 from app.document_service import (
     MAX_UPLOAD_BYTES,
     DocumentDetail,
+    DocumentLimitReached,
+    DocumentNotRetryable,
+    DocumentRetryLimitReached,
     DocumentSummary,
     InvalidDocument,
     MissingWorkflowConfig,
@@ -141,6 +145,22 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     )
 
 
+@app.exception_handler(DocumentRetryLimitReached)
+async def retry_limit_error_handler(
+    request: Request, exc: DocumentRetryLimitReached
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={
+            "error": {
+                "code": "retry_limit_reached",
+                "message": str(exc),
+                "details": None,
+            }
+        },
+    )
+
+
 @app.middleware("http")
 async def add_request_id(
     request: Request, call_next: Callable[[Request], Awaitable[Response]]
@@ -150,6 +170,22 @@ async def add_request_id(
         supplied_id if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", supplied_id) else str(uuid.uuid4())
     )
     request.state.request_id = request_id
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+        origin = request.headers.get("Origin")
+        origin_mismatch = origin is not None and origin != settings.web_origin.rstrip("/")
+        if origin_mismatch or request.headers.get("Sec-Fetch-Site") == "cross-site":
+            denial = JSONResponse(
+                status_code=403,
+                content={
+                    "error": {
+                        "code": "forbidden",
+                        "message": "Request origin is not allowed",
+                        "details": None,
+                    }
+                },
+            )
+            denial.headers["X-Request-ID"] = request_id
+            return denial
     response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
     return response
@@ -179,7 +215,20 @@ def healthz() -> dict[str, str]:
 
 @app.get("/readyz")
 def readyz(session: Annotated[Session, Depends(get_session)]) -> dict[str, str]:
-    session.execute(text("SELECT 1"))
+    if not settings.s3_bucket.strip():
+        raise HTTPException(status_code=503, detail="Object storage is not configured")
+    try:
+        # These tables are required for the document workflow. A fresh but
+        # unmigrated database must not be considered ready by the platform.
+        session.execute(
+            text(
+                "SELECT d.id FROM organizations AS o, users AS u, memberships AS m, "
+                "workflow_configs AS w, audit_events AS a, documents AS d, "
+                "outbox_events AS e, extraction_runs AS r, extracted_fields AS f LIMIT 0"
+            )
+        )
+    except SQLAlchemyError as exc:
+        raise HTTPException(status_code=503, detail="Database schema is not ready") from exc
     return {"status": "ready"}
 
 
@@ -256,6 +305,8 @@ def upload_document(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except MissingWorkflowConfig as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DocumentLimitReached as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except StorageError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
@@ -275,6 +326,23 @@ def document_detail(
 ) -> DocumentDetail:
     session, _, org, _ = identity
     result = document_service.read(session, org.id, document_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return result
+
+
+@app.post("/v1/documents/{document_id}/retry", response_model=DocumentSummary, status_code=202)
+def retry_document(
+    document_id: uuid.UUID,
+    identity: Annotated[tuple[Session, User, Organization, Membership], Depends(current_session)],
+) -> DocumentSummary:
+    session, user, org, membership = identity
+    if membership.role not in ("admin", "reviewer"):
+        raise HTTPException(status_code=403, detail="Uploader role required")
+    try:
+        result = document_service.retry(session, org.id, user.id, document_id)
+    except DocumentNotRetryable as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if result is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return result

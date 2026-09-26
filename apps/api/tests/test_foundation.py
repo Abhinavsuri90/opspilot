@@ -1,12 +1,13 @@
 import os
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select, text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.db import get_session, set_org_context
+from app.db import get_session, normalize_database_url, set_org_context
 from app.main import app
 from app.models import Membership, Organization
 
@@ -49,9 +50,52 @@ def test_error_envelopes_and_request_ids() -> None:
         del app.dependency_overrides[get_session]
 
 
+def test_browser_post_rejects_untrusted_origin() -> None:
+    with TestClient(app) as client:
+        forbidden = client.post(
+            "/v1/auth/login",
+            json={},
+            headers={"Origin": "https://malicious.example", "X-Request-ID": "origin-123"},
+        )
+        assert forbidden.status_code == 403
+        assert forbidden.json()["error"]["code"] == "forbidden"
+        assert forbidden.headers["x-request-id"] == "origin-123"
+
+        fetch_forbidden = client.post(
+            "/v1/auth/login", json={}, headers={"Sec-Fetch-Site": "cross-site"}
+        )
+        assert fetch_forbidden.status_code == 403
+
+        # API clients without Origin remain supported.
+        assert client.post("/v1/auth/login", json={}).status_code == 422
+
+
+def test_readyz_fails_when_schema_is_missing() -> None:
+    class MissingSchemaSession:
+        def execute(self, statement: object) -> None:
+            raise SQLAlchemyError("missing table")
+
+    app.dependency_overrides[get_session] = lambda: MissingSchemaSession()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/readyz")
+        assert response.status_code == 503
+        assert response.json()["error"]["message"] == "Database schema is not ready"
+    finally:
+        del app.dependency_overrides[get_session]
+
+
+def test_readyz_fails_without_storage_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.main.settings", SimpleNamespace(s3_bucket=""))
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+    assert response.status_code == 503
+    assert response.json()["error"]["message"] == "Object storage is not configured"
+
+
 @pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
 def test_login_and_tenant_isolation() -> None:
-    owner_engine = create_engine(os.environ["DATABASE_OWNER_URL"])
+    owner_engine = create_engine(normalize_database_url(os.environ["DATABASE_OWNER_URL"]))
     with Session(owner_engine) as owner:
         northwind = owner.scalar(select(Organization).where(Organization.slug == "northwind"))
         contoso = owner.scalar(select(Organization).where(Organization.slug == "contoso"))
@@ -111,7 +155,7 @@ def test_login_and_tenant_isolation() -> None:
         client.cookies.set("opspilot_session", "forged-token")
         assert client.get("/v1/auth/me").status_code == 401
 
-    app_engine = create_engine(os.environ["DATABASE_URL"])
+    app_engine = create_engine(normalize_database_url(os.environ["DATABASE_URL"]))
     with Session(app_engine) as session:
         set_org_context(session, northwind.id)
         visible = session.scalars(select(Membership)).all()
@@ -144,13 +188,13 @@ def test_login_and_tenant_isolation() -> None:
 
 @pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
 def test_tenant_context_expires_at_transaction_end() -> None:
-    owner_engine = create_engine(os.environ["DATABASE_OWNER_URL"])
+    owner_engine = create_engine(normalize_database_url(os.environ["DATABASE_OWNER_URL"]))
     with Session(owner_engine) as owner:
         northwind = owner.scalar(select(Organization).where(Organization.slug == "northwind"))
         contoso = owner.scalar(select(Organization).where(Organization.slug == "contoso"))
         assert northwind is not None and contoso is not None
 
-    app_engine = create_engine(os.environ["DATABASE_URL"])
+    app_engine = create_engine(normalize_database_url(os.environ["DATABASE_URL"]))
     with Session(app_engine) as session:
         # An app connection without a transaction-local tenant cannot read memberships.
         assert session.scalars(select(Membership)).all() == []

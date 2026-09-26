@@ -1,6 +1,8 @@
 from functools import lru_cache
+from typing import Literal
+from urllib.parse import urlparse
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,11 +17,13 @@ class Settings(BaseSettings):
     s3_endpoint_url: str | None = None
     s3_bucket: str = "documents"
     s3_region: str = "us-east-1"
+    s3_addressing_style: Literal["auto", "path", "virtual"] = "auto"
     s3_access_key_id: str = "local"
     s3_secret_access_key: str = "local"
     llm_provider: str = "mock"
     openrouter_api_key: str | None = None
     openrouter_model: str = "google/gemini-3.8-flash"
+    max_documents_per_org: int = Field(default=100, ge=1, le=100_000)
 
     @model_validator(mode="after")
     def reject_unsafe_deployment(self) -> "Settings":
@@ -31,6 +35,41 @@ class Settings(BaseSettings):
                 raise ValueError("JWT_SECRET must be a strong deployment secret")
             if not self.cookie_secure:
                 raise ValueError("COOKIE_SECURE must be true outside development")
+            if not self.web_origin.startswith("https://"):
+                raise ValueError("WEB_ORIGIN must use HTTPS outside development")
+            database = urlparse(self.database_url)
+            if (
+                database.scheme not in {"postgres", "postgresql", "postgresql+psycopg"}
+                or database.username != "opspilot_app"
+                or not database.password
+                or not database.path.strip("/")
+                or database.hostname in {None, "localhost", "127.0.0.1", "host.docker.internal"}
+            ):
+                raise ValueError("DATABASE_URL must use the remote restricted Postgres role")
+            if not self.s3_bucket.strip() or self.s3_bucket == "documents":
+                raise ValueError("Set a nondefault S3_BUCKET outside development")
+            if "s3_region" not in self.model_fields_set or not self.s3_region.strip():
+                raise ValueError("Set S3_REGION outside development")
+            key = self.s3_access_key_id.strip()
+            secret = self.s3_secret_access_key.strip()
+            if key == "local" or secret == "local":
+                raise ValueError("Local S3 credentials cannot be used outside development")
+            if bool(key) != bool(secret):
+                raise ValueError("Set both S3 credential values, or neither for AWS IAM")
+            if self.s3_endpoint_url:
+                endpoint = urlparse(self.s3_endpoint_url)
+                hostname = endpoint.hostname or ""
+                if (
+                    endpoint.scheme != "https"
+                    or not hostname
+                    or hostname in {"localhost", "127.0.0.1", "s3mock"}
+                    or "s3mock" in hostname
+                    or endpoint.username is not None
+                    or endpoint.password is not None
+                ):
+                    raise ValueError("S3_ENDPOINT_URL must be a remote HTTPS endpoint")
+                if not key:
+                    raise ValueError("Custom S3 endpoints require explicit credentials")
         return self
 
 

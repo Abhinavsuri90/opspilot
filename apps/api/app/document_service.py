@@ -1,13 +1,16 @@
 import hashlib
 import json
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 
 from pydantic import BaseModel
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import set_org_context
+from app.llm.provider import ExtractionError, pdf_pages
 from app.models import AuditEvent, Document, ExtractedField, OutboxEvent
 from app.repositories import (
     get_document_by_hash,
@@ -20,6 +23,7 @@ from app.repositories import (
 from app.storage import ObjectStore
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_MANUAL_RETRIES = 2
 
 
 class InvalidDocument(Exception):
@@ -27,6 +31,18 @@ class InvalidDocument(Exception):
 
 
 class MissingWorkflowConfig(Exception):
+    pass
+
+
+class DocumentLimitReached(Exception):
+    pass
+
+
+class DocumentNotRetryable(Exception):
+    pass
+
+
+class DocumentRetryLimitReached(Exception):
     pass
 
 
@@ -99,15 +115,35 @@ def upload(
     if not data.startswith(b"%PDF-"):
         raise InvalidDocument("Only PDF files are supported in this demo")
 
-    safe_name = filename.replace("\\", "/").split("/")[-1][:255] or "document.pdf"
+    basename = filename.replace("\\", "/").split("/")[-1]
+    safe_name = "".join(char if char.isprintable() else "_" for char in basename)[:255]
+    safe_name = safe_name or "document.pdf"
     digest = hashlib.sha256(data).hexdigest()
     existing = get_document_by_hash(session, org_id, digest)
     if existing is not None:
         return UploadResponse(**summary(existing).model_dump(), duplicate=True)
 
+    try:
+        pdf_pages(data)
+    except ExtractionError as exc:
+        raise InvalidDocument(str(exc)) from exc
+
     config = latest_workflow_config(session, org_id)
     if config is None:
         raise MissingWorkflowConfig("No workflow configuration exists for this organization")
+
+    # Serialize the quota decision with uploads to this tenant. The lock is
+    # released when the document/outbox transaction commits or rolls back.
+    lock_id = int.from_bytes(org_id.bytes[:8], byteorder="big", signed=True)
+    session.scalar(text("SELECT pg_advisory_xact_lock(:lock_id)"), {"lock_id": lock_id})
+    existing = get_document_by_hash(session, org_id, digest)
+    if existing is not None:
+        return UploadResponse(**summary(existing).model_dump(), duplicate=True)
+    count = session.scalar(
+        select(func.count()).select_from(Document).where(Document.org_id == org_id)
+    )
+    if (count or 0) >= get_settings().max_documents_per_org:
+        raise DocumentLimitReached("This organization has reached its document limit")
 
     # Deterministic key makes concurrent duplicate uploads safe to retry.
     key = f"{org_id}/{digest}.pdf"
@@ -171,3 +207,57 @@ def read(session: Session, org_id: uuid.UUID, document_id: uuid.UUID) -> Documen
         list_document_fields(session, org_id, document_id),
         run.provider if run is not None else None,
     )
+
+
+def retry(
+    session: Session, org_id: uuid.UUID, user_id: uuid.UUID, document_id: uuid.UUID
+) -> DocumentSummary | None:
+    document = session.scalar(
+        select(Document)
+        .where(Document.org_id == org_id, Document.id == document_id)
+        .with_for_update()
+    )
+    if document is None:
+        return None
+    if document.status != "failed":
+        raise DocumentNotRetryable("Only failed documents can be retried")
+
+    # The initial upload creates one outbox event. Every manual retry creates
+    # another; automatic worker attempts reuse their event. The document lock
+    # above serializes this count and the following insert across API instances.
+    event_count = session.scalar(
+        select(func.count())
+        .select_from(OutboxEvent)
+        .where(
+            OutboxEvent.org_id == org_id,
+            OutboxEvent.document_id == document_id,
+            OutboxEvent.topic == "extract_document",
+        )
+    )
+    if (event_count or 0) > MAX_MANUAL_RETRIES:
+        raise DocumentRetryLimitReached("Manual retry limit reached for this document")
+
+    document.status = "queued"
+    document.failure_reason = None
+    document.updated_at = datetime.now(UTC)
+    session.add(
+        OutboxEvent(
+            id=uuid.uuid4(),
+            org_id=org_id,
+            document_id=document.id,
+            topic="extract_document",
+            payload_json=json.dumps({"document_id": str(document.id)}),
+            attempts=0,
+        )
+    )
+    session.add(
+        AuditEvent(
+            id=uuid.uuid4(),
+            org_id=org_id,
+            actor_user_id=user_id,
+            event_type="document.retry_requested",
+            detail_json=json.dumps({"document_id": str(document.id)}),
+        )
+    )
+    session.commit()
+    return summary(document)

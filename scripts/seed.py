@@ -7,13 +7,15 @@ import uuid
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app.db import normalize_database_url
 from app.models import Membership, Organization, User, WorkflowConfig
 from app.security import hash_password, verify_password
 
 
 def seed() -> None:
     password = os.environ["DEMO_PASSWORD"]
-    engine = create_engine(os.environ["DATABASE_OWNER_URL"])
+    reset_credentials = os.environ.get("RESET_DEMO_CREDENTIALS") == "1"
+    engine = create_engine(normalize_database_url(os.environ["DATABASE_OWNER_URL"]))
     demo_orgs = [
         (
             "northwind",
@@ -27,7 +29,7 @@ def seed() -> None:
             "Contoso Logistics",
             "contoso@example.com",
             "reviewer",
-            "purchase_order",
+            "invoice",
         ),
     ]
     with Session(engine) as session, session.begin():
@@ -42,7 +44,7 @@ def seed() -> None:
                     id=uuid.uuid4(), email=email, password_hash=hash_password(password)
                 )
                 session.add(user)
-            elif not verify_password(user.password_hash, password):
+            elif reset_credentials and not verify_password(user.password_hash, password):
                 user.password_hash = hash_password(password)
             session.flush()
             membership = session.scalar(
@@ -56,8 +58,6 @@ def seed() -> None:
                         id=uuid.uuid4(), org_id=org.id, user_id=user.id, role=role
                     )
                 )
-            else:
-                membership.role = role
             config = session.scalar(
                 select(WorkflowConfig).where(
                     WorkflowConfig.org_id == org.id, WorkflowConfig.version == 1

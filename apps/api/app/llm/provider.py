@@ -37,7 +37,7 @@ class ExtractionProvider(Protocol):
 
 def pdf_pages(data: bytes) -> list[str]:
     try:
-        reader = PdfReader(BytesIO(data), strict=True)
+        reader = PdfReader(BytesIO(data), strict=False)
         if reader.is_encrypted or len(reader.pages) > 10:
             raise ExtractionError("Only unencrypted PDFs of up to 10 pages are supported")
         pages = [page.extract_text() or "" for page in reader.pages]

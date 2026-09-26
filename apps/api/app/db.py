@@ -6,7 +6,16 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
 
-engine = create_engine(get_settings().database_url, pool_pre_ping=True)
+
+def normalize_database_url(url: str) -> str:
+    """Use the installed psycopg 3 driver for common hosted Postgres URLs."""
+    for prefix in ("postgres://", "postgresql://"):
+        if url.startswith(prefix):
+            return "postgresql+psycopg://" + url[len(prefix) :]
+    return url
+
+
+engine = create_engine(normalize_database_url(get_settings().database_url), pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
