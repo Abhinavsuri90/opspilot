@@ -69,7 +69,7 @@ export default function DashboardPage() {
       <section className="card max-w-3xl p-8">
         <div className="mb-5 grid h-12 w-12 place-items-center rounded-xl bg-blue-50 text-2xl text-blue-800 dark:bg-slate-700">▣</div>
         <h2 className="text-xl font-semibold">Your workspace is ready</h2>
-        <p className="mt-3 max-w-xl leading-7 text-slate-500">Upload a synthetic text-layer invoice to see tenant-isolated intake and deterministic field extraction. Human review and governed actions are still being built.</p>
+        <p className="mt-3 max-w-xl leading-7 text-slate-600 dark:text-slate-300">Upload a text-layer invoice to see tenant-isolated intake and evidence-backed field extraction. Human review and governed actions are still being built.</p>
         <Link href="/inbox" className="mt-5 inline-block text-blue-700 hover:underline">Open inbox →</Link>
       </section>
     </main>

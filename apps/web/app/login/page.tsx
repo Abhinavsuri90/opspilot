@@ -27,7 +27,9 @@ export default function LoginPage() {
     try {
       const result = await api.POST("/v1/auth/login", { body: parsed.data });
       if (result.error || !result.data) {
-        setError("Invalid organization, email, or password");
+        setError(result.response.status === 401
+          ? "Invalid organization, email, or password."
+          : "Sign in is temporarily unavailable. Please try again.");
         return;
       }
       queryClient.setQueryData(["session"], result.data);
@@ -53,7 +55,7 @@ export default function LoginPage() {
         {error && <p role="alert" className="rounded-lg bg-red-50 p-3 text-sm text-red-800">{error}</p>}
         <button type="submit" disabled={pending} className="primary w-full">{pending ? "Signing in…" : "Sign in"}</button>
       </form>
-      <p className="mt-5 text-center text-sm text-slate-500">Local demo credentials are set in your environment.</p>
+      <p className="mt-5 text-center text-sm text-slate-600 dark:text-slate-300">Use the credentials provided for your workspace.</p>
     </div>
   </main>;
 }
