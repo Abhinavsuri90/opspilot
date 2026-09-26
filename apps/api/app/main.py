@@ -4,7 +4,17 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Annotated
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import (
+    Cookie,
+    Depends,
+    FastAPI,
+    File,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -13,8 +23,17 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app import document_service
 from app.config import get_settings
 from app.db import get_session, set_org_context
+from app.document_service import (
+    MAX_UPLOAD_BYTES,
+    DocumentDetail,
+    DocumentSummary,
+    InvalidDocument,
+    MissingWorkflowConfig,
+    UploadResponse,
+)
 from app.models import Membership, Organization, User
 from app.repositories import (
     get_membership,
@@ -30,6 +49,7 @@ from app.security import (
     read_session_token,
     verify_password,
 )
+from app.storage import ObjectStore, StorageError, get_store
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -127,9 +147,7 @@ async def add_request_id(
 ) -> Response:
     supplied_id = request.headers.get("X-Request-ID", "")
     request_id = (
-        supplied_id
-        if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", supplied_id)
-        else str(uuid.uuid4())
+        supplied_id if re.fullmatch(r"[A-Za-z0-9._-]{1,128}", supplied_id) else str(uuid.uuid4())
     )
     request.state.request_id = request_id
     response = await call_next(request)
@@ -220,3 +238,43 @@ def organization_members(
         MemberResponse(user_id=user.id, email=user.email, role=member.role)
         for member, user in list_members(session, org.id)
     ]
+
+
+@app.post("/v1/documents", response_model=UploadResponse, status_code=202)
+def upload_document(
+    file: Annotated[UploadFile, File()],
+    identity: Annotated[tuple[Session, User, Organization, Membership], Depends(current_session)],
+    store: Annotated[ObjectStore, Depends(get_store)],
+) -> UploadResponse:
+    session, user, org, membership = identity
+    if membership.role not in ("admin", "reviewer"):
+        raise HTTPException(status_code=403, detail="Uploader role required")
+    data = file.file.read(MAX_UPLOAD_BYTES + 1)
+    try:
+        return document_service.upload(session, store, org.id, user.id, file.filename or "", data)
+    except InvalidDocument as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MissingWorkflowConfig as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except StorageError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/v1/documents", response_model=list[DocumentSummary])
+def documents(
+    identity: Annotated[tuple[Session, User, Organization, Membership], Depends(current_session)],
+) -> list[DocumentSummary]:
+    session, _, org, _ = identity
+    return document_service.browse(session, org.id)
+
+
+@app.get("/v1/documents/{document_id}", response_model=DocumentDetail)
+def document_detail(
+    document_id: uuid.UUID,
+    identity: Annotated[tuple[Session, User, Organization, Membership], Depends(current_session)],
+) -> DocumentDetail:
+    session, _, org, _ = identity
+    result = document_service.read(session, org.id, document_id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return result

@@ -12,6 +12,14 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     web_origin: str = "http://localhost:3300"
     environment: str = "development"
+    s3_endpoint_url: str | None = None
+    s3_bucket: str = "documents"
+    s3_region: str = "us-east-1"
+    s3_access_key_id: str = "local"
+    s3_secret_access_key: str = "local"
+    llm_provider: str = "mock"
+    openrouter_api_key: str | None = None
+    openrouter_model: str = "google/gemini-3.8-flash"
 
     @model_validator(mode="after")
     def reject_unsafe_deployment(self) -> "Settings":

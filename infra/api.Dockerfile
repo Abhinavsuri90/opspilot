@@ -8,7 +8,9 @@ COPY apps/api/alembic /workspace/apps/api/alembic
 COPY apps/api/alembic.ini /workspace/apps/api/alembic.ini
 COPY apps/api/tests /workspace/apps/api/tests
 COPY scripts /workspace/scripts
+COPY examples /workspace/examples
+COPY evals /workspace/evals
 WORKDIR /workspace/apps/api
-ENV PYTHONPATH=/workspace/apps/api
+ENV PYTHONPATH=/workspace:/workspace/apps/api
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
