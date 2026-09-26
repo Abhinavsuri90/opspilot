@@ -62,7 +62,7 @@ async function forward(request: NextRequest, context: RouteContext): Promise<Res
       signal: AbortSignal.any([request.signal, AbortSignal.timeout(60_000)]),
     });
     const responseHeaders = new Headers({ "cache-control": "no-store" });
-    for (const name of ["content-type", "x-request-id"]) {
+    for (const name of ["content-type", "x-request-id", "content-disposition", "x-content-type-options", "content-security-policy", "server-timing"]) {
       const value = upstream.headers.get(name);
       if (value) responseHeaders.set(name, value);
     }

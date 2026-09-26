@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
 
-type Section = "dashboard" | "inbox" | "admin";
+type Section = "dashboard" | "inbox" | "review" | "insights" | "admin";
 
 type Session = {
   org_name: string;
@@ -25,6 +25,8 @@ function NavIcon({ name }: { name: Section }) {
   return <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" {...common}>
     {name === "dashboard" && <><rect x="3.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="3.5" y="13.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="13.5" width="7" height="7" rx="1.5" /></>}
     {name === "inbox" && <><path d="M4 4.5h16v13.2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4.5Z" /><path d="M4 14h4l1.5 2h5l1.5-2h4" /></>}
+    {name === "review" && <><rect x="5" y="4" width="14" height="17" rx="2" /><path d="M9 4V2h6v2M9 11l2 2 4-4M9 17h6" /></>}
+    {name === "insights" && <><path d="M4 4v16h17M8 16v-5M13 16V7M18 16v-8" /></>}
     {name === "admin" && <><circle cx="9" cy="8.5" r="3" /><path d="M3.5 19v-1.2A4.8 4.8 0 0 1 8.3 13h1.4a4.8 4.8 0 0 1 4.8 4.8V19H3.5Z" /><path d="M16 6a3 3 0 0 1 0 5.7M17 13.4a4.8 4.8 0 0 1 3.5 4.6v1" /></>}
   </svg>;
 }
@@ -51,6 +53,8 @@ export function AppShell({ session, active, children }: AppShellProps) {
   const items: { key: Section; label: string; href: string }[] = [
     { key: "dashboard", label: "Dashboard", href: "/dashboard" },
     { key: "inbox", label: "Inbox", href: "/inbox" },
+    ...(session.role === "admin" || session.role === "reviewer" ? [{ key: "review" as const, label: "Review", href: "/review" }] : []),
+    { key: "insights", label: "Insights", href: "/insights" },
   ];
 
   async function signOut() {
@@ -81,6 +85,7 @@ export function AppShell({ session, active, children }: AppShellProps) {
   </Link>;
 
   return <div className="min-h-screen bg-[#f5f7fb] text-slate-900 lg:flex">
+    <a href="#main-content" className="sr-only z-50 rounded-lg bg-white px-4 py-3 font-semibold text-slate-900 focus:not-sr-only focus:fixed focus:left-4 focus:top-4">Skip to content</a>
     <aside className="z-20 flex shrink-0 flex-col bg-[#0d2039] text-white lg:sticky lg:top-0 lg:h-screen lg:w-[268px]" aria-label="Workspace sidebar">
       <div className="flex items-center justify-between gap-3 px-5 py-5 lg:px-6 lg:py-7">
         <Link href="/dashboard" className="flex items-center gap-3 rounded-lg" aria-label="OpsPilot dashboard" onClick={() => setMenuOpen(false)}>

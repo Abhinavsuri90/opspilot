@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { AppShell } from "@/components/AppShell";
+import { useWorkspaceSummary } from "@/lib/use-workspace";
 import { api } from "@/lib/api";
 import { documentStatusLabel, isDocumentInProgress } from "@/lib/document-status";
 
@@ -24,19 +25,21 @@ export default function DashboardPage() {
   const queryClient = useQueryClient();
   const session = useQuery({
     queryKey: ["session"],
+    refetchInterval: 15000,
     queryFn: async () => {
       const result = await api.GET("/v1/auth/me");
-      if (result.response.status === 401) throw new Error("Unauthorized");
+      if (result.response.status === 401 || result.response.status === 403) throw new Error("Unauthorized");
       if (result.error || !result.data) throw new Error("Could not load your workspace");
       return result.data;
     },
   });
+  const summary = useWorkspaceSummary(session.data?.org_id, session.data?.user_id);
   const documents = useQuery({
-    queryKey: ["documents", session.data?.org_id],
+    queryKey: ["documents", session.data?.user_id, session.data?.org_id],
     enabled: Boolean(session.data),
     queryFn: async () => {
       const result = await api.GET("/v1/documents");
-      if (result.response.status === 401) throw new Error("Unauthorized");
+      if (result.response.status === 401 || result.response.status === 403) throw new Error("Unauthorized");
       if (result.error || !result.data) throw new Error("Could not load documents");
       return result.data;
     },
@@ -56,12 +59,12 @@ export default function DashboardPage() {
 
   const recent = documents.data ?? [];
   const counts = {
-    review: recent.filter(item => item.status === "needs_review").length,
-    processing: recent.filter(item => isDocumentInProgress(item.status)).length,
-    failed: recent.filter(item => item.status === "failed").length,
+    review: summary.data?.status_counts.needs_review ?? 0,
+    processing: (summary.data?.status_counts.queued ?? 0) + (summary.data?.status_counts.extracting ?? 0),
+    failed: summary.data?.status_counts.failed ?? 0,
   };
   const metrics = [
-    { label: "Recent documents", value: recent.length, detail: "Latest 50 shown", color: "bg-sky-100 text-sky-700", icon: "▤" },
+    { label: "Accessible invoices", value: summary.data?.total_documents ?? 0, detail: "Across your entire workspace", color: "bg-sky-100 text-sky-700", icon: "▤" },
     { label: "Needs review", value: counts.review, detail: "Fields ready to inspect", color: "bg-amber-100 text-amber-700", icon: "◷" },
     { label: "In progress", value: counts.processing, detail: "Queued or extracting", color: "bg-cyan-100 text-cyan-700", icon: "↗" },
     { label: "Failed", value: counts.failed, detail: "May be eligible to retry", color: "bg-rose-100 text-rose-700", icon: "!" },
@@ -83,15 +86,16 @@ export default function DashboardPage() {
       <div aria-hidden="true" className="pointer-events-none absolute -right-10 -top-16 -z-10 h-64 w-64 rounded-full border-[34px] border-cyan-300/10" />
       <div aria-hidden="true" className="pointer-events-none absolute bottom-[-110px] right-48 -z-10 h-52 w-52 rounded-full border-[24px] border-white/5" />
       <p className="text-[11px] font-bold uppercase tracking-[.18em] text-cyan-200">Invoice workflow</p>
-      <h2 className="mt-3 max-w-2xl text-2xl font-semibold tracking-[-.03em] sm:text-[30px]">From PDF to evidence-backed fields.</h2>
-      <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-200">Upload a text-layer invoice in the Inbox. OpsPilot extracts key fields and shows the source text and page for each result.</p>
-      <div className="mt-5 flex flex-wrap gap-x-6 gap-y-2 text-xs font-medium text-cyan-100"><span>01 · Upload</span><span>02 · Extract</span><span>03 · Inspect evidence</span></div>
+      <h2 className="mt-3 max-w-2xl text-2xl font-semibold tracking-[-.03em] sm:text-[30px]">A clear path from invoice to approval.</h2>
+      <p className="mt-2 max-w-2xl text-sm leading-6 text-slate-200">Upload an invoice, inspect its source evidence, and collaborate with your reviewers. Track decisions and verified amounts from one workspace.</p>
+      <div className="mt-5 flex flex-wrap gap-x-6 gap-y-2 text-xs font-medium text-cyan-100"><span>01 · Upload</span><span>02 · Extract</span><span>03 · Review together</span><span>04 · Approve</span></div>
     </section>
 
+    {summary.isError && <p role="alert" className="mt-4 text-sm text-rose-700">Could not load workspace totals. <button onClick={() => summary.refetch()} className="underline">Try again</button></p>}
     <section aria-label="Document summary" className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
       {metrics.map(metric => <div key={metric.label} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_6px_20px_rgba(15,23,42,.035)]">
         <div className="flex items-start justify-between gap-2"><p className="text-xs font-semibold text-slate-600">{metric.label}</p><span aria-hidden="true" className={`grid h-8 w-8 place-items-center rounded-lg text-lg font-bold ${metric.color}`}>{metric.icon}</span></div>
-        <p className="mt-3 text-[31px] font-bold leading-none tracking-[-.04em] text-[#12233d]">{!documents.data ? <span className="text-slate-300">—</span> : metric.value}</p>
+        <p className="mt-3 text-[31px] font-bold leading-none tracking-[-.04em] text-[#12233d]">{!summary.data ? <span className="text-slate-300">—</span> : metric.value}</p>
         <p className="mt-2 text-xs text-slate-500">{metric.detail}</p>
       </div>)}
     </section>
@@ -103,7 +107,7 @@ export default function DashboardPage() {
       </div>
       {documents.isPending && <p role="status" className="px-6 py-12 text-center text-sm text-slate-500">Loading documents…</p>}
       {documents.isError && <div className="px-6 py-8 text-sm text-rose-800" role="alert">Could not load documents. <button type="button" onClick={() => documents.refetch()} className="font-semibold underline">Try again</button></div>}
-      {documents.isSuccess && recent.length === 0 && <div className="px-6 py-12 text-center"><div aria-hidden="true" className="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-sky-50 text-2xl text-sky-700">▤</div><h3 className="mt-4 font-semibold text-slate-800">No documents yet</h3><p className="mt-1 text-sm text-slate-500">Upload the sample invoice from the Inbox to see the workflow.</p><Link href="/inbox" className="mt-4 inline-block text-sm font-semibold text-[#11627a] hover:underline">Open inbox →</Link></div>}
+      {documents.isSuccess && recent.length === 0 && <div className="px-6 py-12 text-center"><div aria-hidden="true" className="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-sky-50 text-2xl text-sky-700">▤</div><h3 className="mt-4 font-semibold text-slate-800">No documents yet</h3><p className="mt-1 text-sm text-slate-500">Upload your first invoice from the Inbox to start the workflow.</p><Link href="/inbox" className="mt-4 inline-block text-sm font-semibold text-[#11627a] hover:underline">Open inbox →</Link></div>}
       {documents.isSuccess && recent.length > 0 && <div className="divide-y divide-slate-100">
         {recent.slice(0, 6).map(item => <Link key={item.id} href={`/inbox?document=${encodeURIComponent(item.id)}`} className="group flex items-center gap-4 px-5 py-4 transition-colors hover:bg-slate-50 sm:px-6">
           <span aria-hidden="true" className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-sky-50 text-lg text-[#12617b]">▤</span>

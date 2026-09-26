@@ -13,7 +13,7 @@ body {
   font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
-button, input, select { font: inherit; }
+button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: not-allowed; opacity: .55; }
 ::selection { background: #c8d9ff; color: #152d58; }
@@ -73,3 +73,5 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 }
 .nav-link { display: block; padding: .7rem .85rem; border-radius: 10px; color: #5b6d84; text-decoration: none; }
 .nav-link:hover, .nav-link.active { background: #eaf1fc; color: #214f99; }
+
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } *, *::before, *::after { transition-duration: .01ms !important; } }

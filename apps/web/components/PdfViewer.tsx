@@ -1,0 +1,205 @@
+"use client";
+
+import { useEffect, useId, useRef, useState } from "react";
+import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from "pdfjs-dist";
+import { api } from "@/lib/api";
+
+type PdfViewerProps = { documentId: string };
+
+function loadMessage(error: unknown) {
+  if (error instanceof Error && error.message.startsWith("Invoice:")) return error.message.slice(8);
+  return "The PDF could not be displayed. Try again, or download the original document.";
+}
+
+function PdfDocument({ documentId }: PdfViewerProps) {
+  const descriptionId = useId();
+  const frame = useRef<HTMLDivElement>(null);
+  const canvasHost = useRef<HTMLDivElement>(null);
+  const renderingTask = useRef<RenderTask | null>(null);
+  const [pdf, setPdf] = useState<PDFDocumentProxy | null>(null);
+  const [page, setPage] = useState(1);
+  const [zoom, setZoom] = useState(1);
+  const [width, setWidth] = useState(0);
+  const [attempt, setAttempt] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [rendering, setRendering] = useState(false);
+  const [error, setError] = useState("");
+  const [pageText, setPageText] = useState("");
+
+  useEffect(() => {
+    const element = frame.current;
+    if (!element) return;
+    const resize = () => setWidth(Math.max(160, Math.floor(element.clientWidth - 24)));
+    resize();
+    const observer = new ResizeObserver(resize);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let timedOut = false;
+    let task: PDFDocumentLoadingTask | undefined;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+      void task?.destroy().catch(() => undefined);
+      if (!disposed) {
+        setError("The PDF took too long to load. Check your connection and retry.");
+        setLoading(false);
+      }
+    }, 30_000);
+    setPdf(null);
+    setPage(1);
+    setLoading(true);
+    setError("");
+
+    async function load() {
+      try {
+        // Dynamic import avoids evaluating browser canvas APIs during server rendering.
+        const [library, result] = await Promise.all([
+          // The official compatibility build includes browser polyfills in
+          // both the library and worker (for example Promise.try).
+          import("pdfjs-dist/legacy/build/pdf.mjs"),
+          api.GET("/v1/documents/{document_id}/file", {
+            params: { path: { document_id: documentId } },
+            parseAs: "arrayBuffer",
+            signal: controller.signal,
+            cache: "no-store",
+          }),
+        ]);
+        if (disposed || timedOut) return;
+        if (result.response.status === 401 || result.response.status === 403) {
+          throw new Error("Invoice:Your session or invoice access changed. Sign in again to continue.");
+        }
+        if (result.response.status === 404) {
+          throw new Error("Invoice:This invoice is unavailable or you no longer have access.");
+        }
+        if (!result.response.ok || !result.data) throw new Error("PDF request failed");
+        const assets = `/pdfjs/${library.version}/`;
+        library.GlobalWorkerOptions.workerSrc = `${assets}pdf.worker.min.mjs`;
+        task = library.getDocument({
+          data: new Uint8Array(result.data),
+          cMapUrl: `${assets}cmaps/`,
+          cMapPacked: true,
+          standardFontDataUrl: `${assets}standard_fonts/`,
+          wasmUrl: `${assets}wasm/`,
+          iccUrl: `${assets}iccs/`,
+          enableXfa: false,
+        });
+        const loaded = await task.promise;
+        if (!disposed && !timedOut) setPdf(loaded);
+      } catch (failure) {
+        if (!disposed && !timedOut) setError(loadMessage(failure));
+      } finally {
+        window.clearTimeout(timeout);
+        if (!disposed) setLoading(false);
+      }
+    }
+    void load();
+    return () => {
+      disposed = true;
+      window.clearTimeout(timeout);
+      controller.abort();
+      renderingTask.current?.cancel();
+      void task?.destroy().catch(() => undefined);
+    };
+  }, [documentId, attempt]);
+
+  useEffect(() => {
+    const host = canvasHost.current;
+    if (!pdf || !host || !width) return;
+    let disposed = false;
+    let task: RenderTask | undefined;
+    host.replaceChildren();
+    setRendering(true);
+    setPageText("");
+    setError("");
+
+    async function render() {
+      try {
+        const sourcePage = await pdf!.getPage(page);
+        if (disposed) return;
+        const original = sourcePage.getViewport({ scale: 1 });
+        const viewport = sourcePage.getViewport({ scale: (width / original.width) * zoom });
+        // Bound canvas memory on large pages and high-density mobile displays.
+        const resolution = Math.min(
+          window.devicePixelRatio || 1, 2,
+          Math.sqrt(16_000_000 / (viewport.width * viewport.height)),
+          8192 / viewport.width, 8192 / viewport.height,
+        );
+        // Each render owns a canvas, so cancellation/rapid paging can never draw
+        // different pages concurrently onto the same canvas.
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.floor(viewport.width * resolution));
+        canvas.height = Math.max(1, Math.floor(viewport.height * resolution));
+        canvas.style.width = `${Math.floor(viewport.width)}px`;
+        canvas.style.height = `${Math.floor(viewport.height)}px`;
+        canvas.className = "block bg-white shadow-sm";
+        canvas.setAttribute("role", "img");
+        canvas.setAttribute("aria-label", `Invoice PDF page ${page} of ${pdf!.numPages}`);
+        canvas.setAttribute("aria-describedby", descriptionId);
+        task = sourcePage.render({
+          canvas, viewport,
+          transform: [resolution, 0, 0, resolution, 0, 0],
+          background: "white",
+        });
+        renderingTask.current = task;
+        await task.promise;
+        if (disposed) return;
+        host!.replaceChildren(canvas);
+        setRendering(false);
+        const text = await sourcePage.getTextContent();
+        if (!disposed) setPageText(text.items.map(item => "str" in item ? item.str + (item.hasEOL ? "\n" : " ") : "").join(""));
+      } catch (failure) {
+        if (!disposed) {
+          setError(loadMessage(failure));
+          setRendering(false);
+        }
+      }
+    }
+    void render();
+    return () => {
+      disposed = true;
+      task?.cancel();
+      if (renderingTask.current === task) renderingTask.current = null;
+      host.replaceChildren();
+    };
+  }, [pdf, page, width, zoom, descriptionId]);
+
+  function navigate(next: number) {
+    setPage(next);
+    frame.current?.scrollTo({ top: 0, left: 0 });
+  }
+
+  return <div className="min-w-0 space-y-3" aria-label="Invoice PDF viewer">
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-3">
+      <div className="flex items-center gap-2">
+        <button type="button" className="secondary px-3 text-xs" disabled={!pdf || page <= 1} onClick={() => navigate(page - 1)} aria-label="Previous PDF page">← Previous</button>
+        <span className="text-xs font-semibold tabular-nums text-slate-700" aria-live="polite">{pdf ? `Page ${page} of ${pdf.numPages}` : "Loading pages…"}</span>
+        <button type="button" className="secondary px-3 text-xs" disabled={!pdf || page >= pdf.numPages} onClick={() => navigate(page + 1)} aria-label="Next PDF page">Next →</button>
+      </div>
+      <label className="flex items-center gap-2 text-xs font-semibold text-slate-600">Zoom
+        <select className="rounded-lg border border-slate-200 bg-white px-2 py-2 text-xs" aria-label="PDF zoom" value={zoom} onChange={event => setZoom(Number(event.target.value))} disabled={!pdf}>
+          <option value={0.75}>75% of width</option><option value={1}>Fit width</option><option value={1.25}>125% of width</option><option value={1.5}>150% of width</option><option value={2}>200% of width</option>
+        </select>
+      </label>
+    </div>
+    {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{error}<button type="button" className="ml-2 font-semibold underline" onClick={() => setAttempt(value => value + 1)}>Retry PDF</button></div>}
+    <div ref={frame} className="relative max-h-[72vh] min-h-64 overflow-auto rounded-xl border border-slate-200 bg-slate-100 p-3" aria-busy={loading || rendering} tabIndex={0} aria-label="Scrollable PDF page">
+      {(loading || rendering) && !error && <p role="status" className="py-16 text-center text-sm text-slate-500">{loading ? "Loading PDF…" : `Rendering page ${page}…`}</p>}
+      <div ref={canvasHost} className="mx-auto w-max min-w-0" />
+    </div>
+    <p id={descriptionId} className="text-xs leading-5 text-slate-500">Navigate through every page and zoom to check invoice details. Select “Read page text” for a copyable text version.</p>
+    {pdf && !loading && !rendering && !error && <details className="rounded-xl border border-slate-200 bg-white p-3">
+      <summary className="cursor-pointer text-xs font-semibold text-slate-700">Read page {page} text</summary>
+      <p className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">{pageText.trim() || "No selectable text is available on this page. Inspect the page image above."}</p>
+    </details>}
+  </div>;
+}
+
+export function PdfViewer({ documentId }: PdfViewerProps) {
+  // A changed document immediately disposes its worker and erases the old page.
+  return <PdfDocument key={documentId} documentId={documentId} />;
+}
