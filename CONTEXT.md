@@ -2,15 +2,15 @@
 
 ## Last updated
 
-2026-09-26 15:47 IST, after verified commit `6431026`. Run `git log -1 --oneline` for the latest commit and confirm its CI run before deployment.
+2026-09-26 16:37 IST. Application code at `6a680a6` passed the [four-job CI run](https://github.com/Abhinavsuri90/opspilot/actions/runs/36237433628). The local Compose stack is stopped; its database and storage volumes remain.
 
 ## Current status
 
-OpsPilot is a local Phase 1 invoice intake/extraction prototype. Authenticated tenants upload text-layer PDFs through a Next.js web app and same-origin API proxy. FastAPI stores documents in S3-compatible storage and queues extraction through a Postgres outbox. The worker records four fields with page-level evidence; the Inbox displays results and permits two manual retries of a failed document. A Postgres login attempt counter and raw-upload limit guard the public demo path. OpenRouter is optional; live extraction accuracy has not been tested. Public staging and the review/approval/action phases are pending.
+OpsPilot is a local Phase 1 invoice intake/extraction prototype. The four working web pages are Login, Dashboard, Inbox, and a read-only Admin directory for administrators. Authenticated tenants upload text-layer PDFs through the Next.js same-origin API proxy. FastAPI stores documents in S3-compatible storage and queues extraction through a Postgres outbox. The worker records four fields with page-level evidence; the Inbox searches/filters recent records and permits two manual retries of a failed document. A Postgres login attempt counter and raw-upload limit guard the public demo path. OpenRouter is optional; live extraction accuracy has not been tested. Public staging and the review/approval/action phases are pending.
 
-The screenshot of failed CI commit `69ebf1b` is historical. Commit `45f4f3e` passed all three then-existing jobs. The [new four-job CI run](https://github.com/Abhinavsuri90/opspilot/actions/runs/36233730171), including the full-stack browser smoke and Python dependency audit, passed at `217545a`.
+The screenshot of failed CI commit `69ebf1b` is historical. The [application CI run](https://github.com/Abhinavsuri90/opspilot/actions/runs/36237433628) passed API, web, release-image, and browser jobs at `6a680a6`; the browser job includes company-wise invoice upload and isolation.
 
-The latest local audit covers all 10 API routes and web error states. It adds endpoint contract tests, a browser error-state script, a proxy header fix, a bounded Inbox list, and refreshed screenshots. Five empty future engagement templates were removed. Every deployed commit must have a green CI run.
+The latest local audit covers all 10 API routes and web error states. The redesigned frontend has a shared responsive shell, useful Dashboard, searchable Inbox, and read-only Admin member directory. Four fictional PDFs under `examples/demo/` support a Northwind/Contoso isolation walkthrough. Five empty future engagement templates were removed earlier; all remaining tracked Markdown is substantive. Every deployed commit must have a green CI run.
 
 ## Exact next step
 
@@ -20,9 +20,9 @@ The latest local audit covers all 10 API routes and web error states. It adds en
 ## Files in play
 
 - `apps/api/`: migration `0003`, login throttle, upload/storage/integrity limits, tenant-fair worker, and tests.
-- `apps/web/`: session-aware queries, upload validation and role UX, proxy header forwarding, Inbox layout, and browser error tests.
+- `apps/web/`: responsive shell, Dashboard, Inbox, Admin member directory, session-aware queries, and browser happy/error/tenant-isolation tests.
 - `.github/workflows/ci.yml`, `infra/`, `Makefile`: pinned release dependencies, audits, ordered local startup, and browser CI.
-- `README.md`, `SPEC.md`, `SYSTEM_DESIGN.md`, `docs/assets/`, and `docs/engagement/`: local steps, honest scope, current screenshots, and removal of empty future templates.
+- `README.md`, `SPEC.md`, `SYSTEM_DESIGN.md`, `docs/assets/`, and `examples/demo/`: local steps, honest scope, current screenshots, and fictional company invoices.
 - `docs/deployment.md`, `docs/deployment-readiness-review.md`, `docs/demo-guide.md`, ADR 003/004: deployment and design evidence.
 
 ## Decisions and deviations
@@ -40,7 +40,7 @@ The latest local audit covers all 10 API routes and web error states. It adds en
 
 ## How to run and test
 
-Run `LLM_PROVIDER=mock OPENROUTER_API_KEY= make up`, then `make smoke` and `LLM_PROVIDER=mock OPENROUTER_API_KEY= make smoke-ui`. Run `cd apps/web && npm run test:e2e:errors` for the mocked browser error paths; `make lint typecheck test` runs code checks. `make down` stops local services without deleting persistent data. The latest local verification passed: 41 API tests across all 10 routes, 16 web tests, Ruff, strict mypy, web lint/typecheck/build, API and browser smokes, and the browser error-state script. The synthetic mock evaluation and dependency audits passed in the previous review; they are not live-model accuracy claims.
+Run `LLM_PROVIDER=mock OPENROUTER_API_KEY= make up`, then `make smoke`, `LLM_PROVIDER=mock OPENROUTER_API_KEY= make smoke-ui`, and `LLM_PROVIDER=mock OPENROUTER_API_KEY= make smoke-tenants`. Run `cd apps/web && npm run test:e2e:errors` for the mocked browser error paths; `make lint typecheck test` runs code checks. `make down` stops local services without deleting persistent data. The latest local verification passed: 41 API tests across all 10 routes, 16 web tests, Ruff, strict mypy, web lint/typecheck/build, browser happy/error/company-isolation flows, and a 390-pixel mobile check. The synthetic mock evaluation and dependency audits passed in the previous review; they are not live-model accuracy claims.
 
 ## Known issues and gotchas
 
