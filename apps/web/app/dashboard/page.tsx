@@ -5,41 +5,33 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { AppShell } from "@/components/AppShell";
-import { useWorkspaceSummary } from "@/lib/use-workspace";
+import { SessionFallback } from "@/components/SessionFallback";
 import { api } from "@/lib/api";
-import { documentStatusLabel, isDocumentInProgress } from "@/lib/document-status";
+import { countInProgress, documentStatusLabel, documentStatusTone, isDocumentInProgress, type DocumentStatusTone } from "@/lib/document-status";
+import { isUnauthorizedError, isUnauthorizedStatus, unauthorizedError } from "@/lib/errors";
+import { formatDateTime } from "@/lib/format";
+import { useWorkspace, useWorkspaceSummary } from "@/lib/use-workspace";
 
-function statusStyle(status: string) {
-  if (status === "needs_review") return "bg-amber-50 text-amber-800 ring-amber-200";
-  if (status === "failed") return "bg-rose-50 text-rose-800 ring-rose-200";
-  if (isDocumentInProgress(status)) return "bg-sky-50 text-sky-800 ring-sky-200";
-  return "bg-slate-50 text-slate-700 ring-slate-200";
-}
-
-function dateLabel(value: string) {
-  return new Intl.DateTimeFormat("en-US", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }).format(new Date(value));
-}
+const pillTones: Record<DocumentStatusTone, string> = {
+  review: "bg-amber-50 text-amber-800 ring-amber-200",
+  failed: "bg-rose-50 text-rose-800 ring-rose-200",
+  progress: "bg-sky-50 text-sky-800 ring-sky-200",
+  completed: "bg-emerald-50 text-emerald-800 ring-emerald-200",
+  rejected: "bg-slate-100 text-slate-600 ring-slate-200",
+  neutral: "bg-slate-50 text-slate-700 ring-slate-200",
+};
 
 export default function DashboardPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const session = useQuery({
-    queryKey: ["session"],
-    refetchInterval: 15000,
-    queryFn: async () => {
-      const result = await api.GET("/v1/auth/me");
-      if (result.response.status === 401 || result.response.status === 403) throw new Error("Unauthorized");
-      if (result.error || !result.data) throw new Error("Could not load your workspace");
-      return result.data;
-    },
-  });
+  const session = useWorkspace();
   const summary = useWorkspaceSummary(session.data?.org_id, session.data?.user_id);
   const documents = useQuery({
     queryKey: ["documents", session.data?.user_id, session.data?.org_id],
     enabled: Boolean(session.data),
     queryFn: async () => {
       const result = await api.GET("/v1/documents");
-      if (result.response.status === 401 || result.response.status === 403) throw new Error("Unauthorized");
+      if (isUnauthorizedStatus(result.response.status)) throw unauthorizedError();
       if (result.error || !result.data) throw new Error("Could not load documents");
       return result.data;
     },
@@ -47,27 +39,20 @@ export default function DashboardPage() {
   });
 
   useEffect(() => {
-    if (session.error?.message === "Unauthorized" || documents.error?.message === "Unauthorized") {
+    if (isUnauthorizedError(documents.error)) {
       queryClient.clear();
       router.replace("/login");
     }
-  }, [session.error, documents.error, queryClient, router]);
+  }, [documents.error, queryClient, router]);
 
-  if (session.error?.message === "Unauthorized" || documents.error?.message === "Unauthorized") return <main className="p-8 text-slate-500" role="status">Checking your session…</main>;
-  if (session.isError) return <main className="p-8"><p role="alert">Could not load your workspace.</p><button type="button" onClick={() => session.refetch()} className="primary mt-4">Try again</button></main>;
-  if (!session.data) return <main className="p-8 text-slate-500" role="status">Loading workspace…</main>;
+  if (session.isError || !session.data || isUnauthorizedError(documents.error)) return <SessionFallback session={session} />;
 
   const recent = documents.data ?? [];
-  const counts = {
-    review: summary.data?.status_counts.needs_review ?? 0,
-    processing: (summary.data?.status_counts.queued ?? 0) + (summary.data?.status_counts.extracting ?? 0),
-    failed: summary.data?.status_counts.failed ?? 0,
-  };
   const metrics = [
     { label: "Accessible invoices", value: summary.data?.total_documents ?? 0, detail: "Across your entire workspace", color: "bg-sky-100 text-sky-700", icon: "▤" },
-    { label: "Needs review", value: counts.review, detail: "Fields ready to inspect", color: "bg-amber-100 text-amber-700", icon: "◷" },
-    { label: "In progress", value: counts.processing, detail: "Queued or extracting", color: "bg-cyan-100 text-cyan-700", icon: "↗" },
-    { label: "Failed", value: counts.failed, detail: "May be eligible to retry", color: "bg-rose-100 text-rose-700", icon: "!" },
+    { label: "Needs review", value: summary.data?.status_counts.needs_review ?? 0, detail: "Fields ready to inspect", color: "bg-amber-100 text-amber-700", icon: "◷" },
+    { label: "In progress", value: countInProgress(summary.data?.status_counts), detail: "Queued, extracting or validating", color: "bg-cyan-100 text-cyan-700", icon: "↗" },
+    { label: "Failed", value: summary.data?.status_counts.failed ?? 0, detail: "May be eligible to retry", color: "bg-rose-100 text-rose-700", icon: "!" },
   ];
 
   return <AppShell session={session.data} active="dashboard">
@@ -111,8 +96,8 @@ export default function DashboardPage() {
       {documents.isSuccess && recent.length > 0 && <div className="divide-y divide-slate-100">
         {recent.slice(0, 6).map(item => <Link key={item.id} href={`/inbox?document=${encodeURIComponent(item.id)}`} className="group flex items-center gap-4 px-5 py-4 transition-colors hover:bg-slate-50 sm:px-6">
           <span aria-hidden="true" className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-sky-50 text-lg text-[#12617b]">▤</span>
-          <span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold text-slate-800 group-hover:text-[#11627a]">{item.filename}</span><span className="mt-0.5 block text-xs text-slate-500">{dateLabel(item.created_at)}<span className="capitalize sm:hidden"> · {documentStatusLabel(item.status)}</span></span></span>
-          <span className={`hidden rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize ring-1 sm:inline-flex ${statusStyle(item.status)}`}>{documentStatusLabel(item.status)}</span>
+          <span className="min-w-0 flex-1"><span className="block truncate text-sm font-semibold text-slate-800 group-hover:text-[#11627a]">{item.filename}</span><span className="mt-0.5 block text-xs text-slate-500">{formatDateTime(item.created_at)}<span className="capitalize sm:hidden"> · {documentStatusLabel(item.status)}</span></span></span>
+          <span className={`hidden rounded-full px-2.5 py-1 text-[11px] font-semibold capitalize ring-1 sm:inline-flex ${pillTones[documentStatusTone(item.status)]}`}>{documentStatusLabel(item.status)}</span>
           <span aria-hidden="true" className="text-slate-400 group-hover:text-[#11627a]">→</span>
         </Link>)}
       </div>}

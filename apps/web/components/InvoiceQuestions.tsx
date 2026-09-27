@@ -4,6 +4,7 @@ import { useMutation } from "@tanstack/react-query";
 import Link from "next/link";
 import { useState, type FormEvent } from "react";
 import { api } from "@/lib/api";
+import { formatDateTime } from "@/lib/format";
 
 export function InvoiceQuestions({ documentId, categoryId }: { documentId?: string; categoryId?: string }) {
   const [question, setQuestion] = useState("");
@@ -22,7 +23,7 @@ export function InvoiceQuestions({ documentId, categoryId }: { documentId?: stri
       <div className="flex flex-wrap gap-2">{examples.map(example => <button type="button" key={example} disabled={answer.isPending} onClick={() => { setQuestion(example); answer.mutate(example); }} className="rounded-full border border-cyan-100 bg-cyan-50 px-3 py-2 text-xs font-semibold text-cyan-900 hover:bg-cyan-100">{example}</button>)}</div>
       <form onSubmit={ask} className="flex flex-col gap-2 sm:flex-row"><label className="sr-only" htmlFor={`question-${documentId ?? "workspace"}`}>Your question</label><input id={`question-${documentId ?? "workspace"}`} value={question} onChange={event => setQuestion(event.target.value)} maxLength={1000} placeholder="Ask a question about your invoices…" className="field min-w-0 flex-1 text-sm" required /><button className="primary" disabled={answer.isPending || !question.trim()}>{answer.isPending ? "Checking…" : "Ask"}</button></form>
       {answer.isError && <p role="alert" className="text-sm text-rose-700">{answer.error.message}</p>}
-      {answer.data && <div aria-live="polite" className="rounded-xl border border-slate-200 bg-slate-50 p-4"><p className="whitespace-pre-wrap text-sm leading-7 text-slate-800">{answer.data.answer}</p><p className="mt-3 text-xs text-slate-500">{answer.data.supported ? "Checked against current records" : "Question outside supported scope"} · {new Date(answer.data.as_of).toLocaleString()}</p>{(answer.data.citations ?? []).length > 0 && <ul className="mt-4 space-y-2">{(answer.data.citations ?? []).map((citation, index) => <li key={index} className="rounded-lg bg-white p-3 text-xs leading-5"><Link className="font-semibold text-cyan-800 underline" href={`/inbox?document=${citation.document_id}`}>{citation.filename}</Link><p>{citation.field.replaceAll("_", " ")}: {citation.value}</p><p className="text-slate-500">{citation.evidence}{citation.page_number ? ` · Page ${citation.page_number}` : ""}</p></li>)}</ul>}</div>}
+      {answer.data && <div aria-live="polite" className="rounded-xl border border-slate-200 bg-slate-50 p-4"><p className="whitespace-pre-wrap text-sm leading-7 text-slate-800">{answer.data.answer}</p><p className="mt-3 text-xs text-slate-500">{answer.data.supported ? "Checked against current records" : "Question outside supported scope"} · {formatDateTime(answer.data.as_of)}</p>{(answer.data.citations ?? []).length > 0 && <ul className="mt-4 space-y-2">{(answer.data.citations ?? []).map((citation, index) => <li key={index} className="rounded-lg bg-white p-3 text-xs leading-5"><Link className="font-semibold text-cyan-800 underline" href={`/inbox?document=${citation.document_id}`}>{citation.filename}</Link><p>{citation.field.replaceAll("_", " ")}: {citation.value}</p><p className="text-slate-500">{citation.evidence}{citation.page_number ? ` · Page ${citation.page_number}` : ""}</p></li>)}</ul>}</div>}
     </div>
   </section>;
 }

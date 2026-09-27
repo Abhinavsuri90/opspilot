@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { GET, POST } from "./route";
+import { DELETE, GET, PATCH, POST, PUT } from "./route";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -118,6 +118,72 @@ describe("same-origin API proxy", () => {
     const response = await GET(request, { params: Promise.resolve({ path: ["private"] }) });
 
     expect(response.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects path traversal segments before building the upstream URL", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+    const request = new NextRequest("http://localhost:3300/api/v1/../internal");
+
+    const response = await GET(request, { params: Promise.resolve({ path: ["v1", "..", "internal"] }) });
+
+    expect(response.status).toBe(404);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("passes Retry-After through so the browser can show the real wait", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({ error: { code: "rate_limited" } }), {
+      status: 429,
+      headers: { "content-type": "application/json", "retry-after": "120" },
+    }));
+    const request = new NextRequest("http://localhost:3300/api/v1/auth/login", { method: "POST", body: "{}" });
+
+    const response = await POST(request, { params: Promise.resolve({ path: ["v1", "auth", "login"] }) });
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("120");
+  });
+
+  it("drops upstream headers that are not allow-listed", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("[]", {
+      status: 200,
+      headers: { "content-type": "application/json", "content-encoding": "gzip", "x-powered-by": "uvicorn", "server": "internal" },
+    }));
+    const request = new NextRequest("http://localhost:3300/api/v1/documents");
+
+    const response = await GET(request, { params: Promise.resolve({ path: ["v1", "documents"] }) });
+
+    expect(response.headers.get("content-type")).toBe("application/json");
+    expect(response.headers.get("content-encoding")).toBeNull();
+    expect(response.headers.get("x-powered-by")).toBeNull();
+    expect(response.headers.get("server")).toBeNull();
+  });
+
+  it("tells the API who connected and over which protocol", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 200 }));
+    const context = { params: Promise.resolve({ path: ["v1", "auth", "me"] }) };
+
+    await GET(new NextRequest("http://localhost:3300/api/v1/auth/me", { headers: { "x-forwarded-for": "203.0.113.9, 10.0.0.2", "x-forwarded-proto": "https" } }), context);
+    await GET(new NextRequest("http://localhost:3300/api/v1/auth/me", { headers: { "x-real-ip": "198.51.100.4" } }), context);
+    await GET(new NextRequest("http://localhost:3300/api/v1/auth/me"), context);
+
+    const sent = fetchMock.mock.calls.map(([, init]) => new Headers(init?.headers));
+    expect(sent[0].get("x-forwarded-for")).toBe("203.0.113.9, 10.0.0.2");
+    expect(sent[0].get("x-forwarded-proto")).toBe("https");
+    expect(sent[1].get("x-forwarded-for")).toBe("198.51.100.4");
+    expect(sent[1].get("x-forwarded-proto")).toBe("http");
+    expect(sent[2].get("x-forwarded-for")).toBeNull();
+    expect(sent[2].get("x-forwarded-proto")).toBe("http");
+  });
+
+  it("answers 405 for methods the API does not use", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch");
+
+    for (const handler of [PUT, PATCH, DELETE]) {
+      const response = handler();
+      expect(response.status).toBe(405);
+      expect(response.headers.get("allow")).toBe("GET, POST");
+    }
     expect(fetchMock).not.toHaveBeenCalled();
   });
 });

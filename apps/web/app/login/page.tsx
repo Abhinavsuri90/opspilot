@@ -3,18 +3,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Suspense, useEffect, useState, type FormEvent } from "react";
+import { Suspense, useEffect, useRef, useState, type FormEvent } from "react";
 import { PublicBrand } from "@/components/PublicBrand";
 import { api } from "@/lib/api";
+import { apiErrorMessage, retryAfterMinutes, waitMessage } from "@/lib/errors";
 import { loginSchema } from "@/lib/login";
-
-function responseMessage(value: unknown) {
-  if (value && typeof value === "object" && "error" in value) {
-    const error = value.error;
-    if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
-  }
-  return undefined;
-}
+import { useSession } from "@/lib/use-workspace";
 
 export default function LoginPage() {
   return <Suspense fallback={<main className="grid min-h-screen place-items-center bg-[#f9faf6]"><p role="status" className="text-sm font-semibold text-[#122f33]">Opening sign in…</p></main>}><LoginEntry /></Suspense>;
@@ -30,6 +24,7 @@ function LoginEntry() {
 function LoginForm({ initialOrganization }: { initialOrganization: string }) {
   const router = useRouter();
   const queryClient = useQueryClient();
+  const redirected = useRef(false);
   const [orgSlug, setOrgSlug] = useState(initialOrganization);
   const [search, setSearch] = useState("");
   const [email, setEmail] = useState("");
@@ -37,6 +32,17 @@ function LoginForm({ initialOrganization }: { initialOrganization: string }) {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+
+  // A visitor who already holds a valid session goes straight to the workspace.
+  // Only the API can tell: the cookie is HttpOnly, and the edge check lets any
+  // cookie through. The redirect happens once, here or after signing in.
+  const existing = useSession({ refetchInterval: false });
+  useEffect(() => {
+    if (existing.data && !redirected.current) {
+      redirected.current = true;
+      router.replace("/dashboard");
+    }
+  }, [existing.data, router]);
 
   useEffect(() => {
     const timeout = setTimeout(() => setSearch(orgSlug.trim()), 250);
@@ -67,19 +73,20 @@ function LoginForm({ initialOrganization }: { initialOrganization: string }) {
     try {
       const result = await api.POST("/v1/auth/login", { body: parsed.data });
       if (result.error || !result.data) {
-        const serverMessage = responseMessage(result.error);
-        setError(result.response.status === 401
+        const status = result.response.status;
+        setError(status === 401
           ? "Invalid organization, email, or password."
-          : result.response.status === 403
-            ? serverMessage || "Your account is waiting for organization approval. Contact your administrator."
-          : result.response.status === 429
-            ? "Too many sign-in attempts. Please wait 15 minutes before trying again."
+          : status === 403
+            ? apiErrorMessage(result.error, status, "Your account is waiting for organization approval. Contact your administrator.")
+          : status === 429
+            ? `Too many sign-in attempts. Please wait ${waitMessage(retryAfterMinutes(result.response.headers.get("retry-after")))} before trying again.`
           : "Sign in is temporarily unavailable. Please try again.");
         return;
       }
       // A new login may belong to a different workspace. Discard cached documents first.
       queryClient.clear();
       queryClient.setQueryData(["session"], result.data);
+      redirected.current = true;
       router.replace("/dashboard");
     } catch {
       setError("Could not reach the API. Try again shortly.");

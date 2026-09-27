@@ -5,14 +5,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
+import type { components } from "@/lib/schema";
 
 type Section = "dashboard" | "inbox" | "review" | "insights" | "admin";
 
-type Session = {
-  org_name: string;
-  email: string;
-  role: string;
-};
+type Session = components["schemas"]["SessionResponse"];
 
 type AppShellProps = {
   session: Session;

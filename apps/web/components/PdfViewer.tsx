@@ -29,11 +29,19 @@ function PdfDocument({ documentId }: PdfViewerProps) {
   useEffect(() => {
     const element = frame.current;
     if (!element) return;
-    const resize = () => setWidth(Math.max(160, Math.floor(element.clientWidth - 24)));
-    resize();
-    const observer = new ResizeObserver(resize);
+    const measure = () => setWidth(Math.max(160, Math.floor(element.clientWidth - 24)));
+    measure();
+    // Re-rendering a page is expensive; wait for the layout to settle first.
+    let settle: number | undefined;
+    const observer = new ResizeObserver(() => {
+      window.clearTimeout(settle);
+      settle = window.setTimeout(measure, 150);
+    });
     observer.observe(element);
-    return () => observer.disconnect();
+    return () => {
+      window.clearTimeout(settle);
+      observer.disconnect();
+    };
   }, []);
 
   useEffect(() => {
@@ -87,6 +95,9 @@ function PdfDocument({ documentId }: PdfViewerProps) {
           wasmUrl: `${assets}wasm/`,
           iccUrl: `${assets}iccs/`,
           enableXfa: false,
+          // PDF.js 6 dropped `isEvalSupported`: PostScript functions are always
+          // interpreted, so a strict Content-Security-Policy without 'unsafe-eval'
+          // cannot break rendering. Re-add the flag if the library is downgraded.
         });
         const loaded = await task.promise;
         if (!disposed && !timedOut) setPdf(loaded);
@@ -110,6 +121,9 @@ function PdfDocument({ documentId }: PdfViewerProps) {
   useEffect(() => {
     const host = canvasHost.current;
     if (!pdf || !host || !width) return;
+    // Captured after the guard so the hoisted render function sees non-null values.
+    const loadedPdf = pdf;
+    const pageHost = host;
     let disposed = false;
     let task: RenderTask | undefined;
     host.replaceChildren();
@@ -119,7 +133,7 @@ function PdfDocument({ documentId }: PdfViewerProps) {
 
     async function render() {
       try {
-        const sourcePage = await pdf!.getPage(page);
+        const sourcePage = await loadedPdf.getPage(page);
         if (disposed) return;
         const original = sourcePage.getViewport({ scale: 1 });
         const viewport = sourcePage.getViewport({ scale: (width / original.width) * zoom });
@@ -138,7 +152,7 @@ function PdfDocument({ documentId }: PdfViewerProps) {
         canvas.style.height = `${Math.floor(viewport.height)}px`;
         canvas.className = "block bg-white shadow-sm";
         canvas.setAttribute("role", "img");
-        canvas.setAttribute("aria-label", `Invoice PDF page ${page} of ${pdf!.numPages}`);
+        canvas.setAttribute("aria-label", `Invoice PDF page ${page} of ${loadedPdf.numPages}`);
         canvas.setAttribute("aria-describedby", descriptionId);
         task = sourcePage.render({
           canvas, viewport,
@@ -148,7 +162,7 @@ function PdfDocument({ documentId }: PdfViewerProps) {
         renderingTask.current = task;
         await task.promise;
         if (disposed) return;
-        host!.replaceChildren(canvas);
+        pageHost.replaceChildren(canvas);
         setRendering(false);
         const text = await sourcePage.getTextContent();
         if (!disposed) setPageText(text.items.map(item => "str" in item ? item.str + (item.hasEOL ? "\n" : " ") : "").join(""));

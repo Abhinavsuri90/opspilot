@@ -204,6 +204,57 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/documents/{document_id}/fields/{field_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Correct Field */
+        post: operations["correct_field_v1_documents__document_id__fields__field_id__post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/review/queue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Review Queue */
+        get: operations["review_queue_v1_review_queue_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/documents/{document_id}/timeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Document Timeline */
+        get: operations["document_timeline_v1_documents__document_id__timeline_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/documents/{document_id}/sharing": {
         parameters: {
             query?: never;
@@ -569,21 +620,30 @@ export interface components {
             filename: string;
             /** Status */
             status: string;
+            /** Document Type */
+            document_type: string;
             /** Size Bytes */
             size_bytes: number;
             /** Workflow Config Version */
             workflow_config_version: number;
             /** Failure Reason */
             failure_reason: string | null;
+            /** Flagged Count */
+            flagged_count: number;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
-            /** Fields */
-            fields: components["schemas"]["FieldResponse"][];
             /** Provider */
             provider: string | null;
+            /** Version */
+            version: number;
+            /** Fields */
+            fields: components["schemas"]["FieldDetail"][];
+            /** Rule Results */
+            rule_results: components["schemas"]["RuleResultResponse"][];
+            review_task: components["schemas"]["ReviewTaskResponse"] | null;
         };
         /** DocumentSummary */
         DocumentSummary: {
@@ -596,28 +656,74 @@ export interface components {
             filename: string;
             /** Status */
             status: string;
+            /** Document Type */
+            document_type: string;
             /** Size Bytes */
             size_bytes: number;
             /** Workflow Config Version */
             workflow_config_version: number;
             /** Failure Reason */
             failure_reason: string | null;
+            /** Flagged Count */
+            flagged_count: number;
             /**
              * Created At
              * Format: date-time
              */
             created_at: string;
         };
-        /** FieldResponse */
-        FieldResponse: {
+        /** FieldCorrectionRequest */
+        FieldCorrectionRequest: {
+            /** Version */
+            version: number;
+            /**
+             * Action
+             * @enum {string}
+             */
+            action: "accept" | "edit";
+            /** Value */
+            value?: string | null;
+        };
+        /** FieldDetail */
+        FieldDetail: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
             /** Name */
             name: string;
+            /** Label */
+            label: string;
+            /** Field Type */
+            field_type: string;
+            /** Required */
+            required: boolean;
             /** Value */
             value: string;
+            /** Current Value */
+            current_value: string;
             /** Evidence */
             evidence: string;
             /** Page Number */
             page_number: number;
+            /** Confidence */
+            confidence: number;
+            /** Threshold */
+            threshold: number;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "auto" | "needs_review" | "corrected" | "approved";
+            /** Signals */
+            signals: {
+                [key: string]: number | null;
+            };
+            /** Reasons */
+            reasons: string[];
+            /** Corrected By Email */
+            corrected_by_email: string | null;
         };
         /** GrantResponse */
         GrantResponse: {
@@ -772,6 +878,41 @@ export interface components {
             citations?: components["schemas"]["Citation"][];
             summary?: components["schemas"]["WorkspaceSummary"] | null;
         };
+        /** QueueItem */
+        QueueItem: {
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
+            /** Filename */
+            filename: string;
+            /** Document Type */
+            document_type: string;
+            /** Vendor */
+            vendor: string | null;
+            /** Total */
+            total: string | null;
+            /** Currency */
+            currency: string | null;
+            /** Flagged Count */
+            flagged_count: number;
+            /** Opened At */
+            opened_at: string | null;
+            /** Due At */
+            due_at: string | null;
+            /** Overdue */
+            overdue: boolean;
+            /** Assigned Reviewer Id */
+            assigned_reviewer_id: string | null;
+            /** Assigned Reviewer Email */
+            assigned_reviewer_email: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+        };
         /** RegisterOrganizationRequest */
         RegisterOrganizationRequest: {
             /**
@@ -830,6 +971,38 @@ export interface components {
              */
             created_at: string;
         };
+        /** ReviewTaskResponse */
+        ReviewTaskResponse: {
+            /**
+             * Opened At
+             * Format: date-time
+             */
+            opened_at: string;
+            /**
+             * Due At
+             * Format: date-time
+             */
+            due_at: string;
+            /** Sla Minutes */
+            sla_minutes: number;
+            /** Completed At */
+            completed_at: string | null;
+            /** Outcome */
+            outcome: string | null;
+            /** Overdue */
+            overdue: boolean;
+        };
+        /** RuleResultResponse */
+        RuleResultResponse: {
+            /** Name */
+            name: string;
+            /** Expression */
+            expression: string;
+            /** Passed */
+            passed: boolean | null;
+            /** Message */
+            message: string;
+        };
         /** SessionResponse */
         SessionResponse: {
             /**
@@ -865,6 +1038,29 @@ export interface components {
             /** User Ids */
             user_ids?: string[];
         };
+        /** TimelineEntry */
+        TimelineEntry: {
+            /**
+             * At
+             * Format: date-time
+             */
+            at: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "audit" | "extraction" | "correction" | "review" | "comment";
+            /** Event Type */
+            event_type: string;
+            /** Actor Email */
+            actor_email: string | null;
+            /** Summary */
+            summary: string;
+            /** Detail */
+            detail: {
+                [key: string]: unknown;
+            };
+        };
         /** UploadResponse */
         UploadResponse: {
             /**
@@ -876,12 +1072,16 @@ export interface components {
             filename: string;
             /** Status */
             status: string;
+            /** Document Type */
+            document_type: string;
             /** Size Bytes */
             size_bytes: number;
             /** Workflow Config Version */
             workflow_config_version: number;
             /** Failure Reason */
             failure_reason: string | null;
+            /** Flagged Count */
+            flagged_count: number;
             /**
              * Created At
              * Format: date-time
@@ -1390,6 +1590,115 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkspaceResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    correct_field_v1_documents__document_id__fields__field_id__post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+                field_id: string;
+            };
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FieldCorrectionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocumentDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    review_queue_v1_review_queue_get: {
+        parameters: {
+            query?: {
+                document_type?: string | null;
+                vendor?: string | null;
+                max_age_hours?: number | null;
+                assigned?: "me" | "unassigned" | "all";
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueueItem"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    document_timeline_v1_documents__document_id__timeline_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                document_id: string;
+            };
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TimelineEntry"][];
                 };
             };
             /** @description Validation Error */

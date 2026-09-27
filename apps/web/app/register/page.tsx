@@ -6,17 +6,15 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState, type FormEvent } from "react";
 import { PublicBrand } from "@/components/PublicBrand";
 import { api } from "@/lib/api";
+import { apiErrorMessage } from "@/lib/errors";
+import { firstIssueMessage, registrationSchema, type Registration } from "@/lib/register";
+import type { Session } from "@/lib/use-workspace";
 
 type Mode = "create" | "join";
 type RequestedRole = "member" | "reviewer";
-
-function requestError(value: unknown, fallback: string) {
-  if (value && typeof value === "object" && "error" in value) {
-    const error = value.error;
-    if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
-  }
-  return fallback;
-}
+type RegistrationResult =
+  | { mode: "create"; session: Session }
+  | { mode: "join"; orgName: string; slug: string };
 
 export default function RegisterPage() {
   return <Suspense fallback={<main className="grid min-h-screen place-items-center bg-[#f9faf6]"><p role="status" className="text-sm font-semibold text-[#122f33]">Opening registration…</p></main>}><RegistrationEntry /></Suspense>;
@@ -67,24 +65,30 @@ function RegistrationForm({ initialMode, initialRole }: { initialMode: Mode; ini
   });
 
   const registration = useMutation({
-    mutationFn: async () => {
-      const identity = { org_slug: orgSlug.trim().toLowerCase(), email: email.trim().toLowerCase(), password };
-      if (mode === "create") {
+    mutationFn: async (values: Registration): Promise<RegistrationResult> => {
+      const identity = { org_slug: values.org_slug, email: values.email, password: values.password };
+      if (values.mode === "create") {
         const result = await api.POST("/v1/auth/register-organization", {
-          body: { ...identity, org_name: orgName.trim(), default_currency: currency },
+          body: { ...identity, org_name: values.org_name, default_currency: values.default_currency },
         });
-        if (result.error || !result.data) throw new Error(requestError(result.error, "Could not create the organization. Please try again."));
-        queryClient.clear();
-        queryClient.setQueryData(["session"], result.data);
-        router.replace("/dashboard");
-      } else {
-        const result = await api.POST("/v1/auth/join-organization", { body: { ...identity, requested_role: role } });
-        if (result.error || !result.data) throw new Error(requestError(result.error, "Could not send your request. Please try again."));
-        queryClient.clear();
-        setJoined({ orgName: result.data.org_name, slug: identity.org_slug });
-        setPassword("");
-        setConfirmation("");
+        if (result.error || !result.data) throw new Error(apiErrorMessage(result.error, result.response.status, "Could not create the organization. Please try again."));
+        return { mode: "create", session: result.data };
       }
+      const result = await api.POST("/v1/auth/join-organization", { body: { ...identity, requested_role: values.requested_role } });
+      if (result.error || !result.data) throw new Error(apiErrorMessage(result.error, result.response.status, "Could not send your request. Please try again."));
+      return { mode: "join", orgName: result.data.org_name, slug: values.org_slug };
+    },
+    // Side effects live here so a failed request can never half-apply them.
+    onSuccess: result => {
+      queryClient.clear();
+      if (result.mode === "create") {
+        queryClient.setQueryData(["session"], result.session);
+        router.replace("/dashboard");
+        return;
+      }
+      setJoined({ orgName: result.orgName, slug: result.slug });
+      setPassword("");
+      setConfirmation("");
     },
   });
 
@@ -103,17 +107,14 @@ function RegistrationForm({ initialMode, initialRole }: { initialMode: Mode; ini
     if (registration.isPending) return;
     registration.reset();
     setValidationError("");
-    if (mode === "create" && orgName.trim().length < 2) {
-      setValidationError("Enter an organization name with at least 2 characters.");
-    } else if (!/^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$/.test(orgSlug.trim().toLowerCase())) {
-      setValidationError("Use 1–80 letters, numbers, or hyphens for the workspace ID. Start and end with a letter or number.");
-    } else if (password.length < 12 || password.length > 128 || !/\p{L}/u.test(password) || !/\p{Nd}/u.test(password)) {
-      setValidationError("Use a password with 12–128 characters, including a letter and a number.");
-    } else if (password !== confirmation) {
-      setValidationError("The passwords do not match.");
-    } else {
-      registration.mutate();
+    const parsed = registrationSchema.safeParse(mode === "create"
+      ? { mode, org_name: orgName, org_slug: orgSlug, default_currency: currency, email, password, confirmation }
+      : { mode, org_slug: orgSlug, requested_role: role, email, password, confirmation });
+    if (!parsed.success) {
+      setValidationError(firstIssueMessage(parsed.error));
+      return;
     }
+    registration.mutate(parsed.data);
   }
 
   return <main className="min-h-screen bg-[#f9faf6] lg:grid lg:grid-cols-[minmax(0,.85fr)_minmax(520px,1.15fr)]">

@@ -5,22 +5,19 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState, type FormEvent } from "react";
 import { AppShell } from "@/components/AppShell";
+import { SessionFallback } from "@/components/SessionFallback";
 import { api } from "@/lib/api";
+import { apiErrorMessage, isUnauthorizedError, unauthorizedError } from "@/lib/errors";
+import type { components } from "@/lib/schema";
+import { useWorkspace } from "@/lib/use-workspace";
 
 type Role = "member" | "reviewer" | "viewer";
 type Decision = "approved" | "rejected" | "suspended";
-type Member = { user_id: string; email: string; role: string; status: string; requested_role: string | null };
-type Category = { id: string; name: string; description: string; active: boolean; version: number };
+type Member = components["schemas"]["MemberResponse"];
+type Category = components["schemas"]["CategoryResponse"];
+type CategoryValues = { name?: string; description?: string; active?: boolean };
 
-function errorMessage(value: unknown, fallback: string) {
-  if (value && typeof value === "object" && "error" in value) {
-    const error = value.error;
-    if (error && typeof error === "object" && "message" in error && typeof error.message === "string") return error.message;
-  }
-  return fallback;
-}
-
-function assignableRole(value: string | null): Role {
+function assignableRole(value: string): Role {
   return value === "reviewer" || value === "viewer" ? value : "member";
 }
 
@@ -29,33 +26,35 @@ function MemberRow({ member, currentUser, saving, onDecision }: {
   onDecision: (userId: string, decision: Decision, role?: Role) => void;
 }) {
   const [role, setRole] = useState<Role>(assignableRole(member.status === "pending" ? member.requested_role : member.role));
-  const [confirmSuspension, setConfirmSuspension] = useState(false);
+  // Removing access is confirmed in place; nothing leaves the row until confirmed.
+  const [confirming, setConfirming] = useState<"reject" | "suspend" | null>(null);
   const active = member.status === "active";
   const pending = member.status === "pending";
   const statusStyle = pending ? "bg-amber-50 text-amber-800 ring-amber-200" : active ? "bg-emerald-50 text-emerald-800 ring-emerald-200" : "bg-slate-100 text-slate-600 ring-slate-200";
   useEffect(() => {
     setRole(assignableRole(member.status === "pending" ? member.requested_role : member.role));
-    setConfirmSuspension(false);
+    setConfirming(null);
   }, [member.status, member.role, member.requested_role]);
 
   return <li className="px-5 py-5 sm:px-6">
     <div className="flex flex-wrap items-start justify-between gap-4">
       <div className="flex min-w-0 max-w-full gap-3">
         <span aria-hidden="true" className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#e6f3f6] text-xs font-bold text-[#12617b]">{member.email.slice(0, 2).toUpperCase()}</span>
-        <div className="min-w-0"><p className="break-all text-sm font-semibold text-slate-800">{member.email}{member.user_id === currentUser && <span className="ml-2 font-normal text-slate-500">(you)</span>}</p><div className="mt-2 flex flex-wrap items-center gap-2"><span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold capitalize ring-1 ${statusStyle}`}>{active ? "Active" : member.status}</span><span className="text-xs capitalize text-slate-500">{pending ? `Requested ${member.requested_role ?? "member"}` : member.role}</span></div></div>
+        <div className="min-w-0"><p className="break-all text-sm font-semibold text-slate-800">{member.email}{member.user_id === currentUser && <span className="ml-2 font-normal text-slate-500">(you)</span>}</p><div className="mt-2 flex flex-wrap items-center gap-2"><span className={`rounded-full px-2 py-0.5 text-[11px] font-semibold capitalize ring-1 ${statusStyle}`}>{active ? "Active" : member.status}</span><span className="text-xs capitalize text-slate-500">{pending ? `Requested ${member.requested_role || "member"}` : member.role}</span></div></div>
       </div>
       {member.role === "admin" ? <span className="rounded-lg bg-slate-50 px-3 py-2 text-xs font-medium text-slate-500">Administrator · protected</span> : <div className="flex max-w-full flex-wrap items-center gap-2">
         <select aria-label={`Role for ${member.email}`} className="field !w-auto !px-3 !py-2 text-sm" value={role} disabled={saving} onChange={event => setRole(event.target.value as Role)}><option value="member">Member</option><option value="reviewer">Reviewer</option><option value="viewer">Viewer</option></select>
         <button type="button" disabled={saving || (active && role === member.role)} className="secondary !min-h-10 !px-3 !text-xs" onClick={() => onDecision(member.user_id, "approved", role)}>{saving ? "Saving…" : pending ? "Approve access" : active ? "Save role" : "Restore access"}</button>
-        {pending && <button type="button" disabled={saving} className="min-h-10 rounded-lg px-3 text-xs font-semibold text-rose-700 hover:bg-rose-50" onClick={() => onDecision(member.user_id, "rejected")}>Reject</button>}
-        {active && !confirmSuspension && <button type="button" disabled={saving} className="min-h-10 rounded-lg px-3 text-xs font-semibold text-rose-700 hover:bg-rose-50" onClick={() => setConfirmSuspension(true)}>Suspend</button>}
+        {pending && confirming !== "reject" && <button type="button" disabled={saving} className="min-h-10 rounded-lg px-3 text-xs font-semibold text-rose-700 hover:bg-rose-50" onClick={() => setConfirming("reject")}>Reject</button>}
+        {active && confirming !== "suspend" && <button type="button" disabled={saving} className="min-h-10 rounded-lg px-3 text-xs font-semibold text-rose-700 hover:bg-rose-50" onClick={() => setConfirming("suspend")}>Suspend</button>}
       </div>}
     </div>
-    {confirmSuspension && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 p-3"><p className="text-xs leading-5 text-rose-800">This person will lose access immediately, including existing sessions. You can restore access later.</p><div className="flex gap-2"><button type="button" disabled={saving} className="rounded-lg bg-rose-700 px-3 py-2 text-xs font-semibold text-white" onClick={() => onDecision(member.user_id, "suspended")}>Confirm suspension</button><button type="button" className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600" onClick={() => setConfirmSuspension(false)}>Cancel</button></div></div>}
+    {confirming === "suspend" && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 p-3"><p className="text-xs leading-5 text-rose-800">This person will lose access immediately, including existing sessions. You can restore access later.</p><div className="flex gap-2"><button type="button" disabled={saving} className="rounded-lg bg-rose-700 px-3 py-2 text-xs font-semibold text-white" onClick={() => onDecision(member.user_id, "suspended")}>Confirm suspension</button><button type="button" className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600" onClick={() => setConfirming(null)}>Cancel</button></div></div>}
+    {confirming === "reject" && <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-rose-200 bg-rose-50 p-3"><p className="text-xs leading-5 text-rose-800">This request will be declined and {member.email} will not be able to sign in. You can approve the account later from inactive accounts.</p><div className="flex gap-2"><button type="button" disabled={saving} className="rounded-lg bg-rose-700 px-3 py-2 text-xs font-semibold text-white" onClick={() => onDecision(member.user_id, "rejected")}>Confirm rejection</button><button type="button" className="rounded-lg px-3 py-2 text-xs font-semibold text-slate-600" onClick={() => setConfirming(null)}>Cancel</button></div></div>}
   </li>;
 }
 
-function CategoryRow({ category, saving, onSave }: { category: Category; saving: boolean; onSave: (category: Category, values: { name?: string; description?: string; active?: boolean }) => void }) {
+function CategoryRow({ category, saving, onSave }: { category: Category; saving: boolean; onSave: (category: Category, values: CategoryValues) => void }) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(category.name);
   const [description, setDescription] = useState(category.description);
@@ -82,18 +81,13 @@ export default function AdminPage() {
   const [categoryDescription, setCategoryDescription] = useState("");
   const [notice, setNotice] = useState("");
   const [copied, setCopied] = useState(false);
-  const session = useQuery({ queryKey: ["session"], refetchInterval: 15000, queryFn: async () => {
-    const result = await api.GET("/v1/auth/me");
-    if (result.response.status === 401 || result.response.status === 403) throw new Error("Unauthorized");
-    if (result.error || !result.data) throw new Error("Could not load your workspace");
-    return result.data;
-  } });
+  const session = useWorkspace();
   const isAdmin = session.data?.role === "admin";
   const members = useQuery({
     queryKey: ["members", session.data?.org_id, session.data?.user_id], enabled: isAdmin,
     queryFn: async () => {
       const result = await api.GET("/v1/organization/members");
-      if (result.response.status === 401) throw new Error("Unauthorized");
+      if (result.response.status === 401) throw unauthorizedError();
       if (result.response.status === 403) throw new Error("Forbidden");
       if (result.error || !result.data) throw new Error("Could not load members");
       return result.data;
@@ -101,7 +95,7 @@ export default function AdminPage() {
   });
   const categories = useQuery({ queryKey: ["categories", session.data?.org_id, session.data?.user_id], enabled: isAdmin, queryFn: async () => {
     const result = await api.GET("/v1/categories");
-    if (result.response.status === 401) throw new Error("Unauthorized");
+    if (result.response.status === 401) throw unauthorizedError();
     if (result.response.status === 403) throw new Error("Forbidden");
     if (result.error || !result.data) throw new Error("Could not load categories");
     return result.data;
@@ -109,8 +103,8 @@ export default function AdminPage() {
   const decision = useMutation({
     mutationFn: async (values: { userId: string; decision: Decision; role?: Role }) => {
       const result = await api.POST("/v1/organization/members/{user_id}/decision", { params: { path: { user_id: values.userId } }, body: { decision: values.decision, ...(values.role ? { role: values.role } : {}) } });
-      if (result.response.status === 401) throw new Error("Unauthorized");
-      if (result.error || !result.data) throw new Error(errorMessage(result.error, "Could not update this member. Please try again."));
+      if (result.response.status === 401) throw unauthorizedError();
+      if (result.error || !result.data) throw new Error(apiErrorMessage(result.error, result.response.status, "Could not update this member. Please try again."));
       return result.data;
     }, onSuccess: async member => {
       setNotice(`Access updated for ${member.email}.`);
@@ -120,8 +114,8 @@ export default function AdminPage() {
   const createCategory = useMutation({
     mutationFn: async () => {
       const result = await api.POST("/v1/categories", { body: { name: categoryName.trim(), description: categoryDescription.trim() } });
-      if (result.response.status === 401) throw new Error("Unauthorized");
-      if (result.error || !result.data) throw new Error(errorMessage(result.error, "Could not create the category. Please try again."));
+      if (result.response.status === 401) throw unauthorizedError();
+      if (result.error || !result.data) throw new Error(apiErrorMessage(result.error, result.response.status, "Could not create the category. Please try again."));
       return result.data;
     }, onSuccess: async category => {
       setCategoryName(""); setCategoryDescription(""); setNotice(`Category “${category.name}” created.`);
@@ -129,12 +123,13 @@ export default function AdminPage() {
     },
   });
   const updateCategory = useMutation({
-    mutationFn: async ({ category, values }: { category: Category; values: { name?: string; description?: string; active?: boolean } }) => {
+    mutationFn: async ({ category, values }: { category: Category; values: CategoryValues }) => {
       const result = await api.POST("/v1/categories/{category_id}", { params: { path: { category_id: category.id } }, body: { version: category.version, ...values } });
-      if (result.response.status === 401) throw new Error("Unauthorized");
+      if (result.response.status === 401) throw unauthorizedError();
       if (result.error || !result.data) {
-        if (result.response.status === 409) await queryClient.invalidateQueries({ queryKey: ["categories"] });
-        throw new Error(errorMessage(result.error, result.response.status === 409 ? "This category changed. Review the refreshed values and try again." : "Could not update the category. Please try again."));
+        const status = result.response.status;
+        if (status === 409) await queryClient.invalidateQueries({ queryKey: ["categories"] });
+        throw new Error(apiErrorMessage(result.error, status, status === 409 ? "This category changed. Review the refreshed values and try again." : "Could not update the category. Please try again."));
       }
       return result.data;
     }, onSuccess: async category => {
@@ -143,8 +138,13 @@ export default function AdminPage() {
       await queryClient.invalidateQueries({ queryKey: ["documents", session.data?.user_id, session.data?.org_id] });
     },
   });
-  const unauthorized = [session.error, members.error, categories.error, decision.error, createCategory.error, updateCategory.error].some(error => error?.message === "Unauthorized");
+  const unauthorized = [members.error, categories.error, decision.error, createCategory.error, updateCategory.error].some(isUnauthorizedError);
   useEffect(() => { if (unauthorized) { queryClient.clear(); router.replace("/login"); } }, [unauthorized, queryClient, router]);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 2000);
+    return () => clearTimeout(timer);
+  }, [copied]);
 
   async function copyWorkspace() {
     if (!session.data) return;
@@ -156,9 +156,7 @@ export default function AdminPage() {
     if (categoryName.trim() && !createCategory.isPending) { setNotice(""); createCategory.mutate(); }
   }
 
-  if (unauthorized) return <main className="p-8 text-slate-500" role="status">Checking your session…</main>;
-  if (session.isError) return <main className="p-8"><p role="alert">Could not load your workspace.</p><button type="button" onClick={() => session.refetch()} className="primary mt-4">Try again</button></main>;
-  if (!session.data) return <main className="p-8 text-slate-500" role="status">Loading workspace…</main>;
+  if (session.isError || !session.data || unauthorized) return <SessionFallback session={session} />;
   if (!isAdmin || members.error?.message === "Forbidden" || categories.error?.message === "Forbidden") return <AppShell session={session.data} active="admin"><section className="mx-auto mt-12 max-w-xl rounded-2xl border border-slate-200 bg-white p-8 shadow-sm"><span aria-hidden="true" className="grid h-11 w-11 place-items-center rounded-xl bg-amber-50 text-xl text-amber-700">⊘</span><h1 className="mt-5 text-2xl font-bold tracking-[-.03em] text-[#12233d]">Admin access required</h1><p className="mt-2 text-sm leading-6 text-slate-600">Only organization administrators can approve accounts, change member roles, and manage invoice categories.</p><Link href="/dashboard" className="mt-5 inline-block text-sm font-semibold text-[#11627a] hover:underline">Return to dashboard →</Link></section></AppShell>;
 
   const roster = [...(members.data ?? [])].sort((a, b) => a.status === "pending" && b.status !== "pending" ? -1 : b.status === "pending" && a.status !== "pending" ? 1 : a.email.localeCompare(b.email));
@@ -179,7 +177,7 @@ export default function AdminPage() {
 
     {tab === "members" && <section id="panel-members" role="tabpanel" aria-labelledby="tab-members" className="mt-5">
       <div className="mb-5 rounded-xl border border-cyan-200 bg-cyan-50/60 px-5 py-4"><h2 className="text-sm font-semibold text-[#123757]">Bring your team into {session.data.org_name}</h2><p className="mt-1 text-sm leading-6 text-slate-600">Ask them to open <Link href="/register" className="font-semibold text-[#11627a] underline">Create or join an organization</Link>, choose <strong>Join organization</strong>, and enter <strong>{session.data.org_slug}</strong>. Their accounts stay pending until you approve them here. Confirm the person&apos;s identity before granting access.</p></div>
-      {decision.error && decision.error.message !== "Unauthorized" && <p role="alert" className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{decision.error.message}</p>}
+      {decision.error && !isUnauthorizedError(decision.error) && <p role="alert" className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{decision.error.message}</p>}
       <div role="region" aria-label="Member directory" className="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
         <div className="flex flex-col justify-between gap-4 border-b border-slate-100 px-5 py-5 sm:px-6 xl:flex-row xl:items-center"><div><h2 className="text-lg font-bold tracking-[-.02em] text-[#12233d]">Member directory</h2><p className="mt-1 text-xs text-slate-500">Manage requests and existing accounts. Refreshes every 15 seconds.</p></div><div className="flex flex-wrap gap-2"><input aria-label="Search members" className="field !w-auto min-w-0 flex-1 !py-2 !text-sm" type="search" placeholder="Search by email" value={memberSearch} onChange={event => setMemberSearch(event.target.value)} /><select aria-label="Filter members" className="field !w-auto !py-2 !text-sm" value={memberFilter} onChange={event => setMemberFilter(event.target.value as typeof memberFilter)}><option value="all">All accounts</option><option value="pending">Pending requests</option><option value="active">Active members</option><option value="inactive">Inactive accounts</option></select></div></div>
         {members.isPending && <p role="status" className="px-6 py-10 text-center text-sm text-slate-500">Loading members…</p>}

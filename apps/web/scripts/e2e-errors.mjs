@@ -23,7 +23,7 @@ const summary = index => ({
 
 let loginStatus = 401;
 let logoutStatus = 502;
-let meStatus = 200;
+let meStatus = 401; // No session until the mocked sign-in succeeds, as with the real API.
 let sessionRole = "reviewer";
 let listStatus = 503;
 let detailStatus = 503;
@@ -40,9 +40,13 @@ try {
     const { pathname } = new URL(route.request().url());
     const method = route.request().method();
     if (pathname === "/api/v1/auth/login" && method === "POST") {
-      return route.fulfill(loginStatus === 200
-        ? { status: 200, json: session(sessionRole) }
-        : { status: loginStatus, json: { error: { code: "request_failed" } } });
+      if (loginStatus !== 200) {
+        return route.fulfill({ status: loginStatus, json: { error: { code: "request_failed" } } });
+      }
+      // The real API sets an HttpOnly session cookie; the edge check needs one before protected pages load.
+      meStatus = 200;
+      await page.context().addCookies([{ name: "opspilot_session", value: "mock-session", url: baseURL, httpOnly: true }]);
+      return route.fulfill({ status: 200, json: session(sessionRole) });
     }
     if (pathname === "/api/v1/auth/me" && method === "GET") {
       return route.fulfill(meStatus === 200
@@ -50,14 +54,26 @@ try {
         : { status: meStatus, json: { error: { code: "unauthorized" } } });
     }
     if (pathname === "/api/v1/auth/logout" && method === "POST") {
-      return route.fulfill(logoutStatus === 204
-        ? { status: 204, body: "" }
-        : { status: logoutStatus, json: { error: { code: "api_unavailable" } } });
+      if (logoutStatus !== 204) {
+        return route.fulfill({ status: logoutStatus, json: { error: { code: "api_unavailable" } } });
+      }
+      meStatus = 401;
+      await page.context().clearCookies();
+      return route.fulfill({ status: 204, body: "" });
     }
     if (pathname === "/api/v1/documents" && method === "GET") {
-      return route.fulfill(listStatus === 200
-        ? { status: 200, json: Array.from({ length: listCount }, (_, index) => summary(index)) }
-        : { status: listStatus, json: { error: { code: "request_failed" } } });
+      if (listStatus !== 200) {
+        return route.fulfill({ status: listStatus, json: { error: { code: "request_failed" } } });
+      }
+      // Mirror the API: the list is filtered server-side by filename search and status.
+      const { searchParams } = new URL(route.request().url());
+      const q = (searchParams.get("q") ?? "").toLowerCase();
+      const status = searchParams.get("status");
+      const inProgress = ["queued", "extracting", "validating"];
+      const documents = Array.from({ length: listCount }, (_, index) => summary(index))
+        .filter(item => !q || item.filename.toLowerCase().includes(q))
+        .filter(item => !status || (status === "in_progress" ? inProgress.includes(item.status) : item.status === status));
+      return route.fulfill({ status: 200, json: documents });
     }
     if (pathname === "/api/v1/documents" && method === "POST") {
       if (uploadStatus !== 202) {
@@ -191,9 +207,16 @@ try {
   await page.getByRole("button", { name: "Sign out" }).click();
   await page.waitForURL(`${baseURL}/login`);
 
-  meStatus = 401;
+  // Signed out: no cookie, so the edge redirect happens before the page loads.
   await page.goto(`${baseURL}/dashboard`);
   await page.waitForURL(`${baseURL}/login`);
+
+  // A stale cookie passes the edge check; the API's 401 sends the visitor to sign in without looping.
+  meStatus = 401;
+  await page.context().addCookies([{ name: "opspilot_session", value: "stale-session", url: baseURL, httpOnly: true }]);
+  await page.goto(`${baseURL}/dashboard`);
+  await page.waitForURL(`${baseURL}/login`);
+  await page.getByRole("button", { name: "Sign in", exact: true }).waitFor();
   console.log("Browser error states, role permissions, long-list layout, and session redirects passed");
 } finally {
   await browser.close();

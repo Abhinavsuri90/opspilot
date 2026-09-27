@@ -1,16 +1,22 @@
 "use client";
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, type DragEvent, type FormEvent } from "react";
+import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { AppShell } from "@/components/AppShell";
 import { InvoiceWorkspace } from "@/components/InvoiceWorkspace";
+import { SessionFallback } from "@/components/SessionFallback";
 import { api } from "@/lib/api";
-import { documentStatusLabel, isDocumentInProgress } from "@/lib/document-status";
+import { countInProgress, documentStatusLabel, documentStatusTone, isDocumentInProgress, type DocumentStatusTone } from "@/lib/document-status";
+import { isUnauthorizedError, isUnauthorizedStatus, unauthorizedError } from "@/lib/errors";
+import { formatDateTime } from "@/lib/format";
 import { classifyRetryFailure } from "@/lib/retry";
 import { validatePdfSelection } from "@/lib/upload";
+import { useWorkspace, useWorkspaceSummary } from "@/lib/use-workspace";
 
 type StatusFilter = "all" | "in_progress" | "needs_review" | "failed" | "approved" | "rejected";
+
+const PAGE_SIZE = 50;
 
 const statusFilters: { value: StatusFilter; label: string }[] = [
   { value: "all", label: "All" },
@@ -21,13 +27,17 @@ const statusFilters: { value: StatusFilter; label: string }[] = [
   { value: "failed", label: "Failed" },
 ];
 
+const badgeTones: Record<DocumentStatusTone, string> = {
+  progress: "border-blue-200 bg-blue-50 text-blue-700",
+  review: "border-amber-200 bg-amber-50 text-amber-800",
+  completed: "border-emerald-200 bg-emerald-50 text-emerald-800",
+  rejected: "border-slate-200 bg-slate-100 text-slate-600",
+  failed: "border-rose-200 bg-rose-50 text-rose-700",
+  neutral: "border-slate-200 bg-slate-50 text-slate-600",
+};
+
 function StatusBadge({ status }: { status: string }) {
-  const tone = status === "needs_review"
-    ? "border-amber-200 bg-amber-50 text-amber-800"
-    : status === "failed"
-      ? "border-rose-200 bg-rose-50 text-rose-700"
-      : "border-blue-200 bg-blue-50 text-blue-700";
-  return <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-bold capitalize ${tone}`}>
+  return <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-bold capitalize ${badgeTones[documentStatusTone(status)]}`}>
     <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />{documentStatusLabel(status)}
   </span>;
 }
@@ -46,58 +56,76 @@ export default function InboxPage() {
   const [retryResult, setRetryResult] = useState<{ id: string; error: boolean; message: string } | null>(null);
   const [exhaustedRetryIds, setExhaustedRetryIds] = useState<Set<string>>(() => new Set());
   const [search, setSearch] = useState("");
-  const [category, setCategory] = useState("");
-  const [offset, setOffset] = useState(0);
   const [serverSearch, setServerSearch] = useState("");
-  useEffect(() => { const timer = setTimeout(() => { setServerSearch(search.trim()); setOffset(0); }, 300); return () => clearTimeout(timer); }, [search]);
+  const [category, setCategory] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [offset, setOffset] = useState(0);
   const [dragging, setDragging] = useState(false);
 
-  const session = useQuery({
-    queryKey: ["session"],
-    refetchInterval: 15000,
-    retry: false,
+  // The API filters the list. Typing is debounced, and every new search, filter
+  // or page starts from a fresh selection so the detail pane matches the list.
+  useEffect(() => {
+    const next = search.trim();
+    if (next === serverSearch) return;
+    const timer = setTimeout(() => { setServerSearch(next); setOffset(0); setSelectedId(null); }, 300);
+    return () => clearTimeout(timer);
+  }, [search, serverSearch]);
+
+  const session = useWorkspace();
+  const orgId = session.data?.org_id;
+  const userId = session.data?.user_id;
+  const ready = Boolean(session.data) && !session.isError;
+
+  const categories = useQuery({
+    queryKey: ["categories", orgId, userId],
+    enabled: ready,
     queryFn: async () => {
-      const result = await api.GET("/v1/auth/me");
-      if (result.response.status === 401 || result.response.status === 403) throw new Error("Unauthorized");
-      if (result.error || !result.data) throw new Error("Could not load your session");
+      const result = await api.GET("/v1/categories");
+      if (!result.data || result.error) throw new Error("Could not load categories");
       return result.data;
     },
   });
-
-  const categories = useQuery({ queryKey: ["categories", session.data?.org_id, session.data?.user_id], enabled: Boolean(session.data), queryFn: async () => { const result = await api.GET("/v1/categories"); if (!result.data || result.error) throw new Error("Could not load categories"); return result.data; } });
   const documents = useQuery({
-    queryKey: ["documents", session.data?.user_id, session.data?.org_id, offset, category, serverSearch, statusFilter],
-    enabled: Boolean(session.data) && !session.isError,
+    queryKey: ["documents", userId, orgId, offset, category, serverSearch, statusFilter],
+    enabled: ready,
+    placeholderData: keepPreviousData,
     queryFn: async () => {
-      const result = await api.GET("/v1/documents", { params: { query: { offset, limit: 50, category_id: category || undefined, q: serverSearch || undefined, status: statusFilter !== "all" ? statusFilter : undefined } } });
-      if (result.response.status === 401 || result.response.status === 403) throw new Error("Unauthorized");
+      const result = await api.GET("/v1/documents", { params: { query: { offset, limit: PAGE_SIZE, category_id: category || undefined, q: serverSearch || undefined, status: statusFilter !== "all" ? statusFilter : undefined } } });
+      if (isUnauthorizedStatus(result.response.status)) throw unauthorizedError();
       if (result.error || !result.data) throw new Error("Could not load documents");
       return result.data;
     },
     refetchInterval: query => query.state.data?.some(item => isDocumentInProgress(item.status)) ? 2000 : 15000,
   });
-  const activeId = selectedId ?? documents.data?.[0]?.id;
+  const listInProgress = documents.data?.some(item => isDocumentInProgress(item.status)) ?? false;
+  const summary = useWorkspaceSummary(orgId, userId, { refetchInterval: listInProgress ? 2000 : 15000 });
+  const activeId: string | null = documents.isPlaceholderData ? selectedId : selectedId ?? documents.data?.[0]?.id ?? null;
   const detail = useQuery({
-    queryKey: ["document", activeId, session.data?.org_id, session.data?.user_id],
-    enabled: Boolean(activeId) && Boolean(session.data) && !session.isError,
+    queryKey: ["document", activeId, orgId, userId],
+    enabled: Boolean(activeId) && ready,
     queryFn: async () => {
       if (!activeId) throw new Error("No document selected");
       const result = await api.GET("/v1/documents/{document_id}", {
         params: { path: { document_id: activeId } },
       });
-      if (result.response.status === 401 || result.response.status === 403) throw new Error("Unauthorized");
+      if (isUnauthorizedStatus(result.response.status)) throw unauthorizedError();
       if (result.error || !result.data) throw new Error("Could not load document");
       return result.data;
     },
-    refetchInterval: query => !query.state.data || isDocumentInProgress(query.state.data.status) ? 2000 : 15000,
+    // Poll quickly only while the loaded document is being processed. A request
+    // that failed (missing or inaccessible document) is not retried on a timer.
+    refetchInterval: query => {
+      if (query.state.status === "error") return false;
+      const status = query.state.data?.status;
+      return status !== undefined && isDocumentInProgress(status) ? 2000 : 15000;
+    },
   });
   useEffect(() => {
-    if (session.error?.message === "Unauthorized" || documents.error?.message === "Unauthorized" || detail.error?.message === "Unauthorized") {
+    if (isUnauthorizedError(documents.error) || isUnauthorizedError(detail.error)) {
       queryClient.clear();
       router.replace("/login");
     }
-  }, [session.error, documents.error, detail.error, queryClient, router]);
+  }, [documents.error, detail.error, queryClient, router]);
 
   useEffect(() => {
     if (deepLinkApplied.current) return;
@@ -108,20 +136,26 @@ export default function InboxPage() {
     }
   }, [documents.data]);
 
-  const visibleDocuments = useMemo(() => (documents.data ?? []).filter(item => {
-    const matchesSearch = item.filename.toLowerCase().includes(search.trim().toLowerCase());
-    const matchesStatus = statusFilter === "all"
-      || (statusFilter === "in_progress" && isDocumentInProgress(item.status))
-      || item.status === statusFilter;
-    return matchesSearch && matchesStatus;
-  }), [documents.data, search, statusFilter]);
+  const filtersActive = statusFilter !== "all" || category !== "" || serverSearch !== "" || offset > 0;
+  const pageCount = documents.data?.length ?? 0;
+  const showEmptyState = documents.isSuccess && !documents.isPlaceholderData && documents.data.length === 0;
+  const counts = summary.data ? {
+    inProgress: countInProgress(summary.data.status_counts),
+    needsReview: summary.data.status_counts.needs_review ?? 0,
+    failed: summary.data.status_counts.failed ?? 0,
+  } : null;
 
-  const counts = useMemo(() => ({
-    total: documents.data?.length ?? 0,
-    inProgress: documents.data?.filter(item => isDocumentInProgress(item.status)).length ?? 0,
-    needsReview: documents.data?.filter(item => item.status === "needs_review").length ?? 0,
-    failed: documents.data?.filter(item => item.status === "failed").length ?? 0,
-  }), [documents.data]);
+  function clearFilters() {
+    setSearch("");
+    setServerSearch("");
+    setCategory("");
+    setStatusFilter("all");
+    setOffset(0);
+    setSelectedId(null);
+  }
+  function selectStatus(value: StatusFilter) { setStatusFilter(value); setOffset(0); setSelectedId(null); }
+  function selectCategory(value: string) { setCategory(value); setOffset(0); setSelectedId(null); }
+  function selectPage(value: number) { setOffset(Math.max(0, value)); setSelectedId(null); }
 
   function acceptDroppedFile(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
@@ -175,7 +209,10 @@ export default function InboxPage() {
         : "Invoice uploaded. Track its status and review the result below.");
       setFile(null);
       if (fileInput.current) fileInput.current.value = "";
-      await queryClient.invalidateQueries({ queryKey: ["documents"] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["documents"] }),
+        queryClient.invalidateQueries({ queryKey: ["workspace-summary"] }),
+      ]);
     } catch {
       setError("Could not reach the API. Try again shortly.");
     } finally {
@@ -212,6 +249,7 @@ export default function InboxPage() {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["documents"] }),
         queryClient.invalidateQueries({ queryKey: ["document", id] }),
+        queryClient.invalidateQueries({ queryKey: ["workspace-summary"] }),
       ]);
     } catch {
       setRetryResult({ id, error: true, message: "Could not reach the API. Please try again." });
@@ -220,19 +258,8 @@ export default function InboxPage() {
     }
   }
 
-  const unauthorized = [session.error, documents.error, detail.error]
-    .some(queryError => queryError?.message === "Unauthorized");
-  if (unauthorized) {
-    return <main className="p-8 text-slate-500" role="status">Checking your session…</main>;
-  }
-  if (session.isError) {
-    return <main className="p-8">
-      <p role="alert">Could not load your workspace.</p>
-      <button type="button" onClick={() => session.refetch()} className="primary mt-4">Try again</button>
-    </main>;
-  }
-  if (session.isPending || !session.data) {
-    return <main className="p-8 text-slate-500" role="status">Checking your session…</main>;
+  if (session.isError || !session.data || isUnauthorizedError(documents.error) || isUnauthorizedError(detail.error)) {
+    return <SessionFallback session={session} />;
   }
   const canUpload = session.data.role === "admin" || session.data.role === "reviewer" || session.data.role === "member";
 
@@ -247,12 +274,14 @@ export default function InboxPage() {
         <div className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600">{session.data.org_name} workspace</div>
       </header>
 
-      <div className="grid gap-3 sm:grid-cols-3" aria-label="Recent document summary">
-        <div className="card flex items-center gap-4 p-4"><span className="grid h-11 w-11 place-items-center rounded-xl bg-blue-50 text-xl text-blue-700" aria-hidden="true">↗</span><div><p className="text-xs font-semibold text-slate-500">In progress</p><p className="text-2xl font-bold text-slate-900">{counts.inProgress}</p></div></div>
-        <div className="card flex items-center gap-4 p-4"><span className="grid h-11 w-11 place-items-center rounded-xl bg-amber-50 text-xl text-amber-700" aria-hidden="true">◎</span><div><p className="text-xs font-semibold text-slate-500">Needs review</p><p className="text-2xl font-bold text-slate-900">{counts.needsReview}</p></div></div>
-        <div className="card flex items-center gap-4 p-4"><span className="grid h-11 w-11 place-items-center rounded-xl bg-rose-50 text-xl text-rose-700" aria-hidden="true">!</span><div><p className="text-xs font-semibold text-slate-500">Failed</p><p className="text-2xl font-bold text-slate-900">{counts.failed}</p></div></div>
+      <div className="grid gap-3 sm:grid-cols-3" aria-label="Workspace document summary">
+        <div className="card flex items-center gap-4 p-4"><span className="grid h-11 w-11 place-items-center rounded-xl bg-blue-50 text-xl text-blue-700" aria-hidden="true">↗</span><div><p className="text-xs font-semibold text-slate-500">In progress</p><p className="text-2xl font-bold text-slate-900">{counts ? counts.inProgress : <span className="text-slate-300">—</span>}</p></div></div>
+        <div className="card flex items-center gap-4 p-4"><span className="grid h-11 w-11 place-items-center rounded-xl bg-amber-50 text-xl text-amber-700" aria-hidden="true">◎</span><div><p className="text-xs font-semibold text-slate-500">Needs review</p><p className="text-2xl font-bold text-slate-900">{counts ? counts.needsReview : <span className="text-slate-300">—</span>}</p></div></div>
+        <div className="card flex items-center gap-4 p-4"><span className="grid h-11 w-11 place-items-center rounded-xl bg-rose-50 text-xl text-rose-700" aria-hidden="true">!</span><div><p className="text-xs font-semibold text-slate-500">Failed</p><p className="text-2xl font-bold text-slate-900">{counts ? counts.failed : <span className="text-slate-300">—</span>}</p></div></div>
       </div>
-      <p className="-mt-4 text-xs text-slate-500">Counts cover the {counts.total} documents on this page. Workspace-wide totals are in Insights.</p>
+      <p className="-mt-4 text-xs text-slate-500">{summary.isError
+        ? <>Workspace totals are unavailable right now. <button type="button" className="font-semibold underline" onClick={() => summary.refetch()}>Retry totals</button></>
+        : "Counts cover every invoice you can access, across all pages and filters."}</p>
 
       {canUpload ? <form onSubmit={upload} className="card overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 sm:px-6">
@@ -275,26 +304,27 @@ export default function InboxPage() {
       <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(320px,.9fr)_minmax(0,1.1fr)]">
         <section className="card min-w-0 self-start overflow-hidden xl:sticky xl:top-6" aria-label="Documents">
           <div className="border-b border-slate-100 p-5 sm:p-6">
-            <div className="flex items-center justify-between gap-3"><div><p className="eyebrow">Queue</p><h2 className="mt-1 text-lg font-bold text-slate-900">Recent documents</h2></div><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">{counts.total} items</span></div>
+            <div className="flex items-center justify-between gap-3"><div><p className="eyebrow">Queue</p><h2 className="mt-1 text-lg font-bold text-slate-900">Recent documents</h2></div><span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-bold text-slate-600">{pageCount} on this page</span></div>
             <label htmlFor="document-search" className="sr-only">Search documents</label>
             <input id="document-search" type="search" value={search} onChange={event => setSearch(event.target.value)} placeholder="Search by filename" className="field mt-5 text-sm" />
             <label className="mt-3 block text-xs font-semibold" htmlFor="inbox-category">Filter by category</label>
-            <select id="inbox-category" className="field mt-1 text-sm" value={category} onChange={event => { setCategory(event.target.value); setOffset(0); }}><option value="">All categories</option>{categories.data?.map(item => <option key={item.id} value={item.id}>{item.name}{item.active ? "" : " (archived)"}</option>)}</select>
+            <select id="inbox-category" className="field mt-1 text-sm" value={category} onChange={event => selectCategory(event.target.value)}><option value="">All categories</option>{categories.data?.map(item => <option key={item.id} value={item.id}>{item.name}{item.active ? "" : " (archived)"}</option>)}</select>
             <div role="group" aria-label="Filter documents by status" className="mt-3 flex flex-wrap gap-2">
-              {statusFilters.map(option => <button key={option.value} type="button" aria-pressed={statusFilter === option.value} onClick={() => { setStatusFilter(option.value); setOffset(0); }} className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${statusFilter === option.value ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>{option.label}</button>)}
+              {statusFilters.map(option => <button key={option.value} type="button" aria-pressed={statusFilter === option.value} onClick={() => selectStatus(option.value)} className={`rounded-full px-3 py-1.5 text-xs font-semibold transition-colors ${statusFilter === option.value ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"}`}>{option.label}</button>)}
             </div>
           </div>
           {documents.isError && <p role="alert" className="m-5 rounded-xl bg-rose-50 p-4 text-sm text-rose-800">Could not load documents. <button type="button" className="font-bold underline" onClick={() => documents.refetch()}>Try again</button></p>}
           {documents.isLoading && <p role="status" className="p-6 text-sm text-slate-500">Loading documents…</p>}
-          {documents.data?.length === 0 && <div className="p-8 text-center"><div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-blue-50 text-2xl text-blue-700" aria-hidden="true">▤</div><p className="mt-4 font-semibold text-slate-900">No documents yet.</p><p className="mt-1 text-sm text-slate-500">Upload your first invoice to start processing and review.</p></div>}
-          {Boolean(documents.data?.length) && visibleDocuments.length === 0 && <p className="p-6 text-sm text-slate-500">No documents match this search or status. Clear the filter to see your queue.</p>}
-          <div className="max-h-[65vh] overflow-y-auto" aria-label="Document list">
-            {visibleDocuments.map(item => <button key={item.id} type="button" aria-pressed={activeId === item.id} onClick={() => { setSelectedId(item.id); setUploadMessage(""); setRetryResult(null); }} className={`block w-full border-b border-slate-100 px-5 py-4 text-left transition-colors last:border-b-0 hover:bg-blue-50/70 ${activeId === item.id ? "border-l-4 border-l-blue-600 bg-blue-50/70 pl-4" : ""}`}>
+          {showEmptyState && (filtersActive
+            ? <div className="p-8 text-center"><div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-slate-100 text-2xl text-slate-500" aria-hidden="true">⌕</div><p className="mt-4 font-semibold text-slate-900">No invoices match these filters.</p><p className="mt-1 text-sm text-slate-500">Try another status, category or search{offset > 0 ? ", or return to the first page" : ""}.</p><button type="button" className="secondary mt-4 text-xs" onClick={clearFilters}>Clear filters</button></div>
+            : <div className="p-8 text-center"><div className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-blue-50 text-2xl text-blue-700" aria-hidden="true">▤</div><p className="mt-4 font-semibold text-slate-900">No documents yet.</p><p className="mt-1 text-sm text-slate-500">Upload your first invoice to start processing and review.</p></div>)}
+          <div className={`max-h-[65vh] overflow-y-auto transition-opacity ${documents.isPlaceholderData ? "opacity-60" : ""}`} aria-label="Document list" aria-busy={documents.isPlaceholderData}>
+            {documents.data?.map(item => <button key={item.id} type="button" aria-pressed={activeId === item.id} onClick={() => { setSelectedId(item.id); setUploadMessage(""); setRetryResult(null); }} className={`block w-full border-b border-slate-100 px-5 py-4 text-left transition-colors last:border-b-0 hover:bg-blue-50/70 ${activeId === item.id ? "border-l-4 border-l-blue-600 bg-blue-50/70 pl-4" : ""}`}>
               <span className="flex min-w-0 flex-wrap items-center justify-between gap-2"><span className="min-w-0 break-all text-sm font-bold text-slate-900">{item.filename}</span><StatusBadge status={item.status} /></span>
-              <span className="mt-2 block text-xs text-slate-500">{new Date(item.created_at).toLocaleString()} · {Math.max(1, Math.ceil(item.size_bytes / 1024))} KB</span>
+              <span className="mt-2 block text-xs text-slate-500">{formatDateTime(item.created_at)} · {Math.max(1, Math.ceil(item.size_bytes / 1024))} KB</span>
             </button>)}
           </div>
-          <div className="flex items-center justify-between gap-3 border-t border-slate-100 p-4"><button className="secondary text-xs" type="button" disabled={offset === 0 || documents.isFetching} onClick={() => { setOffset(value => Math.max(0, value - 50)); setSelectedId(null); }}>Previous</button><span className="text-xs text-slate-500">Page {offset / 50 + 1}</span><button className="secondary text-xs" type="button" disabled={!documents.data || documents.data.length < 50 || documents.isFetching} onClick={() => { setOffset(value => value + 50); setSelectedId(null); }}>Next</button></div>
+          <div className="flex items-center justify-between gap-3 border-t border-slate-100 p-4"><button className="secondary text-xs" type="button" disabled={offset === 0 || documents.isFetching} onClick={() => selectPage(offset - PAGE_SIZE)}>Previous</button><span className="text-xs text-slate-500">Page {offset / PAGE_SIZE + 1}</span><button className="secondary text-xs" type="button" disabled={!documents.data || documents.data.length < PAGE_SIZE || documents.isFetching} onClick={() => selectPage(offset + PAGE_SIZE)}>Next</button></div>
         </section>
 
         <section className="card min-w-0 self-start overflow-hidden" aria-label="Extraction result">
