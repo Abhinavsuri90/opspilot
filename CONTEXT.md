@@ -2,7 +2,7 @@
 
 ## 1. Last updated
 
-2026-09-27, mid-session. Latest commits: `e01614f` web fixes, `52172bb` Phase 2 API, `e729ebc` CI retry, plus the review fix pass (migration 0007, 210 API tests). Review split view UI in progress: see section 4.
+2026-09-27, mid-session. Latest commits: `e01614f` web fixes, `52172bb` Phase 2 API, `e729ebc` CI retry, plus the review fix pass (migration 0007, 210 API tests). Review split view UI complete and committed; Phase 3 backend (actions, policies, connectors) in progress: see section 4.
 
 ## 2. Current status
 
@@ -10,15 +10,16 @@ Full project evaluation completed on 2026-09-27 (score 5.5/10: engineering about
 
 The owner then chose to implement the rest of SPEC.md before deploying. Build order: fixes + Phase 2 → 3 → 4 → 5 → 6 to 9 → Phase 10 Oracle go-live. One commit per phase, every check suite green before each commit.
 
-**In progress right now:** Phase 2 backend (confidence engine, workflow config schema, safe rule DSL, corrections, review tasks, review queue and timeline endpoints, migration 0006) plus the twelve review bugs; and the frontend review fixes (inbox polling bug, filter-aware empty state, cross-tab session handling, shared session hook, middleware cookie gate, proxy header passthrough, Zod register schema, component split, jsdom unit tests).
+**Done today:** review fixes (web and API), Phase 2 backend (migrations 0006 and 0007, 210 API tests) and the Phase 2 review split view (79 web tests, `make smoke-review`).
+
+**In progress right now:** Phase 3 backend per the brief in the session scratchpad (migration 0008: org_settings kill switch and shadow mode, action_policies, connector_instances with Fernet credentials, actions and action_attempts; connectors webhook, csv_export, postgres_table, google_sheets; worker topics propose_actions and execute_action with the policy and kill-switch check immediately before execution; settings and actions APIs; workflow config GET/POST with YAML).
 
 ## 3. Exact next step
 
-1. When the backend stream finishes: rebuild, run `make lint typecheck test`, then `make gen-client` to refresh `apps/web/lib/schema.d.ts`.
-2. When the frontend fixes finish: run the web checks and the browser suites (`cd apps/web && npm run test:e2e:public && node scripts/e2e-workspace.mjs`).
-3. Build the Phase 2 review split view (`/review`, `/review/[id]`) against the new endpoints; brief is drafted in the session scratchpad and mirrored in section 5.
-4. Update SYSTEM_DESIGN.md, README.md, PROGRESS.md; commit `feat: ...` without any AI attribution; push.
-5. Start Phase 3 (actions, policies, kill switch, connectors). Design notes are in section 5.
+1. When the Phase 3 backend finishes: rebuild, run `make lint typecheck test`, `make gen-client`, review the diff (independent reviewer), commit and push.
+2. Build the Phase 3 frontend (`/actions`, `/settings/policies`, `/settings/connectors`, `/settings/workflow`, timeline actions, AppShell nav, kill-switch banner) against the new endpoints; brief drafted in the session scratchpad (phase3_frontend_brief.md).
+3. Run all seven browser suites (`make smoke-ui smoke-tenants smoke-workspace smoke-review` plus `npm run test:e2e:public`, `test:e2e:errors`, and the new actions script); update SYSTEM_DESIGN.md (actions flow, policy check, connector boundary), README, PROGRESS, CONTEXT; commit; push.
+4. Phase 4: config editor UI polish, Contoso purchase orders and delivery notes, email intake via Mailpit/IMAP, dashboard KPIs with charts.
 
 ## 4. Files in play
 

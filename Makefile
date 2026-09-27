@@ -1,4 +1,4 @@
-.PHONY: setup web-deps up demo down logs migrate seed test lint typecheck eval gen-client smoke smoke-ui smoke-tenants smoke-workspace lock-api
+.PHONY: setup web-deps up demo down logs migrate seed test lint typecheck eval gen-client smoke smoke-ui smoke-tenants smoke-workspace smoke-review lock-api
 
 setup:
 	@test -f .env || cp .env.example .env
@@ -65,3 +65,6 @@ smoke-tenants: setup web-deps
 
 smoke-workspace: setup web-deps
 	cd apps/web && node scripts/e2e-workspace.mjs
+
+smoke-review: setup web-deps
+	cd apps/web && node scripts/e2e-review.mjs

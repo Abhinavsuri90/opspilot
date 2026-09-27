@@ -52,6 +52,7 @@ export default function DashboardPage() {
     { label: "Accessible invoices", value: summary.data?.total_documents ?? 0, detail: "Across your entire workspace", color: "bg-sky-100 text-sky-700", icon: "▤" },
     { label: "Needs review", value: summary.data?.status_counts.needs_review ?? 0, detail: "Fields ready to inspect", color: "bg-amber-100 text-amber-700", icon: "◷" },
     { label: "In progress", value: countInProgress(summary.data?.status_counts), detail: "Queued, extracting or validating", color: "bg-cyan-100 text-cyan-700", icon: "↗" },
+    { label: "Auto-approved", value: summary.data?.status_counts.auto_approved ?? 0, detail: "Approved by policy, no reviewer needed", color: "bg-emerald-100 text-emerald-700", icon: "✓" },
     { label: "Failed", value: summary.data?.status_counts.failed ?? 0, detail: "May be eligible to retry", color: "bg-rose-100 text-rose-700", icon: "!" },
   ];
 
@@ -77,7 +78,7 @@ export default function DashboardPage() {
     </section>
 
     {summary.isError && <p role="alert" className="mt-4 text-sm text-rose-700">Could not load workspace totals. <button onClick={() => summary.refetch()} className="underline">Try again</button></p>}
-    <section aria-label="Document summary" className="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+    <section aria-label="Document summary" className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
       {metrics.map(metric => <div key={metric.label} className="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-[0_6px_20px_rgba(15,23,42,.035)]">
         <div className="flex items-start justify-between gap-2"><p className="text-xs font-semibold text-slate-600">{metric.label}</p><span aria-hidden="true" className={`grid h-8 w-8 place-items-center rounded-lg text-lg font-bold ${metric.color}`}>{metric.icon}</span></div>
         <p className="mt-3 text-[31px] font-bold leading-none tracking-[-.04em] text-[#12233d]">{!summary.data ? <span className="text-slate-300">—</span> : metric.value}</p>

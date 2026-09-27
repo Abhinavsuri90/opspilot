@@ -9,47 +9,10 @@ import { AccessForm } from "@/components/workspace/AccessForm";
 import { Discussion } from "@/components/workspace/Discussion";
 import { MetadataForm } from "@/components/workspace/MetadataForm";
 import { ReviewDecision } from "@/components/workspace/ReviewDecision";
-import { metadataSnapshot, sharingSnapshot, type Decision, type MetadataDraft, type SharingDraft, type Workspace } from "@/components/workspace/types";
-import { apiErrorMessage } from "@/lib/errors";
+import { saveMessage, sendSave, type SaveInput } from "@/components/workspace/save";
+import { metadataSnapshot, sharingSnapshot, type MetadataDraft, type SharingDraft } from "@/components/workspace/types";
 import { formatDateTime } from "@/lib/format";
 import { documentFileUrl } from "@/lib/urls";
-
-// Each kind of save carries exactly the data it needs, so no branch has to
-// assume a field that another branch provided.
-type SaveInput =
-  | { action: "metadata"; metadata: MetadataDraft }
-  | { action: "comments"; body: string }
-  | { action: "review"; decision: Decision; comment: string }
-  | { action: "sharing"; sharing: SharingDraft };
-
-type SaveResponse = { data?: Workspace; error?: unknown; response: Response };
-
-function saveMessage(error: unknown, status: number) {
-  if (status === 409) return "This invoice changed or the action is unavailable. Refresh the invoice and try again.";
-  return apiErrorMessage(error, status, "Could not save this change. Please try again.");
-}
-
-function sendSave(documentId: string, current: Workspace, input: SaveInput): Promise<SaveResponse> {
-  const params = { path: { document_id: documentId } };
-  switch (input.action) {
-    case "metadata": {
-      const { metadata } = input;
-      return api.POST("/v1/documents/{document_id}/metadata", { params, body: {
-        version: metadata.version,
-        category_id: metadata.categoryId || null,
-        verified_amount: metadata.amount || null,
-        currency: metadata.currency.toUpperCase() || null,
-        ...(current.capabilities.can_assign && metadata.reviewerId !== metadata.originalReviewerId ? { assigned_reviewer_id: metadata.reviewerId || null } : {}),
-      } });
-    }
-    case "comments":
-      return api.POST("/v1/documents/{document_id}/comments", { params, body: { body: input.body } });
-    case "review":
-      return api.POST("/v1/documents/{document_id}/review", { params, body: { version: current.version, decision: input.decision, comment: input.comment } });
-    case "sharing":
-      return api.POST("/v1/documents/{document_id}/sharing", { params, body: { version: input.sharing.version, visibility: input.sharing.visibility, user_ids: input.sharing.userIds } });
-  }
-}
 
 export function InvoiceWorkspace({ documentId, status, orgId, userId }: { documentId: string; status: string; orgId: string; userId: string }) {
   const client = useQueryClient();
@@ -83,7 +46,7 @@ export function InvoiceWorkspace({ documentId, status, orgId, userId }: { docume
       if (input.action === "metadata") setMetadataDraft(null);
       if (input.action === "sharing") setSharingDraft(null);
       setNotice("Changes saved.");
-      await Promise.all(["document", "documents", "review-documents", "workspace-summary"].map(key => client.invalidateQueries({ queryKey: [key] })));
+      await Promise.all(["document", "documents", "review-queue", "timeline", "workspace-summary"].map(key => client.invalidateQueries({ queryKey: [key] })));
     },
     onError: () => { setNotice(""); },
   });
@@ -110,7 +73,7 @@ export function InvoiceWorkspace({ documentId, status, orgId, userId }: { docume
     {data && tab === "questions" && <InvoiceQuestions documentId={documentId} />}
     {data && tab === "review" && <div className="space-y-5">
       {metadata && <MetadataForm data={data} metadata={metadata} draft={metadataDraft} categories={categories} collaborators={collaborators} saving={save.isPending} onChange={editMetadata} onSubmit={event => submit(event, "metadata")} onDiscard={() => { setMetadataDraft(null); save.reset(); void workspace.refetch(); }} />}
-      <ReviewDecision data={data} status={status} reason={reason} hasDraft={Boolean(metadataDraft)} saving={save.isPending} onReasonChange={setReason} onDecide={decision => save.mutate({ action: "review", decision, comment: reason })} />
+      <ReviewDecision data={data} status={status} reason={reason} hasDraft={Boolean(metadataDraft)} saving={save.isPending} onReasonChange={setReason} onDecide={decision => save.mutate({ action: "review", decision, comment: reason, version: data.version })} />
       <Discussion data={data} comment={comment} saving={save.isPending} onCommentChange={setComment} onSubmit={event => { event.preventDefault(); save.mutate({ action: "comments", body: comment }); }} />
       {data.reviews.length > 0 && <section><h4 className="text-sm font-bold">Decision history</h4><ol className="mt-3 space-y-3 border-l-2 border-slate-200 pl-4">{data.reviews.map(item => <li key={item.id} className="text-xs leading-5"><p><strong className="capitalize">{item.decision}</strong> · {item.actor_email}</p><p className="whitespace-pre-wrap break-words text-slate-600">{item.comment}</p><time dateTime={item.created_at} className="text-slate-400">{formatDateTime(item.created_at)}</time></li>)}</ol></section>}
     </div>}

@@ -1,17 +1,68 @@
 "use client";
 
 import { useEffect, useId, useRef, useState } from "react";
-import type { PDFDocumentLoadingTask, PDFDocumentProxy, RenderTask } from "pdfjs-dist";
+import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFPageProxy, PageViewport, RenderTask } from "pdfjs-dist";
 import { api } from "@/lib/api";
 
-type PdfViewerProps = { documentId: string };
+/** Evidence to point at: the page it sits on and the text to outline there. */
+export type PdfHighlight = { page: number; text: string };
+
+type PdfViewerProps = { documentId: string; highlight?: PdfHighlight | null };
+
+type HighlightRect = { left: number; top: number; width: number; height: number };
+
+function normalizeText(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function fitViewport(sourcePage: PDFPageProxy, width: number, zoom: number): PageViewport {
+  const original = sourcePage.getViewport({ scale: 1 });
+  return sourcePage.getViewport({ scale: (width / original.width) * zoom });
+}
+
+/**
+ * Rectangles (in viewport CSS pixels) covering the text items whose combined,
+ * whitespace-normalized text contains the evidence. Empty when nothing matches.
+ */
+export async function locateEvidence(sourcePage: PDFPageProxy, viewport: PageViewport, evidence: string): Promise<HighlightRect[]> {
+  const needle = normalizeText(evidence);
+  if (!needle) return [];
+  const content = await sourcePage.getTextContent();
+  const items = content.items.filter(item => "str" in item && item.str.trim() !== "");
+  let haystack = "";
+  const spans: { start: number; end: number; index: number }[] = [];
+  items.forEach((item, index) => {
+    if (!("str" in item)) return;
+    const text = normalizeText(item.str);
+    if (haystack) haystack += " ";
+    const start = haystack.length;
+    haystack += text;
+    spans.push({ start, end: haystack.length, index });
+  });
+  let at = haystack.indexOf(needle);
+  if (at < 0) at = haystack.toLowerCase().indexOf(needle.toLowerCase());
+  if (at < 0) return [];
+  const end = at + needle.length;
+  const rects: HighlightRect[] = [];
+  for (const span of spans) {
+    if (span.end <= at || span.start >= end) continue;
+    const item = items[span.index];
+    if (!("str" in item)) continue;
+    const [, , , , x, y] = item.transform;
+    // Text items sit on their baseline; drop the box a little to cover descenders.
+    const [x1, y1] = viewport.convertToViewportPoint(x, y - item.height * 0.2).map(Number);
+    const [x2, y2] = viewport.convertToViewportPoint(x + item.width, y + item.height * 0.8).map(Number);
+    rects.push({ left: Math.min(x1, x2), top: Math.min(y1, y2), width: Math.abs(x2 - x1), height: Math.abs(y2 - y1) });
+  }
+  return rects;
+}
 
 function loadMessage(error: unknown) {
   if (error instanceof Error && error.message.startsWith("Invoice:")) return error.message.slice(8);
   return "The PDF could not be displayed. Try again, or download the original document.";
 }
 
-function PdfDocument({ documentId }: PdfViewerProps) {
+function PdfDocument({ documentId, highlight }: PdfViewerProps) {
   const descriptionId = useId();
   const frame = useRef<HTMLDivElement>(null);
   const canvasHost = useRef<HTMLDivElement>(null);
@@ -25,6 +76,8 @@ function PdfDocument({ documentId }: PdfViewerProps) {
   const [rendering, setRendering] = useState(false);
   const [error, setError] = useState("");
   const [pageText, setPageText] = useState("");
+  const [highlightRects, setHighlightRects] = useState<HighlightRect[]>([]);
+  const [highlightState, setHighlightState] = useState<"found" | "missing" | null>(null);
 
   useEffect(() => {
     const element = frame.current;
@@ -135,8 +188,7 @@ function PdfDocument({ documentId }: PdfViewerProps) {
       try {
         const sourcePage = await loadedPdf.getPage(page);
         if (disposed) return;
-        const original = sourcePage.getViewport({ scale: 1 });
-        const viewport = sourcePage.getViewport({ scale: (width / original.width) * zoom });
+        const viewport = fitViewport(sourcePage, width, zoom);
         // Bound canvas memory on large pages and high-density mobile displays.
         const resolution = Math.min(
           window.devicePixelRatio || 1, 2,
@@ -182,6 +234,41 @@ function PdfDocument({ documentId }: PdfViewerProps) {
     };
   }, [pdf, page, width, zoom, descriptionId]);
 
+  // A new highlight jumps to its page; the overlay itself follows the rendered page.
+  useEffect(() => {
+    if (!pdf || !highlight) return;
+    const target = Math.min(Math.max(highlight.page, 1), pdf.numPages);
+    setPage(target);
+    frame.current?.scrollTo({ top: 0, left: 0 });
+  }, [pdf, highlight]);
+
+  useEffect(() => {
+    if (!pdf || !width || !highlight || highlight.page !== page) {
+      setHighlightRects([]);
+      setHighlightState(null);
+      return;
+    }
+    let disposed = false;
+    const loadedPdf = pdf;
+    const evidence = highlight.text;
+    async function locate() {
+      try {
+        const sourcePage = await loadedPdf.getPage(page);
+        const rects = await locateEvidence(sourcePage, fitViewport(sourcePage, width, zoom), evidence);
+        if (disposed) return;
+        setHighlightRects(rects);
+        setHighlightState(rects.length > 0 ? "found" : "missing");
+      } catch {
+        if (!disposed) {
+          setHighlightRects([]);
+          setHighlightState("missing");
+        }
+      }
+    }
+    void locate();
+    return () => { disposed = true; };
+  }, [pdf, page, width, zoom, highlight]);
+
   function navigate(next: number) {
     setPage(next);
     frame.current?.scrollTo({ top: 0, left: 0 });
@@ -203,8 +290,14 @@ function PdfDocument({ documentId }: PdfViewerProps) {
     {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-800">{error}<button type="button" className="ml-2 font-semibold underline" onClick={() => setAttempt(value => value + 1)}>Retry PDF</button></div>}
     <div ref={frame} className="relative max-h-[72vh] min-h-64 overflow-auto rounded-xl border border-slate-200 bg-slate-100 p-3" aria-busy={loading || rendering} tabIndex={0} aria-label="Scrollable PDF page">
       {(loading || rendering) && !error && <p role="status" className="py-16 text-center text-sm text-slate-500">{loading ? "Loading PDF…" : `Rendering page ${page}…`}</p>}
-      <div ref={canvasHost} className="mx-auto w-max min-w-0" />
+      <div className="relative mx-auto w-max min-w-0">
+        <div ref={canvasHost} />
+        {highlightRects.length > 0 && !rendering && <div className="pointer-events-none absolute inset-0" aria-hidden="true" data-testid="evidence-highlight">
+          {highlightRects.map((rect, index) => <span key={index} className="absolute rounded-sm bg-amber-300/40 ring-2 ring-amber-500/80" style={{ left: rect.left, top: rect.top, width: rect.width, height: rect.height }} />)}
+        </div>}
+      </div>
     </div>
+    {highlight && highlightState && <p role="status" className={`text-xs font-semibold ${highlightState === "found" ? "text-amber-800" : "text-slate-500"}`}>{highlightState === "found" ? `Evidence highlighted on page ${page}.` : `Evidence text was not found on page ${page}; showing the page instead.`}</p>}
     <p id={descriptionId} className="text-xs leading-5 text-slate-500">Navigate through every page and zoom to check invoice details. Select “Read page text” for a copyable text version.</p>
     {pdf && !loading && !rendering && !error && <details className="rounded-xl border border-slate-200 bg-white p-3">
       <summary className="cursor-pointer text-xs font-semibold text-slate-700">Read page {page} text</summary>
@@ -213,7 +306,7 @@ function PdfDocument({ documentId }: PdfViewerProps) {
   </div>;
 }
 
-export function PdfViewer({ documentId }: PdfViewerProps) {
+export function PdfViewer({ documentId, highlight = null }: PdfViewerProps) {
   // A changed document immediately disposes its worker and erases the old page.
-  return <PdfDocument key={documentId} documentId={documentId} />;
+  return <PdfDocument key={documentId} documentId={documentId} highlight={highlight} />;
 }

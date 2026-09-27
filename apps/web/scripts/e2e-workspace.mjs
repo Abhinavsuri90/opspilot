@@ -234,13 +234,16 @@ try {
   await reviewer.getByRole("link").filter({ hasText: `workspace-${suffix}.pdf` }).click();
   await reviewer.getByRole("region", { name: "Invoice discussion" }).getByText("Please verify this invoice against the purchase order.", { exact: true }).waitFor();
   await reviewer.getByLabel("Decision note (required to reject)").fill("Checked PDF and purchase order; amount matches.");
-  const approved = await submitted(reviewer, `/v1/documents/${documentId}/review`, () => reviewer.getByRole("button", { name: "Approve invoice", exact: true }).click());
+  await reviewer.getByRole("button", { name: "Approve invoice", exact: true }).click();
+  const approveDialog = reviewer.getByRole("dialog", { name: "Approve this invoice?", exact: true });
+  await approveDialog.waitFor();
+  const approved = await submitted(reviewer, `/v1/documents/${documentId}/review`, () => approveDialog.getByRole("button", { name: "Confirm approval", exact: true }).click());
   assert.equal(approved.reviews.at(-1)?.decision, "approve");
   await reviewer.getByRole("button", { name: "Reopen review", exact: true }).waitFor();
   await capture(reviewer, process.env.E2E_WORKSPACE_REVIEW_SCREENSHOT);
   console.log("Restricted sharing, original PDF, comments, and reviewer approval passed");
 
-  await reviewer.getByRole("button", { name: "Ask invoice", exact: true }).click();
+  await reviewer.getByRole("tab", { name: "Ask invoice", exact: true }).click();
   const answer = await submitted(reviewer, "/v1/workspace/questions", () => reviewer.getByRole("button", { name: "Summarize this invoice", exact: true }).click());
   assert.equal(answer.supported, true);
   await reviewer.getByRole("region", { name: "Invoice questions" }).getByText(/Checked against current records/).waitFor();

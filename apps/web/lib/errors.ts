@@ -2,10 +2,15 @@ import { z } from "zod";
 
 // The API wraps failures as `{ error: { code, message } }`. Parse, never cast.
 const apiErrorSchema = z.object({
-  error: z.object({ code: z.string().optional(), message: z.string().optional() }),
+  error: z.object({
+    code: z.string().optional(),
+    message: z.string().optional(),
+    // Plain HTTP errors send `details: null`; validation errors send a list. Any other shape is ignored, never fatal.
+    details: z.array(z.object({ field: z.string().optional(), message: z.string().optional() })).nullish().catch(undefined),
+  }),
 });
 
-export type ApiError = { code?: string; message?: string };
+export type ApiError = { code?: string; message?: string; details?: { field?: string; message?: string }[] | null };
 
 export function parseApiError(body: unknown): ApiError {
   const parsed = apiErrorSchema.safeParse(body);
@@ -31,7 +36,11 @@ const statusMessages: Record<number, string> = {
  * sent one, otherwise the caller's fallback, otherwise a message for the status.
  */
 export function apiErrorMessage(error: unknown, status: number, fallback?: string): string {
-  const message = parseApiError(error).message?.trim();
+  const parsed = parseApiError(error);
+  // Request validation wraps the specific problem in `details`; the envelope message is only "Invalid request".
+  const detail = parsed.code === "validation_error" ? parsed.details?.find(item => item.message?.trim())?.message?.trim() : undefined;
+  if (detail) return detail.replace(/^Value error, /, "");
+  const message = parsed.message?.trim();
   if (message) return message;
   if (fallback) return fallback;
   if (status >= 500) return "The service is temporarily unavailable. Please try again.";

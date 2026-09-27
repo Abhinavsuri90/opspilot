@@ -51,3 +51,18 @@ describe("Retry-After parsing", () => {
     expect(waitMessage(15)).toBe("15 minutes");
   });
 });
+
+describe("validation error details", () => {
+  it("prefers the specific validation detail over the generic envelope message", () => {
+    const body = { error: { code: "validation_error", message: "Invalid request", details: [{ field: "body", message: "Value error, Provide the corrected value to edit this field" }] } };
+    expect(apiErrorMessage(body, 422)).toBe("Provide the corrected value to edit this field");
+    expect(apiErrorMessage({ error: { code: "validation_error", message: "Invalid request", details: [] } }, 422)).toBe("Invalid request");
+    expect(apiErrorMessage({ error: { code: "request_failed", message: "Value is not a valid amount", details: [{ message: "ignored" }] } }, 422)).toBe("Value is not a valid amount");
+  });
+
+  it("still reads the message when details is null or an unexpected shape", () => {
+    expect(apiErrorMessage({ error: { code: "request_failed", message: "Value is not a valid amount", details: null } }, 422)).toBe("Value is not a valid amount");
+    expect(apiErrorMessage({ error: { code: "request_failed", message: "Invoice changed.", details: { odd: true } } }, 409)).toBe("Invoice changed.");
+    expect(parseApiError({ error: { code: "request_failed", message: "x", details: null } }).code).toBe("request_failed");
+  });
+});

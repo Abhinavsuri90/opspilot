@@ -15,7 +15,8 @@
     "test:e2e:public": "node scripts/e2e-public.mjs",
     "test:e2e:errors": "node scripts/e2e-errors.mjs",
     "gen-client": "node scripts/gen-client.mjs",
-    "test:e2e:workspace": "node scripts/e2e-workspace.mjs"
+    "test:e2e:workspace": "node scripts/e2e-workspace.mjs",
+    "test:e2e:review": "node scripts/e2e-review.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.85.0",

@@ -1,13 +1,18 @@
 "use client";
 
 import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-query";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type DragEvent, type FormEvent } from "react";
 import { AppShell } from "@/components/AppShell";
 import { InvoiceWorkspace } from "@/components/InvoiceWorkspace";
 import { SessionFallback } from "@/components/SessionFallback";
+import { StatusBadge } from "@/components/StatusBadge";
+import { percent } from "@/components/review/ConfidenceBar";
+import { FieldStatusChip } from "@/components/review/FieldStatusChip";
 import { api } from "@/lib/api";
-import { countInProgress, documentStatusLabel, documentStatusTone, isDocumentInProgress, type DocumentStatusTone } from "@/lib/document-status";
+import { countInProgress, documentStatusLabel, isDocumentInProgress } from "@/lib/document-status";
+import { summarizeFieldStatuses } from "@/lib/fields";
 import { isUnauthorizedError, isUnauthorizedStatus, unauthorizedError } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format";
 import { classifyRetryFailure } from "@/lib/retry";
@@ -26,21 +31,6 @@ const statusFilters: { value: StatusFilter; label: string }[] = [
   { value: "rejected", label: "Rejected" },
   { value: "failed", label: "Failed" },
 ];
-
-const badgeTones: Record<DocumentStatusTone, string> = {
-  progress: "border-blue-200 bg-blue-50 text-blue-700",
-  review: "border-amber-200 bg-amber-50 text-amber-800",
-  completed: "border-emerald-200 bg-emerald-50 text-emerald-800",
-  rejected: "border-slate-200 bg-slate-100 text-slate-600",
-  failed: "border-rose-200 bg-rose-50 text-rose-700",
-  neutral: "border-slate-200 bg-slate-50 text-slate-600",
-};
-
-function StatusBadge({ status }: { status: string }) {
-  return <span className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-bold capitalize ${badgeTones[documentStatusTone(status)]}`}>
-    <span className="h-1.5 w-1.5 rounded-full bg-current" aria-hidden="true" />{documentStatusLabel(status)}
-  </span>;
-}
 
 export default function InboxPage() {
   const router = useRouter();
@@ -340,8 +330,20 @@ export default function InboxPage() {
               {detail.data.status === "failed" && canUpload && <button type="button" className="primary" disabled={retryingId !== null || exhaustedRetryIds.has(detail.data.id)} onClick={retryFailedDocument}>{retryingId === detail.data.id ? "Queueing retry…" : exhaustedRetryIds.has(detail.data.id) ? "Retry limit reached" : "Retry extraction"}</button>}
               {retryResult?.id === detail.data.id && <p role={retryResult.error ? "alert" : "status"} className={`rounded-xl p-4 text-sm ${retryResult.error ? "bg-rose-50 text-rose-800" : "bg-emerald-50 text-emerald-900"}`}>{retryResult.message}</p>}
               {detail.data.status === "needs_review" && <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"><strong>Evidence ready.</strong> The fields below were extracted and checked against the PDF. Open the full document, verify the amount, and record a review decision below.</p>}
+              {detail.data.fields.length > 0 && (() => {
+                const fieldSummary = summarizeFieldStatuses(detail.data.fields);
+                return <div role="group" className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white p-4" aria-label="Confidence summary">
+                  <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+                    <span className={`rounded-full border px-2.5 py-1 ${fieldSummary.flagged > 0 ? "border-amber-300 bg-amber-50 text-amber-900" : "border-slate-200 bg-slate-50 text-slate-600"}`}>{fieldSummary.flagged} flagged</span>
+                    <span className="rounded-full border border-sky-200 bg-sky-50 px-2.5 py-1 text-sky-800">{fieldSummary.auto} auto</span>
+                    <span className="rounded-full border border-violet-200 bg-violet-50 px-2.5 py-1 text-violet-800">{fieldSummary.corrected} corrected</span>
+                    {fieldSummary.accepted > 0 && <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-emerald-800">{fieldSummary.accepted} accepted</span>}
+                  </div>
+                  <Link href={`/review/${encodeURIComponent(detail.data.id)}`} className="secondary text-xs">Open in review →</Link>
+                </div>;
+              })()}
               {detail.data.fields.length > 0 && <div><h3 className="mb-3 text-xs font-bold uppercase tracking-[.12em] text-slate-500">Extracted fields and evidence</h3><dl className="grid gap-3 sm:grid-cols-2">
-                {detail.data.fields.map(field => <div key={field.name} className="min-w-0 rounded-xl border border-slate-200 bg-slate-50/70 p-4"><dt className="text-xs font-bold uppercase tracking-wide text-slate-500">{field.name.replaceAll("_", " ")}</dt><dd className="mt-2 break-words text-base font-bold text-slate-900">{field.value}</dd><dd className="mt-3 border-t border-slate-200 pt-3 text-xs leading-5 text-slate-600"><span className="font-bold text-blue-700">Evidence · page {field.page_number}</span><br />“{field.evidence}”</dd></div>)}
+                {detail.data.fields.map(field => <div key={field.name} className="min-w-0 rounded-xl border border-slate-200 bg-slate-50/70 p-4"><div className="flex flex-wrap items-start justify-between gap-2"><dt className="text-xs font-bold uppercase tracking-wide text-slate-500">{field.name.replaceAll("_", " ")}</dt><span className="flex items-center gap-1.5 text-[11px] font-semibold text-slate-500"><span className="tabular-nums" title={`Confidence ${percent(field.confidence)}%, threshold ${percent(field.threshold)}%`}>{percent(field.confidence)}%</span><FieldStatusChip status={field.status} /></span></div><dd className="mt-2 break-words text-base font-bold text-slate-900">{field.current_value}</dd>{field.status === "corrected" && <dd className="mt-1 text-xs text-slate-500">Extracted <s className="text-slate-400">{field.value}</s></dd>}<dd className="mt-3 border-t border-slate-200 pt-3 text-xs leading-5 text-slate-600"><span className="font-bold text-blue-700">Evidence · page {field.page_number}</span><br />“{field.evidence}”</dd></div>)}
               </dl></div>}
               <InvoiceWorkspace key={detail.data.id} documentId={detail.data.id} status={detail.data.status} orgId={session.data.org_id} userId={session.data.user_id} />
             </div>}

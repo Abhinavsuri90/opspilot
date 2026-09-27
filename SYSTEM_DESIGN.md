@@ -61,7 +61,7 @@ There is no Redis dispatch, vector retrieval, event bus, or automatic model rout
 
 ### Page map and entry journey
 
-All eight pages belong to one Next.js application. The public homepage explains the product before asking visitors to create an account. Its `#workspace`, `#workflow` and `#features` sections explain who uses the workspace, how an invoice moves through review and which tools are available.
+All pages belong to one Next.js application. The public homepage explains the product before asking visitors to create an account. Its `#workspace`, `#workflow` and `#features` sections explain who uses the workspace, how an invoice moves through review and which tools are available.
 
 | Page | Audience and responsibility |
 | --- | --- |
@@ -70,7 +70,8 @@ All eight pages belong to one Next.js application. The public homepage explains 
 | `/login` | Public organization selection and password authentication |
 | `/dashboard` | Approved members: authorized counts and recent invoices |
 | `/inbox` | Approved members: intake, search, evidence, full PDF, discussion and permitted review/access actions |
-| `/review` | Approved members: authorized pending invoices; decisions require an eligible reviewer or admin |
+| `/review` | Approved members: filterable queue of authorized pending invoices with SLA and flagged-field counts |
+| `/review/[id]` | Eligible reviewers and admins: keyboard-first split view with evidence highlighting, per-field confidence and reasons, accept/edit corrections, rules, decision, discussion, access and timeline |
 | `/insights` | Approved members: authorized totals, categories and bounded questions |
 | `/admin` | Organization admins: membership lifecycle and category management |
 
@@ -88,7 +89,7 @@ flowchart TD
     Create --> Dashboard[Dashboard]
     Login --> Check[API verifies password and active membership]
     Check --> Dashboard
-    Dashboard --> Work[Inbox, Review and Insights]
+    Dashboard --> Work[Inbox, Review queue and split view, Insights]
     Dashboard --> Admin[Admin: organization admins only]
 ```
 
@@ -319,7 +320,7 @@ The extractor has no tools and cannot approve an invoice. Uploaded text is untru
 
 - Routed API replies contain `Server-Timing: api;dur=...` and `X-Request-ID`; the proxy forwards them. Early request-size and origin denials carry a request ID but do not include timing.
 - API completion logs identify method, route template, status, duration and request ID without invoice content.
-- TanStack Query polls extracting documents every two seconds, the review queue every ten seconds, and collaboration/summary views every fifteen seconds. Successful mutations invalidate affected caches immediately.
+- TanStack Query polls extracting documents every two seconds, the review queue every ten seconds, and collaboration/summary views every fifteen seconds; failed lookups stop polling. Successful mutations invalidate affected caches immediately.
 - Lists use bounded pagination; status and category filters run in SQL before pagination. Filename search is bounded and treats wildcard characters literally.
 - SQL indexes cover tenant/status document queries, extracted fields, outbox availability, category metadata, grant lookup, comments and decision history.
 - Browser smoke includes small sequential latency samples. These measure the local proxy/API path, not sustained throughput or production percentiles.
@@ -408,6 +409,7 @@ There is no tested production restore, observed availability history, centralize
 - Per-address login throttle, forwarded-address derivation, extraction and upload-parse timeouts, request IDs on 500 responses, schema drift between ORM and migrations.
 - Decimal totals across currencies, verified/unverified exclusions, aggregate scope beyond 50 invoices.
 - Fresh browser registration through approval, upload, full PDF review, discussion, decision and insights.
+- Review queue filters, split view, evidence highlight rectangles, keyboard accept/edit/approve, inline validation reasons, shortcuts dialog and timeline (`npm run test:e2e:review` from `apps/web`).
 - Responsive page checks, loading/error states, login with no hard-coded account defaults.
 - API/web lint, static types, tests, production builds and deployment image checks in CI.
 
