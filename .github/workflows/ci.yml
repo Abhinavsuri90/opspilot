@@ -71,6 +71,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Pull base images with retry
+        run: |
+          set -u
+          for image in public.ecr.aws/docker/library/python:3.12-slim public.ecr.aws/docker/library/node:22-alpine; do
+            for attempt in 1 2 3 4 5; do
+              if docker pull --quiet "$image"; then break; fi
+              if [ "$attempt" = 5 ]; then echo "Could not pull $image after 5 attempts"; exit 1; fi
+              echo "Pull of $image failed on attempt $attempt; retrying in 20 seconds"
+              sleep 20
+            done
+          done
       - run: docker build -f infra/api.Dockerfile --target runtime -t opspilot-api:ci .
       - run: docker run --rm --entrypoint python opspilot-api:ci -c "import app.main"
       - run: docker run --rm --entrypoint python opspilot-api:ci -m pip check
@@ -89,6 +100,17 @@ jobs:
           cache: npm
           cache-dependency-path: apps/web/package-lock.json
       - run: cp .env.example .env
+      - name: Pull base images with retry
+        run: |
+          set -u
+          for image in public.ecr.aws/docker/library/python:3.12-slim public.ecr.aws/docker/library/node:22-alpine pgvector/pgvector:pg16 adobe/s3mock:latest; do
+            for attempt in 1 2 3 4 5; do
+              if docker pull --quiet "$image"; then break; fi
+              if [ "$attempt" = 5 ]; then echo "Could not pull $image after 5 attempts"; exit 1; fi
+              echo "Pull of $image failed on attempt $attempt; retrying in 20 seconds"
+              sleep 20
+            done
+          done
       - run: make demo
       - run: make smoke-ui
         env:
