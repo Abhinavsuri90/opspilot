@@ -29,3 +29,16 @@ def set_org_context(session: Session, org_id: uuid.UUID) -> None:
     session.execute(
         text("SELECT set_config('app.current_org', :org_id, true)"), {"org_id": str(org_id)}
     )
+
+
+def set_api_key_context(session: Session, key_prefix: str) -> None:
+    """Expose exactly one api_keys row (by public prefix) before the tenant is known.
+
+    The api_keys table has a second, SELECT-only policy keyed on this setting, so a lookup
+    can run without a tenant context and still never see another key. SET LOCAL scope again.
+    """
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    session.execute(
+        text("SELECT set_config('app.api_key_prefix', :prefix, true)"), {"prefix": key_prefix}
+    )

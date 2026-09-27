@@ -29,7 +29,7 @@ from app.repositories import (
     list_members,
 )
 from app.security import hash_password, verify_password
-from app.workflow_config import default_invoice_config
+from app.workflow_config import Template, template_config
 
 router = APIRouter(tags=["Organizations"])
 SLUG_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$"
@@ -56,6 +56,8 @@ class SignupCredentials(BaseModel):
 class RegisterOrganizationRequest(SignupCredentials):
     org_name: str = Field(min_length=2, max_length=200)
     default_currency: str = Field(default="USD", pattern=r"^[A-Z]{3}$")
+    # Starting workflow: invoices, or purchase orders and delivery notes (logistics).
+    template: Template = "invoice"
 
     @field_validator("org_name", mode="before")
     @classmethod
@@ -198,14 +200,18 @@ def register_organization(
                 WorkflowConfig(
                     org_id=org.id,
                     version=1,
-                    config_json=default_invoice_config().model_dump_json(),
+                    config_json=template_config(body.template).model_dump_json(),
                 ),
                 AuditEvent(
                     org_id=org.id,
                     actor_user_id=user.id,
                     event_type="organization.created",
                     detail_json=json.dumps(
-                        {"slug": org.slug, "default_currency": org.default_currency}
+                        {
+                            "slug": org.slug,
+                            "default_currency": org.default_currency,
+                            "template": body.template,
+                        }
                     ),
                 ),
             ]

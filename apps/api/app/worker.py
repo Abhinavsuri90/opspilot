@@ -19,7 +19,7 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app import actions_service
+from app import actions_service, email_intake, near_duplicates
 from app.action_models import Action
 from app.actions_service import ExecutionPlan
 from app.confidence import Evaluation, evaluate
@@ -328,6 +328,23 @@ def complete(
         session.add(audit(claim.org_id, claim.document_id, "document.validating", None, now))
         session.flush()
 
+        # Same counterparty, number and total as an earlier document of this type: link
+        # them, flag the identifier and insist on a human even under a threshold policy.
+        document.document_type = type_spec.name
+        duplicates = near_duplicates.flag_near_duplicates(
+            session, document, type_spec, evaluation, now
+        )
+        if duplicates:
+            session.add(
+                audit(
+                    claim.org_id,
+                    claim.document_id,
+                    "document.near_duplicate",
+                    {"related_document_ids": [str(item.id) for item in duplicates]},
+                    now,
+                )
+            )
+
         run, fields = _store_run(claim, result, provider, evaluation, now)
         session.add(run)
         session.flush()
@@ -335,7 +352,6 @@ def complete(
         flagged = [item.name for item in evaluation.fields if item.status == "needs_review"]
         failed_rules = [rule.name for rule in evaluation.rule_results if rule.passed is False]
 
-        document.document_type = type_spec.name
         document.failure_reason = None
         event.published_at = now
         if config.review_policy == "always" or flagged or failed_rules:
@@ -348,7 +364,11 @@ def complete(
                     claim.org_id,
                     claim.document_id,
                     "document.needs_review",
-                    {"flagged_fields": flagged, "failed_rules": failed_rules},
+                    {
+                        "flagged_fields": flagged,
+                        "failed_rules": failed_rules,
+                        "near_duplicates": [str(item.id) for item in duplicates],
+                    },
                     now + timedelta(microseconds=1),
                 )
             )
@@ -683,17 +703,29 @@ def run_connector(plan: ExecutionPlan) -> ExecutionResult:
         )
 
 
+# How often the loop checks for inboxes that are due; each inbox is polled at most once per
+# email_intake.POLL_INTERVAL_SECONDS regardless of how many workers run.
+EMAIL_TICK_SECONDS = 15
+
+
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     # Invalid provider configuration is a deployment error, not a recoverable
     # document error. Let the process exit so the platform reports it clearly.
     get_provider()
+    next_email_tick = 0.0
     while True:
         try:
             worked = process_one()
         except Exception:
             logger.exception("Worker loop failed; retrying")
             worked = False
+        if time.monotonic() >= next_email_tick:
+            next_email_tick = time.monotonic() + EMAIL_TICK_SECONDS
+            try:
+                email_intake.poll_due_inboxes()
+            except Exception:
+                logger.exception("Email intake tick failed; retrying next tick")
         if not worked:
             time.sleep(2)
 

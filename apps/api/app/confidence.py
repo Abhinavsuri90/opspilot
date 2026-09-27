@@ -32,7 +32,12 @@ DATE_FORMATS = (
     "%d %b %Y",
     "%Y/%m/%d",
 )
-_MONEY_NOISE = re.compile(r"[A-Za-z$€£¥₹\s,]")
+# An amount with an optional currency symbol or three-letter code before or after it.
+# Letters inside the digits ("$11O.OO", "$O,693.28") are not silently dropped: an OCR
+# style mistake must fail parsing so the field is flagged.
+_MONEY_PATTERN = re.compile(
+    r"\s*(?:[A-Za-z]{3}\s*)?[$€£¥₹]?\s*(-?[\d,]*\d(?:\.\d+)?)\s*[$€£¥₹]?\s*(?:[A-Za-z]{3})?\s*"
+)
 # Stored as NUMERIC(20, 4); keep a margin below 10**16 so quantizing cannot overflow.
 MAX_AMOUNT_MAGNITUDE = Decimal(10) ** 15
 MAX_DECIMAL_PLACES = 4
@@ -80,9 +85,10 @@ def parse_date(value: str) -> date | None:
 
 
 def parse_money(value: str) -> Decimal | None:
-    cleaned = _MONEY_NOISE.sub("", value)
-    if not re.fullmatch(r"-?\d+(?:\.\d+)?", cleaned):
+    match = _MONEY_PATTERN.fullmatch(value)
+    if match is None:
         return None
+    cleaned = match.group(1).replace(",", "")
     try:
         amount = Decimal(cleaned)
     except InvalidOperation:

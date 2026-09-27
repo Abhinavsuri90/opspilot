@@ -20,6 +20,10 @@ Built with Next.js, React, TanStack Query, FastAPI, Postgres row-level security 
 - Governed actions after approval: one proposal per configured destination with a preview of exactly what will be sent, a per-type policy (auto, needs approval, forbidden), an organization kill switch and shadow mode re-checked immediately before every external call, idempotency keys, retries with backoff and a dead-letter queue with manual retry.
 - Connectors with encrypted credentials and connection tests: HMAC-signed webhook, CSV export, Postgres table and Google Sheets.
 - Workflow configuration API with YAML import and export, append-only versions and inline validation errors.
+- Multi-customer templates: invoices, or logistics with purchase orders and delivery notes, detected from configured keywords with their own fields and rules.
+- Three intake channels with identical deduplication and audit: browser upload, an organization API key for programmatic submission, and a polled mailbox (IMAP, or Mailpit locally) that keeps the email body as context.
+- Near-duplicate detection on party, identifier and total that links both documents and forces review.
+- KPIs: documents processed, auto-approve rate, field accuracy, median time to complete, queue depth and hours saved against a configurable baseline.
 - Full PDF viewing with page navigation, zoom, selectable page text and download; reviewer assignment, verified amount/currency and approve/reject/reopen.
 - Invoice comments, decision history and authenticated sharing with restricted visibility.
 - Dashboard, review queue, category filters, paginated inbox and Insights.

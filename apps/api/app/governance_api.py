@@ -13,7 +13,12 @@ from app.actions_service import ActionDetail, ActionSummary
 from app.auth import Identity, current_session
 from app.connectors.base import ConnectorConfigError, CredentialsUnavailable
 from app.connectors.csv_export import MONTH_PATTERN, export_key, month_of_key
-from app.repositories import get_connector_instance, list_accessible_actions, list_export_keys
+from app.repositories import (
+    count_actions_by_status,
+    get_connector_instance,
+    list_accessible_actions,
+    list_export_keys,
+)
 from app.settings_service import (
     ConnectionTestResponse,
     ConnectorNotFound,
@@ -86,6 +91,13 @@ class ExportMonth(BaseModel):
     path: str
 
 
+class ActionsSummary(BaseModel):
+    counts: dict[str, int]
+    pending_approvals: int
+    dead_letters: int
+    failed: int
+
+
 def _require_admin(identity: Identity) -> None:
     if identity[3].role != "admin":
         raise HTTPException(403, "Administrator access required")
@@ -132,6 +144,20 @@ def list_actions(
         actions_service.summarize(action, document, connector_name, decider_email)
         for action, document, connector_name, decider_email in rows
     ]
+
+
+@router.get("/actions/summary", response_model=ActionsSummary)
+def actions_summary(context: SessionContext) -> ActionsSummary:
+    """Counts by status over the caller's visible documents; declared before /{action_id}."""
+    session, user, org, membership = context
+    counts = {status: 0 for status in ACTION_STATUSES}
+    counts.update(count_actions_by_status(session, org.id, user.id, membership.role))
+    return ActionsSummary(
+        counts=counts,
+        pending_approvals=counts["proposed"],
+        dead_letters=counts["dead_lettered"],
+        failed=counts["failed"],
+    )
 
 
 @router.get("/actions/{action_id}", response_model=ActionDetail)

@@ -1,4 +1,4 @@
-.PHONY: setup web-deps up demo down logs migrate seed test lint typecheck eval gen-client smoke smoke-ui smoke-tenants smoke-workspace smoke-review lock-api
+.PHONY: setup web-deps up demo down logs migrate seed test lint typecheck eval gen-dataset send-test-email gen-client smoke smoke-ui smoke-tenants smoke-workspace smoke-review lock-api
 
 setup:
 	@test -f .env || cp .env.example .env
@@ -11,7 +11,7 @@ lock-api:
 
 up: setup
 	docker compose build
-	docker compose up -d postgres s3mock
+	docker compose up -d postgres s3mock mailpit
 	$(MAKE) migrate
 	docker compose up -d --wait --wait-timeout 90 api worker web
 
@@ -49,6 +49,12 @@ typecheck: setup web-deps
 eval:
 	@mkdir -p evals/reports
 	docker compose run --rm -v "$(CURDIR)/evals/reports:/workspace/evals/reports" worker python -m evals.run
+
+gen-dataset: setup
+	docker compose run --rm -v "$(CURDIR)/evals/datasets:/workspace/evals/datasets" -v "$(CURDIR)/examples:/workspace/examples" worker python /workspace/scripts/generate_synthetic.py --output /workspace/evals/datasets/generated --sample /workspace/evals/datasets/sample --examples /workspace/examples
+
+send-test-email: setup
+	docker compose run --rm admin python /workspace/scripts/send_test_email.py --host mailpit --org $(or $(ORG),northwind)
 
 gen-client: setup web-deps
 	docker compose run --rm api python /workspace/scripts/export_openapi.py > apps/web/lib/openapi.json

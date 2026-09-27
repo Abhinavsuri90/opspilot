@@ -64,8 +64,12 @@ def test_date_parsing_accepts_common_layouts(raw: str, expected: date | None) ->
         ("€99", Decimal("99")),
         ("-12.00", Decimal("-12.00")),
         ("₹1,00,000.00", Decimal("100000.00")),
+        ("1,234.50 GBP", Decimal("1234.50")),
+        ("eur 4160.02", Decimal("4160.02")),
         ("$11O.OO", None),
+        ("$O,693.28", None),
         ("12.3.4", None),
+        ("USD", None),
         ("", None),
     ],
 )

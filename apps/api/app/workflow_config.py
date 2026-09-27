@@ -38,6 +38,10 @@ MAPPING_LITERALS = frozenset(
 )
 MAX_REGEX_LENGTH = 200
 _BRACE_QUANTIFIER = re.compile(r"\{\d*,?\d*\}")
+# Counterparty fields, in the order near-duplicate detection prefers them.
+PARTY_FIELDS = ("vendor", "supplier")
+Template = Literal["invoice", "logistics"]
+TEMPLATES: tuple[str, ...] = ("invoice", "logistics")
 
 
 def default_label(name: str) -> str:
@@ -182,6 +186,16 @@ class DocumentTypeSpec(BaseModel):
     def field(self, name: str) -> FieldSpec | None:
         return next((field for field in self.fields if field.name == name), None)
 
+    def primary_identifier(self) -> FieldSpec | None:
+        """The document number: the first required identifier field, else any identifier."""
+        identifiers = [field for field in self.fields if field.type == "identifier"]
+        required = next((field for field in identifiers if field.required), None)
+        return required or (identifiers[0] if identifiers else None)
+
+    def party_field(self) -> FieldSpec | None:
+        """The counterparty field near-duplicate detection compares (vendor or supplier)."""
+        return next((field for field in self.fields if field.name in PARTY_FIELDS), None)
+
 
 class DestinationSpec(BaseModel):
     """Where an approved document's values go: one connector, one action type, one mapping."""
@@ -306,6 +320,79 @@ def default_invoice_config() -> WorkflowConfigModel:
             )
         ]
     )
+
+
+def default_logistics_config() -> WorkflowConfigModel:
+    """Purchase orders and delivery notes for a logistics customer (the Contoso template)."""
+    return WorkflowConfigModel(
+        document_types=[
+            DocumentTypeSpec(
+                name="purchase_order",
+                label="Purchase Order",
+                detect=["purchase order", "po number"],
+                fields=[
+                    FieldSpec(name="buyer", type="text", required=True, threshold=0.8),
+                    FieldSpec(
+                        name="po_number",
+                        label="PO Number",
+                        type="identifier",
+                        required=True,
+                        regex=r"^[A-Za-z0-9-/]{3,40}$",
+                        threshold=0.8,
+                    ),
+                    FieldSpec(name="order_date", type="date", required=True, threshold=0.8),
+                    FieldSpec(name="delivery_date", type="date"),
+                    FieldSpec(name="supplier", type="text", required=True, threshold=0.8),
+                    FieldSpec(name="line_count", type="integer"),
+                    FieldSpec(name="subtotal", type="money"),
+                    FieldSpec(name="tax", type="money"),
+                    FieldSpec(name="total", type="money", required=True, threshold=0.9),
+                    FieldSpec(name="currency", type="currency", regex=r"^[A-Z]{3}$"),
+                ],
+                rules=[
+                    RuleSpec(
+                        name="totals_add_up",
+                        expression="subtotal + tax == total",
+                        tolerance=Decimal("0.01"),
+                        message="Subtotal plus tax must equal total",
+                    ),
+                    RuleSpec(
+                        name="delivery_after_order",
+                        expression="order_date <= delivery_date",
+                        message="Delivery date must not precede the order date",
+                    ),
+                ],
+            ),
+            DocumentTypeSpec(
+                name="delivery_note",
+                label="Delivery Note",
+                detect=["delivery note", "dispatch"],
+                fields=[
+                    FieldSpec(name="supplier", type="text", required=True, threshold=0.8),
+                    FieldSpec(
+                        name="delivery_note_number",
+                        type="identifier",
+                        required=True,
+                        regex=r"^[A-Za-z0-9-/]{3,40}$",
+                        threshold=0.8,
+                    ),
+                    FieldSpec(name="po_number", label="PO Number", type="identifier"),
+                    FieldSpec(name="delivery_date", type="date", required=True, threshold=0.8),
+                    FieldSpec(name="packages", type="integer"),
+                    FieldSpec(name="received_by", type="text"),
+                ],
+            ),
+        ]
+    )
+
+
+def template_config(template: str) -> WorkflowConfigModel:
+    """The starting workflow configuration for a registration template."""
+    if template == "logistics":
+        return default_logistics_config()
+    if template == "invoice":
+        return default_invoice_config()
+    raise ValueError(f"Unknown workflow template: {template}")
 
 
 class InvalidWorkflowConfig(ValueError):

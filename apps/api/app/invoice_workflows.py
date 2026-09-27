@@ -745,7 +745,7 @@ def correct_field(
         document_id=document.id,
     )
     session.flush()
-    response = review_service.document_detail(session, document)
+    response = review_service.document_detail(session, document, (user.id, membership.role))
     session.commit()
     return response
 

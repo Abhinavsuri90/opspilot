@@ -55,6 +55,8 @@ from app.document_service import (
     UploadResponse,
 )
 from app.governance_api import router as governance_router
+from app.intake_api import router as intake_router
+from app.intake_models import ApiKey
 from app.invoice_workflows import router as invoice_router
 from app.limits import MAX_UPLOAD_BYTES, MAX_UPLOAD_REQUEST_BYTES
 from app.login_throttle import (
@@ -78,6 +80,7 @@ from app.security import (
 from app.settings_service import SettingsInvalid
 from app.storage import ObjectStore, StorageError, get_store
 from app.timeouts import ParserBusy
+from app.workflow_config import DOCUMENT_TYPE_PATTERN
 
 settings = get_settings()
 logger = logging.getLogger("uvicorn.error.opspilot")
@@ -93,6 +96,7 @@ app = FastAPI(title="OpsPilot API", version="0.1.0", lifespan=lifespan)
 app.include_router(onboarding_router)
 app.include_router(invoice_router)
 app.include_router(governance_router)
+app.include_router(intake_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.web_origin],
@@ -290,7 +294,8 @@ def readyz(session: Annotated[Session, Depends(get_session)]) -> dict[str, str]:
                 "invoice_comments AS co, invoice_reviews AS rv, invoice_grants AS dg, "
                 "field_corrections AS fc, review_tasks AS rt, org_settings AS os, "
                 "action_policies AS ap, connector_instances AS ci, actions AS ac, "
-                "action_attempts AS aa LIMIT 0"
+                "action_attempts AS aa, document_links AS dl, api_keys AS ak, "
+                "email_inboxes AS ei, email_messages AS em LIMIT 0"
             )
         )
     except SQLAlchemyError as exc:
@@ -351,6 +356,7 @@ def me(
 @app.post("/v1/documents", response_model=UploadResponse, status_code=202)
 def upload_document(
     file: Annotated[UploadFile, File()],
+    request: Request,
     identity: Annotated[Identity, Depends(current_session)],
     store: Annotated[ObjectStore, Depends(get_store)],
 ) -> UploadResponse:
@@ -358,9 +364,21 @@ def upload_document(
     if membership.role not in ("admin", "reviewer", "member"):
         raise HTTPException(status_code=403, detail="Uploader role required")
     data = file.file.read(MAX_UPLOAD_BYTES + 1)
+    # Set by app.auth when the request carried an API key instead of a session cookie.
+    state_key = getattr(request.state, "api_key", None)
+    key = state_key if isinstance(state_key, ApiKey) else None
     try:
         return document_service.upload(
-            session, store, org.id, user.id, file.filename or "", data, membership.role
+            session,
+            store,
+            org.id,
+            user.id,
+            file.filename or "",
+            data,
+            membership.role,
+            source="api" if key else "upload",
+            source_ref=f"API key {key.name}" if key else None,
+            audit_detail={"api_key_id": str(key.id)} if key else None,
         )
     except DocumentAccessDenied as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -390,6 +408,8 @@ def documents(
             "auto_approved|rejected|failed|actions_pending|completed)$"
         ),
     ] = None,
+    document_type: Annotated[str | None, Query(pattern=DOCUMENT_TYPE_PATTERN)] = None,
+    source: Annotated[str | None, Query(pattern="^(upload|email|api)$")] = None,
 ) -> list[DocumentSummary]:
     session, user, org, membership = identity
     return document_service.browse(
@@ -402,6 +422,8 @@ def documents(
         status=status,
         category_id=category_id,
         q=q,
+        document_type=document_type,
+        source=source,
     )
 
 

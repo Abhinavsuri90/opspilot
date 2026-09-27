@@ -1,6 +1,21 @@
 {
-  "exact_match": 0.9478,
+  "exact_match": 0.9551,
   "grounded_fraction": 1.0,
-  "flag_precision": 0.6667,
-  "flag_recall": 1.0
+  "flag_precision": 0.75,
+  "flag_recall": 1.0,
+  "type_detection": 1.0,
+  "by_document_type": {
+    "delivery_note": {
+      "exact_match": 0.9731,
+      "type_detection": 1.0
+    },
+    "invoice": {
+      "exact_match": 0.945,
+      "type_detection": 1.0
+    },
+    "purchase_order": {
+      "exact_match": 0.9533,
+      "type_detection": 1.0
+    }
+  }
 }

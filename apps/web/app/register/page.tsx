@@ -69,7 +69,7 @@ function RegistrationForm({ initialMode, initialRole }: { initialMode: Mode; ini
       const identity = { org_slug: values.org_slug, email: values.email, password: values.password };
       if (values.mode === "create") {
         const result = await api.POST("/v1/auth/register-organization", {
-          body: { ...identity, org_name: values.org_name, default_currency: values.default_currency },
+          body: { ...identity, org_name: values.org_name, default_currency: values.default_currency, template: "invoice" },
         });
         if (result.error || !result.data) throw new Error(apiErrorMessage(result.error, result.response.status, "Could not create the organization. Please try again."));
         return { mode: "create", session: result.data };

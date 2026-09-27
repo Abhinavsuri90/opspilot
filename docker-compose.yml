@@ -58,6 +58,7 @@ services:
       CONNECTOR_ENCRYPTION_KEY: ${CONNECTOR_ENCRYPTION_KEY:-}
       ACTION_EXECUTE_TIMEOUT_SECONDS: ${ACTION_EXECUTE_TIMEOUT_SECONDS:-30}
       MAX_CONCURRENT_CONNECTOR_CALLS: ${MAX_CONCURRENT_CONNECTOR_CALLS:-4}
+      MAILPIT_API_URL: ${MAILPIT_API_URL:-http://mailpit:8025}
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -85,6 +86,7 @@ services:
       CONNECTOR_ENCRYPTION_KEY: ${CONNECTOR_ENCRYPTION_KEY:-}
       ACTION_EXECUTE_TIMEOUT_SECONDS: ${ACTION_EXECUTE_TIMEOUT_SECONDS:-30}
       MAX_CONCURRENT_CONNECTOR_CALLS: ${MAX_CONCURRENT_CONNECTOR_CALLS:-4}
+      MAILPIT_SMTP_HOST: mailpit
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,10 +115,13 @@ services:
       CONNECTOR_ENCRYPTION_KEY: ${CONNECTOR_ENCRYPTION_KEY:-}
       ACTION_EXECUTE_TIMEOUT_SECONDS: ${ACTION_EXECUTE_TIMEOUT_SECONDS:-30}
       MAX_CONCURRENT_CONNECTOR_CALLS: ${MAX_CONCURRENT_CONNECTOR_CALLS:-4}
+      MAILPIT_API_URL: ${MAILPIT_API_URL:-http://mailpit:8025}
     depends_on:
       postgres:
         condition: service_healthy
       s3mock:
+        condition: service_started
+      mailpit:
         condition: service_started
 
   web:

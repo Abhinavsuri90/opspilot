@@ -21,6 +21,7 @@ from app.action_models import (  # noqa: E402
     OrgSettings,
 )
 from app.db import normalize_database_url  # noqa: E402
+from app.intake_models import ApiKey, DocumentLink, EmailInbox, EmailMessage  # noqa: E402
 from app.login_throttle import client_ip_hash, identity_hash  # noqa: E402
 from app.models import (  # noqa: E402
     AuditEvent,
@@ -65,6 +66,13 @@ def delete_documents(session: Session, document_ids: list[uuid.UUID]) -> None:
     )
     if action_ids:
         session.execute(delete(ActionAttempt).where(ActionAttempt.action_id.in_(action_ids)))
+    session.execute(
+        delete(DocumentLink).where(
+            DocumentLink.document_id.in_(document_ids)
+            | DocumentLink.related_document_id.in_(document_ids)
+        )
+    )
+    session.execute(delete(EmailMessage).where(EmailMessage.document_id.in_(document_ids)))
     for model in (
         Action,
         FieldCorrection,
@@ -94,6 +102,9 @@ def delete_organizations(session: Session, org_ids: list[uuid.UUID]) -> None:
         session.scalars(select(Membership.user_id).where(Membership.org_id.in_(org_ids)))
     )
     for model in (
+        EmailMessage,
+        EmailInbox,
+        ApiKey,
         ConnectorInstance,
         OrgActionPolicy,
         OrgSettings,

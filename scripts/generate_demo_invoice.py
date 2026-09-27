@@ -3,6 +3,8 @@
 import argparse
 from pathlib import Path
 
+from scripts.generate_synthetic import render_pdf
+
 
 def invoice_pdf(
     invoice_number: str = "NW-2026-001",
@@ -28,39 +30,7 @@ def invoice_pdf(
     lines = ["OpsPilot fictional demo invoice"] + [
         f"{label}: {value}" for label, value in labeled.items() if label not in omit
     ]
-    escaped = [
-        line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-        for line in lines
-    ]
-    content = (
-        "BT /F1 12 Tf 50 750 Td 18 TL "
-        + " ".join(f"({line}) Tj T*" for line in escaped)
-        + " ET"
-    )
-    stream = content.encode("ascii")
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        (
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-            b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>"
-        ),
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        f"<< /Length {len(stream)} >>\nstream\n".encode() + stream + b"\nendstream",
-    ]
-    data = bytearray(b"%PDF-1.4\n")
-    offsets = [0]
-    for number, body in enumerate(objects, start=1):
-        offsets.append(len(data))
-        data.extend(f"{number} 0 obj\n".encode() + body + b"\nendobj\n")
-    xref_at = len(data)
-    data.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
-    for offset in offsets[1:]:
-        data.extend(f"{offset:010d} 00000 n \n".encode())
-    data.extend(
-        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n".encode()
-    )
-    return bytes(data)
+    return render_pdf(lines)
 
 
 if __name__ == "__main__":

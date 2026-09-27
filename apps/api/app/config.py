@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     # Fernet key for connector credentials at rest; see app/connectors/credentials.py.
     # Development derives a local-only key from JWT_SECRET when this is unset.
     connector_encryption_key: str | None = None
+    # Development-only email backend: the Mailpit HTTP API the worker polls for
+    # <slug>@opspilot.local mailboxes; see app/email_intake.py. Unset outside development.
+    mailpit_api_url: str | None = None
     # Peers allowed to supply X-Forwarded-For; see app/client_ip.py.
     trusted_proxy_cidrs: str = (
         "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7"
@@ -60,6 +63,17 @@ class Settings(BaseSettings):
                 "CONNECTOR_ENCRYPTION_KEY must be a Fernet key (44 URL-safe base64 characters)"
             ) from exc
         return key
+
+    @field_validator("mailpit_api_url")
+    @classmethod
+    def parse_mailpit_api_url(cls, value: str | None) -> str | None:
+        url = (value or "").strip().rstrip("/")
+        if not url:
+            return None
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("MAILPIT_API_URL must be an absolute http(s) URL")
+        return url
 
     @field_validator("trusted_proxy_cidrs")
     @classmethod
@@ -136,6 +150,8 @@ class Settings(BaseSettings):
                     raise ValueError("Custom S3 endpoints require explicit credentials")
             if self.connector_encryption_key is None:
                 raise ValueError("CONNECTOR_ENCRYPTION_KEY is required outside development")
+            if self.mailpit_api_url:
+                raise ValueError("MAILPIT_API_URL is a development-only setting")
         return self
 
 

@@ -130,6 +130,7 @@ All document actions additionally require access to that particular document.
 | Accept or edit extracted fields (creates a correction) | Yes | Eligible reviewer | No | No |
 | Approve, reject or retry proposed actions | Yes | Yes | No | No |
 | Kill switch, shadow mode, action policies, connectors, workflow configuration | Yes | No | No | No |
+| API keys and the email inbox | Yes | No | No | No |
 | Approve/reject/reopen | Yes | Eligible reviewer | No | No |
 | Assign reviewer | Yes | No | No | No |
 | Manage visibility/grants | Yes | If uploader | If uploader | No |
@@ -157,6 +158,7 @@ RLS enforces organization isolation. Per-document restrictions are enforced by a
 - Bounded JSON requests (64 KB), upload requests and field lengths.
 - Unknown credentials receive a consistent error; valid pending credentials receive an actionable pending status.
 - No raw API keys, cookies, passwords, document text or email addresses in request timing logs.
+- API keys authenticate only document submission and polling; every other route rejects a bearer key. Email intake reads a mailbox on a lease shared across workers and never marks a message processed without recording it.
 - Connector credentials are encrypted at rest with a Fernet key from the environment and are never returned by any endpoint; webhook destinations are resolved and rejected when they point at loopback, private, link-local or metadata addresses outside development, both when saved and again when sent.
 
 The web proxy forwards `X-Forwarded-For` and `X-Forwarded-Proto`. The API derives the client address with one rule: when the connecting peer is a loopback or private-network address (the web container), it takes the rightmost `X-Forwarded-For` entry, which is the value the trusted edge appended; otherwise it uses the peer address and ignores the header. A browser-supplied leftmost entry therefore cannot spoof the per-address login throttle (50 attempts per 15 minutes) or the signup throttle. An edge rate limit or bot challenge is still advisable before unrestricted public signup.
@@ -185,6 +187,10 @@ erDiagram
     ACTION ||--o{ ACTION_ATTEMPT : records
     ORGANIZATION ||--o| ORG_SETTINGS : governs
     ORGANIZATION ||--o{ ACTION_POLICY : permits
+    DOCUMENT ||--o{ DOCUMENT_LINK : near_duplicate
+    ORGANIZATION ||--o{ API_KEY : issues
+    ORGANIZATION ||--o| EMAIL_INBOX : polls
+    EMAIL_INBOX ||--o{ EMAIL_MESSAGE : processed
     DOCUMENT ||--o{ AUDIT_EVENT : links
     ORGANIZATION ||--o{ AUDIT_EVENT : records
 ```
@@ -202,6 +208,10 @@ erDiagram
 | Action attempt | Append-only record of every execution attempt with outcome and a response summary that never includes the response body |
 | Connector instance | Typed configuration validated per connector; credentials encrypted with Fernet; deactivated rather than deleted |
 | Organization settings and action policies | Kill switch and shadow mode per organization; policy per action type overrides the workflow configuration default of needs approval |
+| Document source | `upload`, `email` or `api` with a bounded source reference and, for email, the bounded message body kept as context |
+| Document link | Near-duplicate pairs (same party, primary identifier and total within one organization and document type), recorded both ways; the identifier field is flagged and the document always goes to review |
+| API key | Plaintext shown once; only a prefix and a SHA-256 hash are stored; keys submit and poll documents only; revocation is immediate; 60 uploads per 15 minutes per key |
+| Email inbox | One per organization; IMAP host must pass the private-address guard; password encrypted; each message processed once by `(organization, uid)` |
 | Invoice metadata | One row/document; default visibility workspace; version begins at zero |
 | Verified money | Decimal `NUMERIC(20,4)`, nonnegative, amount and ISO currency both set or both absent |
 | Category | Unique normalized name inside organization; archive instead of deleting referenced history |
@@ -233,6 +243,10 @@ sequenceDiagram
     Teammate->>API: Login to chosen org
     API-->>Teammate: Session after active membership check
 ```
+
+### Intake channels
+
+Documents arrive three ways and share one intake function, so deduplication, quotas, validation and audit are identical: browser upload by an approved member; `POST /v1/documents` with an organization API key (the actor recorded is the key's creator, with the key id in the audit detail); and a polled mailbox, where every PDF attachment becomes a document and the message body is kept as context. Organizations choose a template at registration: invoices, or logistics with purchase orders and delivery notes. The document type is detected from configured keywords, and each type carries its own fields, thresholds and rules, so a new customer's document types are configuration, not code.
 
 ### Intake, extraction and review
 
@@ -478,6 +492,7 @@ There is no tested production restore, observed availability history, centralize
 - Per-address login throttle, forwarded-address derivation, extraction and upload-parse timeouts, request IDs on 500 responses, schema drift between ORM and migrations.
 - Governance: policy matrix, kill switch engaged between approval and execution (thread-gated), shadow mode never calling a connector, forbidden at execution time, idempotent proposals and executions, backoff to dead letter and manual retry, webhook HMAC verified by a test receiver, SSRF matrix, credential encryption and secrecy, YAML configuration round trip and stale-version conflicts, tenant isolation of actions, connectors, policies and exports.
 - Browser: connector creation and test, YAML import with line-referenced errors, policy change, proposal with preview, approval, a signed webhook received by a local receiver, kill switch blocking then releasing execution, shadow mode and forbidden outcomes (`npm run test:e2e:actions` from `apps/web`).
+- Intake channels: logistics template detection and rules, near-duplicate linking that forces review, API key lifecycle, throttle and route restriction, IMAP and Mailpit backends, worker poll idempotency, KPI math on fixtures, deterministic synthetic dataset and eval baseline per document type.
 - Decimal totals across currencies, verified/unverified exclusions, aggregate scope beyond 50 invoices.
 - Fresh browser registration through approval, upload, full PDF review, discussion, decision and insights.
 - Review queue filters, split view, evidence highlight rectangles, keyboard accept/edit/approve, inline validation reasons, shortcuts dialog and timeline (`npm run test:e2e:review` from `apps/web`).

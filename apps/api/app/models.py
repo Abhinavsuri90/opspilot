@@ -127,6 +127,8 @@ class Document(Base):
         UniqueConstraint("org_id", "content_hash", name="uq_documents_org_hash"),
         Index("ix_documents_org_status_created", "org_id", "status", "created_at"),
         Index("ix_documents_org_created", "org_id", "created_at", "id"),
+        Index("ix_documents_org_type_created", "org_id", "document_type", "created_at"),
+        CheckConstraint("source IN ('upload', 'email', 'api')", name="ck_documents_source"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -143,6 +145,14 @@ class Document(Base):
     document_type: Mapped[str] = mapped_column(
         String(50), nullable=False, default="invoice", server_default="invoice"
     )
+    # How the document arrived: a browser upload, an inbound email or an API key call.
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="upload", server_default="upload"
+    )
+    # Sender and subject for email, the key name for API intake; never the document text.
+    source_ref: Mapped[str | None] = mapped_column(String(300))
+    # Email body text kept as reviewer context, bounded by document_service.MAX_CONTEXT_CHARS.
+    context_text: Mapped[str | None] = mapped_column(Text)
     # Reserved for distributed tracing of the extraction pipeline.
     trace_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -1,0 +1,231 @@
+{
+  "cases": [
+    {
+      "document_type": "invoice",
+      "name": "invoice-0001-clean",
+      "pdf": "invoice-0001-clean.pdf",
+      "should_flag": [],
+      "template": "invoice",
+      "truth": {
+        "currency": "GBP",
+        "due_date": "30/09/2026",
+        "invoice_date": "31-Aug-26",
+        "invoice_number": "INV-2026-0001",
+        "po_number": "PO-2026-0451",
+        "subtotal": "6914.09",
+        "tax": "GBP 1382.82",
+        "total": "GBP 8,296.91",
+        "vendor": "Sunrise Packaging"
+      },
+      "variant": "clean"
+    },
+    {
+      "document_type": "invoice",
+      "name": "invoice-0002-clean",
+      "pdf": "invoice-0002-clean.pdf",
+      "should_flag": [],
+      "template": "invoice",
+      "truth": {
+        "currency": "USD",
+        "due_date": "30 September 2026",
+        "invoice_date": "16 August 2026",
+        "invoice_number": "INV-2026-0002",
+        "subtotal": "$6,949.66",
+        "tax": "USD 1250.94",
+        "total": "$8,200.60",
+        "vendor": "Blue Ridge Parts"
+      },
+      "variant": "clean"
+    },
+    {
+      "document_type": "invoice",
+      "name": "invoice-0003-mangled-money",
+      "pdf": "invoice-0003-mangled-money.pdf",
+      "should_flag": [
+        "total"
+      ],
+      "template": "invoice",
+      "truth": {
+        "currency": "EUR",
+        "due_date": "24/07/2026",
+        "invoice_date": "2026-07-10",
+        "invoice_number": "INV-2026-0003",
+        "subtotal": "EUR 315.10",
+        "tax": "EUR 56.72",
+        "total": "EUR 371.82",
+        "vendor": "Northgate Textiles"
+      },
+      "variant": "mangled_money"
+    },
+    {
+      "document_type": "invoice",
+      "name": "invoice-0004-missing-required",
+      "pdf": "invoice-0004-missing-required.pdf",
+      "should_flag": [
+        "invoice_date"
+      ],
+      "template": "invoice",
+      "truth": {
+        "currency": "USD",
+        "due_date": "2026-06-07",
+        "invoice_date": "23-Apr-26",
+        "invoice_number": "INV-2026-0004",
+        "po_number": "PO-2026-0807",
+        "subtotal": "$2,832.84",
+        "tax": "226.63 USD",
+        "total": "USD 3059.47",
+        "vendor": "Blue Ridge Parts"
+      },
+      "variant": "missing_required"
+    },
+    {
+      "document_type": "purchase_order",
+      "name": "purchase-order-0005-clean",
+      "pdf": "purchase-order-0005-clean.pdf",
+      "should_flag": [],
+      "template": "logistics",
+      "truth": {
+        "buyer": "Tailspin Retail",
+        "currency": "GBP",
+        "delivery_date": "Jun 13, 2026",
+        "line_count": "2",
+        "order_date": "23-May-26",
+        "po_number": "PO-2026-0005",
+        "subtotal": "9,060.43 GBP",
+        "supplier": "Harbor Supply Co",
+        "tax": "1812.09",
+        "total": "GBP 10872.52"
+      },
+      "variant": "clean"
+    },
+    {
+      "document_type": "purchase_order",
+      "name": "purchase-order-0006-clean",
+      "pdf": "purchase-order-0006-clean.pdf",
+      "should_flag": [],
+      "template": "logistics",
+      "truth": {
+        "buyer": "Tailspin Retail",
+        "currency": "USD",
+        "delivery_date": "2026-01-26",
+        "line_count": "18",
+        "order_date": "16 January 2026",
+        "po_number": "PO-2026-0006",
+        "supplier": "Sunrise Packaging",
+        "total": "9430.72"
+      },
+      "variant": "clean"
+    },
+    {
+      "document_type": "purchase_order",
+      "name": "purchase-order-0007-totals-mismatch",
+      "pdf": "purchase-order-0007-totals-mismatch.pdf",
+      "should_flag": [
+        "total"
+      ],
+      "template": "logistics",
+      "truth": {
+        "buyer": "Fabrikam Depot",
+        "currency": "INR",
+        "delivery_date": "2026-08-26",
+        "line_count": "24",
+        "order_date": "16/08/2026",
+        "po_number": "PO-2026-0007",
+        "subtotal": "INR 1900.82",
+        "supplier": "Cedar Freight Lines",
+        "tax": "0.00",
+        "total": "INR 1900.82"
+      },
+      "variant": "totals_mismatch"
+    },
+    {
+      "document_type": "purchase_order",
+      "name": "purchase-order-0008-invalid-date",
+      "pdf": "purchase-order-0008-invalid-date.pdf",
+      "should_flag": [
+        "order_date"
+      ],
+      "template": "logistics",
+      "truth": {
+        "buyer": "Fabrikam Depot",
+        "currency": "GBP",
+        "line_count": "31",
+        "order_date": "11/10/2026",
+        "po_number": "PO-2026-0008",
+        "subtotal": "GBP 3692.41",
+        "supplier": "Granite Tooling",
+        "tax": "0.00 GBP",
+        "total": "3692.41"
+      },
+      "variant": "invalid_date"
+    },
+    {
+      "document_type": "delivery_note",
+      "name": "delivery-note-0009-clean",
+      "pdf": "delivery-note-0009-clean.pdf",
+      "should_flag": [],
+      "template": "logistics",
+      "truth": {
+        "delivery_date": "May 11, 2026",
+        "delivery_note_number": "DN-2026-0009",
+        "po_number": "PO-2026-0055",
+        "supplier": "Granite Tooling"
+      },
+      "variant": "clean"
+    },
+    {
+      "document_type": "delivery_note",
+      "name": "delivery-note-0010-clean",
+      "pdf": "delivery-note-0010-clean.pdf",
+      "should_flag": [],
+      "template": "logistics",
+      "truth": {
+        "delivery_date": "09 June 2026",
+        "delivery_note_number": "DN-2026-0010",
+        "packages": "7",
+        "po_number": "PO-2026-0511",
+        "received_by": "J. Okafor",
+        "supplier": "Maple Office Products"
+      },
+      "variant": "clean"
+    },
+    {
+      "document_type": "delivery_note",
+      "name": "delivery-note-0011-missing-required",
+      "pdf": "delivery-note-0011-missing-required.pdf",
+      "should_flag": [
+        "supplier"
+      ],
+      "template": "logistics",
+      "truth": {
+        "delivery_date": "21/03/2026",
+        "delivery_note_number": "DN-2026-0011",
+        "packages": "39",
+        "po_number": "PO-2026-0980",
+        "received_by": "A. Rivera",
+        "supplier": "Sunrise Packaging"
+      },
+      "variant": "missing_required"
+    },
+    {
+      "document_type": "delivery_note",
+      "name": "delivery-note-0012-invalid-date",
+      "pdf": "delivery-note-0012-invalid-date.pdf",
+      "should_flag": [
+        "delivery_date"
+      ],
+      "template": "logistics",
+      "truth": {
+        "delivery_date": "27/02/2026",
+        "delivery_note_number": "DN-2026-0012",
+        "packages": "30",
+        "po_number": "PO-2026-0823",
+        "supplier": "Cedar Freight Lines"
+      },
+      "variant": "invalid_date"
+    }
+  ],
+  "count": 12,
+  "generator": "scripts/generate_synthetic.py",
+  "seed": 12
+}

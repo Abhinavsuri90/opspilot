@@ -64,6 +64,14 @@ def clear_route_overrides() -> Any:
             "/v1/documents",
             {"files": {"file": ("invoice.pdf", b"%PDF-test", "application/pdf")}},
         ),
+        ("GET", "/v1/settings/api-keys", {}),
+        ("POST", "/v1/settings/api-keys", {"json": {"name": "ci"}}),
+        ("POST", f"/v1/settings/api-keys/{uuid.uuid4()}/revoke", {}),
+        ("GET", "/v1/settings/email-inbox", {}),
+        ("POST", "/v1/settings/email-inbox", {"json": {"version": 0, "backend": "mailpit"}}),
+        ("POST", "/v1/settings/email-inbox/test", {}),
+        ("GET", "/v1/metrics/overview", {}),
+        ("GET", "/v1/actions/summary", {}),
     ],
 )
 def test_protected_routes_require_a_session(method: str, path: str, kwargs: dict[str, Any]) -> None:
@@ -114,6 +122,12 @@ def test_read_only_member_cannot_manage_documents_or_members(
             {"files": {"file": ("invoice.pdf", b"%PDF-test", "application/pdf")}},
         ),
         ("POST", f"/v1/documents/{uuid.uuid4()}/retry", {}),
+        ("GET", "/v1/settings/api-keys", {}),
+        ("POST", "/v1/settings/api-keys", {"json": {"name": "ci"}}),
+        ("POST", f"/v1/settings/api-keys/{uuid.uuid4()}/revoke", {}),
+        ("GET", "/v1/settings/email-inbox", {}),
+        ("POST", "/v1/settings/email-inbox", {"json": {"version": 0, "backend": "mailpit"}}),
+        ("POST", "/v1/settings/email-inbox/test", {}),
     ]
     with TestClient(app) as client:
         assert client.get("/v1/documents").json() == []
@@ -164,7 +178,7 @@ def test_upload_returns_actionable_failure_status(
     )
     app.dependency_overrides[get_store] = lambda: object()
 
-    def fail_upload(*args: Any) -> None:
+    def fail_upload(*args: Any, **kwargs: Any) -> None:
         raise failure
 
     monkeypatch.setattr(document_service, "upload", fail_upload)

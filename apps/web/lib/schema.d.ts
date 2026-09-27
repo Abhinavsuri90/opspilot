@@ -323,6 +323,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/actions/summary": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Actions Summary
+         * @description Counts by status over the caller's visible documents; declared before /{action_id}.
+         */
+        get: operations["actions_summary_v1_actions_summary_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/actions/{action_id}": {
         parameters: {
             query?: never;
@@ -490,6 +510,93 @@ export interface paths {
         put?: never;
         /** Update Workflow */
         post: operations["update_workflow_v1_settings_workflow_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/settings/api-keys": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Api Keys */
+        get: operations["list_api_keys_v1_settings_api_keys_get"];
+        put?: never;
+        /** Create Api Key */
+        post: operations["create_api_key_v1_settings_api_keys_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/settings/api-keys/{key_id}/revoke": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revoke Api Key */
+        post: operations["revoke_api_key_v1_settings_api_keys__key_id__revoke_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/settings/email-inbox": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Read Email Inbox */
+        get: operations["read_email_inbox_v1_settings_email_inbox_get"];
+        put?: never;
+        /** Save Email Inbox */
+        post: operations["save_email_inbox_v1_settings_email_inbox_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/settings/email-inbox/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Test Email Inbox */
+        post: operations["test_email_inbox_v1_settings_email_inbox_test_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/metrics/overview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Metrics Overview */
+        get: operations["metrics_overview_v1_metrics_overview_get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -782,6 +889,76 @@ export interface components {
             /** Version */
             version: number;
         };
+        /** ActionsSummary */
+        ActionsSummary: {
+            /** Counts */
+            counts: {
+                [key: string]: number;
+            };
+            /** Pending Approvals */
+            pending_approvals: number;
+            /** Dead Letters */
+            dead_letters: number;
+            /** Failed */
+            failed: number;
+        };
+        /** ApiKeyCreate */
+        ApiKeyCreate: {
+            /** Name */
+            name: string;
+        };
+        /** ApiKeyCreatedResponse */
+        ApiKeyCreatedResponse: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Key Prefix */
+            key_prefix: string;
+            /** Scopes */
+            scopes: string;
+            /** Created By Email */
+            created_by_email: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Last Used At */
+            last_used_at: string | null;
+            /** Revoked At */
+            revoked_at: string | null;
+            /** Key */
+            key: string;
+        };
+        /** ApiKeyResponse */
+        ApiKeyResponse: {
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /** Name */
+            name: string;
+            /** Key Prefix */
+            key_prefix: string;
+            /** Scopes */
+            scopes: string;
+            /** Created By Email */
+            created_by_email: string | null;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /** Last Used At */
+            last_used_at: string | null;
+            /** Revoked At */
+            revoked_at: string | null;
+        };
         /** AttemptResponse */
         AttemptResponse: {
             /** Attempt */
@@ -1067,6 +1244,10 @@ export interface components {
             status: string;
             /** Document Type */
             document_type: string;
+            /** Source */
+            source: string;
+            /** Source Ref */
+            source_ref: string | null;
             /** Size Bytes */
             size_bytes: number;
             /** Workflow Config Version */
@@ -1089,6 +1270,10 @@ export interface components {
             /** Rule Results */
             rule_results: components["schemas"]["RuleResultResponse"][];
             review_task: components["schemas"]["ReviewTaskResponse"] | null;
+            /** Context Text */
+            context_text: string | null;
+            /** Near Duplicates */
+            near_duplicates: components["schemas"]["NearDuplicateRef"][];
         };
         /** DocumentSummary */
         DocumentSummary: {
@@ -1103,6 +1288,10 @@ export interface components {
             status: string;
             /** Document Type */
             document_type: string;
+            /** Source */
+            source: string;
+            /** Source Ref */
+            source_ref: string | null;
             /** Size Bytes */
             size_bytes: number;
             /** Workflow Config Version */
@@ -1116,6 +1305,76 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+        };
+        /** EmailInboxResponse */
+        EmailInboxResponse: {
+            /** Backend */
+            backend: string;
+            /** Address */
+            address: string;
+            /** Config */
+            config: {
+                [key: string]: unknown;
+            };
+            /** Has Credentials */
+            has_credentials: boolean;
+            /** Active */
+            active: boolean;
+            /** Version */
+            version: number;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Updated At
+             * Format: date-time
+             */
+            updated_at: string;
+            /** Last Polled At */
+            last_polled_at: string | null;
+            /** Next Poll At */
+            next_poll_at: string | null;
+            /** Last Error */
+            last_error: string | null;
+            /** Last Test At */
+            last_test_at: string | null;
+            /** Last Test Ok */
+            last_test_ok: boolean | null;
+            /** Last Test Message */
+            last_test_message: string | null;
+            /** Messages Processed */
+            messages_processed: number;
+            /** Documents Created */
+            documents_created: number;
+            /** Poll Interval Seconds */
+            poll_interval_seconds: number;
+        };
+        /** EmailInboxUpdate */
+        EmailInboxUpdate: {
+            /** Version */
+            version: number;
+            /**
+             * Backend
+             * @enum {string}
+             */
+            backend: "imap" | "mailpit";
+            /** Address */
+            address?: string | null;
+            /** Config */
+            config?: {
+                [key: string]: unknown;
+            };
+            /** Credentials */
+            credentials?: {
+                [key: string]: unknown;
+            } | null;
+            /**
+             * Active
+             * @default true
+             */
+            active: boolean;
         };
         /** ExportMonth */
         ExportMonth: {
@@ -1196,6 +1455,18 @@ export interface components {
         HTTPValidationError: {
             /** Detail */
             detail?: components["schemas"]["ValidationError"][];
+        };
+        /** InboxTestResponse */
+        InboxTestResponse: {
+            /** Ok */
+            ok: boolean;
+            /** Message */
+            message: string;
+            /**
+             * Tested At
+             * Format: date-time
+             */
+            tested_at: string;
         };
         /** JoinOrganizationRequest */
         JoinOrganizationRequest: {
@@ -1298,6 +1569,64 @@ export interface components {
             verified_amount?: number | string | null;
             /** Currency */
             currency?: string | null;
+        };
+        /** MetricsOverview */
+        MetricsOverview: {
+            range: components["schemas"]["MetricsRange"];
+            /** Documents Processed */
+            documents_processed: number;
+            /** Auto Approve Rate */
+            auto_approve_rate: number | null;
+            /** Field Accuracy */
+            field_accuracy: number | null;
+            /** Median Time To Complete Minutes */
+            median_time_to_complete_minutes: number | null;
+            /** Review Queue Depth */
+            review_queue_depth: number;
+            /** Cost Per Document */
+            cost_per_document: number | null;
+            /** Hours Saved */
+            hours_saved: number;
+            /** Baseline Minutes */
+            baseline_minutes: number;
+            /** Series */
+            series: components["schemas"]["SeriesPoint"][];
+        };
+        /** MetricsRange */
+        MetricsRange: {
+            /** Days */
+            days: number;
+            /**
+             * Start
+             * Format: date
+             */
+            start: string;
+            /**
+             * End
+             * Format: date
+             */
+            end: string;
+            /** Document Type */
+            document_type: string | null;
+        };
+        /** NearDuplicateRef */
+        NearDuplicateRef: {
+            /**
+             * Document Id
+             * Format: uuid
+             */
+            document_id: string;
+            /** Filename */
+            filename: string;
+            /** Document Type */
+            document_type: string;
+            /** Status */
+            status: string;
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
         };
         /** OrganizationResponse */
         OrganizationResponse: {
@@ -1427,6 +1756,12 @@ export interface components {
              * @default USD
              */
             default_currency: string;
+            /**
+             * Template
+             * @default invoice
+             * @enum {string}
+             */
+            template: "invoice" | "logistics";
         };
         /** ReviewRequest */
         ReviewRequest: {
@@ -1499,6 +1834,28 @@ export interface components {
             /** Message */
             message: string;
         };
+        /** SeriesPoint */
+        SeriesPoint: {
+            /**
+             * Day
+             * Format: date
+             */
+            day: string;
+            /** Documents */
+            documents: number;
+            /** Auto Approved */
+            auto_approved: number;
+            /** Needs Review */
+            needs_review: number;
+            /** Corrected Fields */
+            corrected_fields: number;
+            /** Total Fields */
+            total_fields: number;
+            /** Completed */
+            completed: number;
+            /** Review Minutes */
+            review_minutes: number;
+        };
         /** SessionResponse */
         SessionResponse: {
             /**
@@ -1570,6 +1927,10 @@ export interface components {
             status: string;
             /** Document Type */
             document_type: string;
+            /** Source */
+            source: string;
+            /** Source Ref */
+            source_ref: string | null;
             /** Size Bytes */
             size_bytes: number;
             /** Workflow Config Version */
@@ -1785,7 +2146,9 @@ export interface operations {
     organization_members_v1_organization_members_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -1816,7 +2179,9 @@ export interface operations {
     decide_membership_v1_organization_members__user_id__decision_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 user_id: string;
             };
@@ -1853,7 +2218,9 @@ export interface operations {
     categories_v1_categories_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -1884,7 +2251,9 @@ export interface operations {
     create_category_v1_categories_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -1919,7 +2288,9 @@ export interface operations {
     update_category_v1_categories__category_id__post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 category_id: string;
             };
@@ -1956,7 +2327,9 @@ export interface operations {
     collaborators_v1_organization_collaborators_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -1987,7 +2360,9 @@ export interface operations {
     document_workspace_v1_documents__document_id__workspace_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 document_id: string;
             };
@@ -2020,7 +2395,9 @@ export interface operations {
     update_metadata_v1_documents__document_id__metadata_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 document_id: string;
             };
@@ -2057,7 +2434,9 @@ export interface operations {
     add_comment_v1_documents__document_id__comments_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 document_id: string;
             };
@@ -2094,7 +2473,9 @@ export interface operations {
     review_invoice_v1_documents__document_id__review_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 document_id: string;
             };
@@ -2131,7 +2512,9 @@ export interface operations {
     correct_field_v1_documents__document_id__fields__field_id__post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 document_id: string;
                 field_id: string;
@@ -2176,7 +2559,9 @@ export interface operations {
                 offset?: number;
                 limit?: number;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2207,7 +2592,9 @@ export interface operations {
     document_timeline_v1_documents__document_id__timeline_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 document_id: string;
             };
@@ -2240,7 +2627,9 @@ export interface operations {
     update_sharing_v1_documents__document_id__sharing_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 document_id: string;
             };
@@ -2277,7 +2666,9 @@ export interface operations {
     workspace_summary_v1_workspace_summary_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2308,7 +2699,9 @@ export interface operations {
     workspace_question_v1_workspace_questions_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2348,7 +2741,9 @@ export interface operations {
                 offset?: number;
                 limit?: number;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2376,10 +2771,45 @@ export interface operations {
             };
         };
     };
+    actions_summary_v1_actions_summary_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActionsSummary"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     action_detail_v1_actions__action_id__get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 action_id: string;
             };
@@ -2412,7 +2842,9 @@ export interface operations {
     decide_action_v1_actions__action_id__decision_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 action_id: string;
             };
@@ -2449,7 +2881,9 @@ export interface operations {
     retry_action_v1_actions__action_id__retry_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 action_id: string;
             };
@@ -2488,7 +2922,9 @@ export interface operations {
             query: {
                 connector_id: string;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2519,7 +2955,9 @@ export interface operations {
     download_export_v1_exports__connector_id___month__csv_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 connector_id: string;
                 month: string;
@@ -2551,7 +2989,9 @@ export interface operations {
     read_policies_v1_settings_policies_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2582,7 +3022,9 @@ export interface operations {
     update_policies_v1_settings_policies_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2617,7 +3059,9 @@ export interface operations {
     list_connectors_v1_settings_connectors_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2648,7 +3092,9 @@ export interface operations {
     create_connector_v1_settings_connectors_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2683,7 +3129,9 @@ export interface operations {
     update_connector_v1_settings_connectors__connector_id__post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 connector_id: string;
             };
@@ -2720,7 +3168,9 @@ export interface operations {
     test_connector_v1_settings_connectors__connector_id__test_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 connector_id: string;
             };
@@ -2753,7 +3203,9 @@ export interface operations {
     read_workflow_v1_settings_workflow_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2784,7 +3236,9 @@ export interface operations {
     update_workflow_v1_settings_workflow_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2803,6 +3257,250 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkflowResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_api_keys_v1_settings_api_keys_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiKeyResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_api_key_v1_settings_api_keys_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ApiKeyCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiKeyCreatedResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revoke_api_key_v1_settings_api_keys__key_id__revoke_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path: {
+                key_id: string;
+            };
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiKeyResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    read_email_inbox_v1_settings_email_inbox_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailInboxResponse"] | null;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    save_email_inbox_v1_settings_email_inbox_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EmailInboxUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EmailInboxResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    test_email_inbox_v1_settings_email_inbox_test_post: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InboxTestResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    metrics_overview_v1_metrics_overview_get: {
+        parameters: {
+            query?: {
+                days?: number;
+                document_type?: string | null;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MetricsOverview"];
                 };
             };
             /** @description Validation Error */
@@ -2914,7 +3612,9 @@ export interface operations {
     me_v1_auth_me_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2950,8 +3650,12 @@ export interface operations {
                 category_id?: string | null;
                 q?: string | null;
                 status?: string | null;
+                document_type?: string | null;
+                source?: string | null;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -2982,7 +3686,9 @@ export interface operations {
     upload_document_v1_documents_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path?: never;
             cookie?: {
                 opspilot_session?: string | null;
@@ -3017,7 +3723,9 @@ export interface operations {
     document_detail_v1_documents__document_id__get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 document_id: string;
             };
@@ -3050,7 +3758,9 @@ export interface operations {
     retry_document_v1_documents__document_id__retry_post: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 document_id: string;
             };
@@ -3085,7 +3795,9 @@ export interface operations {
             query?: {
                 download?: boolean;
             };
-            header?: never;
+            header?: {
+                authorization?: string | null;
+            };
             path: {
                 document_id: string;
             };

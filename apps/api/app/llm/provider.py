@@ -70,15 +70,49 @@ def pdf_pages(data: bytes) -> list[str]:
     return pages
 
 
+# Extra weight for a keyword on the first line of text, which is usually the title.
+HEADING_BONUS = 2
+
+
+def heading_of(pages: list[str]) -> str:
+    for page in pages:
+        for line in page.splitlines():
+            if line.strip():
+                return line.casefold()
+    return ""
+
+
+def detection_score(pages: list[str], type_spec: DocumentTypeSpec) -> int:
+    """Occurrences of the type's detect keywords, with a bonus when one is in the heading.
+
+    Counting occurrences (rather than the first hit) keeps a delivery note that mentions a
+    "PO Number" from being read as a purchase order; the heading bonus breaks ties in favour
+    of the document title.
+    """
+    text = "\n".join(pages).casefold()
+    heading = heading_of(pages)
+    score = 0
+    for keyword in type_spec.detect:
+        needle = keyword.casefold().strip()
+        if not needle:
+            continue
+        score += text.count(needle)
+        if needle in heading:
+            score += HEADING_BONUS
+    return score
+
+
 def detect_document_type(pages: list[str], config: WorkflowConfigModel) -> DocumentTypeSpec:
-    """Pick the first type whose detect keywords appear in the text, else the first type."""
+    """Pick the type whose detect keywords match best; ties and no match go to the first type."""
     if len(config.document_types) == 1:
         return config.document_types[0]
-    text = "\n".join(pages).casefold()
+    best = config.document_types[0]
+    best_score = 0
     for type_spec in config.document_types:
-        if any(keyword.casefold() in text for keyword in type_spec.detect if keyword.strip()):
-            return type_spec
-    return config.document_types[0]
+        score = detection_score(pages, type_spec)
+        if score > best_score:
+            best, best_score = type_spec, score
+    return best
 
 
 def _elapsed_ms(started: float) -> int:

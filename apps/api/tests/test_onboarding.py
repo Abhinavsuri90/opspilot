@@ -1,5 +1,6 @@
 """Organization signup, approval, account ownership and immediate revocation."""
 
+import json
 import os
 import uuid
 from collections.abc import Iterator
@@ -12,7 +13,7 @@ from sqlalchemy import create_engine, delete, select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 
-from app.auth import current_session
+from app.auth import cookie_identity
 from app.db import SessionLocal, normalize_database_url, set_org_context
 from app.login_throttle import identity_hash
 from app.main import app
@@ -362,7 +363,7 @@ def test_suspension_waits_for_inflight_authorized_transaction(client: TestClient
     assert client.post(route, json={"decision": "approved", "role": "member"}).status_code == 200
     token = make_session_token(uuid.UUID(pending["user_id"]), uuid.UUID(identity["org_id"]))
     with ThreadPoolExecutor(max_workers=1) as executor, SessionLocal() as session:
-        assert current_session(session, token)[3].status == "active"
+        assert cookie_identity(session, token)[3].status == "active"
         future = executor.submit(client.post, route, json={"decision": "suspended"})
         try:
             with pytest.raises(TimeoutError):
@@ -373,3 +374,39 @@ def test_suspension_waits_for_inflight_authorized_transaction(client: TestClient
     with TestClient(app) as applicant_client:
         applicant_client.cookies.set("opspilot_session", token)
         assert applicant_client.get("/v1/auth/me").status_code == 403
+
+
+@postgres
+def test_registration_template_chooses_the_starting_workflow(client: TestClient) -> None:
+    _, identity = signup(client, template="logistics")
+    workflow = client.get("/v1/settings/workflow")
+    assert workflow.status_code == 200, workflow.text
+    assert [item["name"] for item in workflow.json()["config"]["document_types"]] == [
+        "purchase_order",
+        "delivery_note",
+    ]
+    with SessionLocal() as session:
+        set_org_context(session, uuid.UUID(identity["org_id"]))
+        created = session.scalar(
+            select(AuditEvent).where(
+                AuditEvent.org_id == uuid.UUID(identity["org_id"]),
+                AuditEvent.event_type == "organization.created",
+            )
+        )
+        assert created is not None
+        assert json.loads(created.detail_json)["template"] == "logistics"
+    _, plain = signup(client)
+    default = client.get("/v1/settings/workflow").json()
+    assert [item["name"] for item in default["config"]["document_types"]] == ["invoice"]
+    assert plain["org_id"] != identity["org_id"]
+    invalid = client.post(
+        "/v1/auth/register-organization",
+        json={
+            "org_name": "Acme",
+            "org_slug": f"acme-{uuid.uuid4().hex[:8]}",
+            "email": f"owner-{uuid.uuid4().hex}@example.com",
+            "password": PASSWORD,
+            "template": "receipts",
+        },
+    )
+    assert invalid.status_code == 422

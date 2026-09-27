@@ -2,6 +2,7 @@ import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
+from typing import Literal
 
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
@@ -24,6 +25,10 @@ from app.timeouts import OperationTimeout, run_with_timeout
 from app.workflow_models import InvoiceMetadata
 
 MAX_MANUAL_RETRIES = 2
+# Email body text kept with a document as reviewer context; longer bodies are cut.
+MAX_CONTEXT_CHARS = 20_000
+MAX_SOURCE_REF_CHARS = 300
+DocumentSource = Literal["upload", "email", "api"]
 
 
 class DocumentAccessDenied(Exception):
@@ -55,6 +60,8 @@ class DocumentSummary(BaseModel):
     filename: str
     status: str
     document_type: str
+    source: str
+    source_ref: str | None
     size_bytes: int
     workflow_config_version: int
     failure_reason: str | None
@@ -72,6 +79,8 @@ def summary(document: Document, flagged_count: int = 0) -> DocumentSummary:
         filename=document.filename,
         status=document.status,
         document_type=document.document_type,
+        source=document.source,
+        source_ref=document.source_ref,
         size_bytes=document.size_bytes,
         workflow_config_version=document.workflow_config_version,
         failure_reason=document.failure_reason,
@@ -113,7 +122,20 @@ def upload(
     filename: str,
     data: bytes,
     role: str = "member",
+    *,
+    source: DocumentSource = "upload",
+    source_ref: str | None = None,
+    context_text: str | None = None,
+    audit_actor: uuid.UUID | None | Literal["uploader"] = "uploader",
+    audit_detail: dict[str, object] | None = None,
 ) -> UploadResponse:
+    """Store a PDF and queue extraction.
+
+    ``user_id`` is the document owner (``uploaded_by``). Intake channels pass their own
+    ``source``: the API key path audits with the key's creator plus the key id, email intake
+    audits as the system (``audit_actor=None``) with the message uid.
+    """
+    actor_user_id = user_id if audit_actor == "uploader" else audit_actor
     if not data or len(data) > MAX_UPLOAD_BYTES:
         raise InvalidDocument("PDF must be between 1 byte and 10 MB")
     if not data.startswith(b"%PDF-"):
@@ -169,6 +191,9 @@ def upload(
         storage_key=key,
         workflow_config_version=config.version,
         status="queued",
+        source=source,
+        source_ref=source_ref[:MAX_SOURCE_REF_CHARS] if source_ref else None,
+        context_text=context_text[:MAX_CONTEXT_CHARS] if context_text else None,
     )
     session.add(document)
     session.add(
@@ -182,13 +207,15 @@ def upload(
         )
     )
     received_at = datetime.now(UTC)
+    detail: dict[str, object] = {"source": source, **(audit_detail or {})}
     for order, event_type in enumerate(("document.received", "document.queued")):
         session.add(
             document_audit(
                 org_id,
                 document.id,
-                user_id,
+                actor_user_id,
                 event_type,
+                detail,
                 created_at=received_at + timedelta(microseconds=order),
             )
         )
@@ -217,12 +244,18 @@ def browse(
     status: str | None = None,
     category_id: uuid.UUID | None = None,
     q: str | None = None,
+    document_type: str | None = None,
+    source: str | None = None,
 ) -> list[DocumentSummary]:
     query = select(Document).where(accessible_document_clause(org_id, user_id, role))
     if status == "in_progress":
         query = query.where(Document.status.in_(("queued", "extracting", "validating")))
     elif status:
         query = query.where(Document.status == status)
+    if document_type:
+        query = query.where(Document.document_type == document_type)
+    if source:
+        query = query.where(Document.source == source)
     if category_id:
         query = query.where(
             Document.id.in_(

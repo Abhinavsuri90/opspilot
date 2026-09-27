@@ -15,6 +15,7 @@ from app.action_models import (
     OrgActionPolicy,
     OrgSettings,
 )
+from app.intake_models import ApiKey, DocumentLink, EmailInbox, EmailMessage
 from app.models import (
     AuditEvent,
     Document,
@@ -480,3 +481,104 @@ def list_export_keys(session: Session, org_id: uuid.UUID, connector_id: uuid.UUI
         if isinstance(key, str):
             keys.append(key)
     return keys
+
+
+# Intake channels: document links, API keys, email inboxes and processed messages.
+
+
+def list_document_links(
+    session: Session, org_id: uuid.UUID, document_id: uuid.UUID
+) -> list[DocumentLink]:
+    return list(
+        session.scalars(
+            select(DocumentLink)
+            .where(DocumentLink.org_id == org_id, DocumentLink.document_id == document_id)
+            .order_by(DocumentLink.created_at, DocumentLink.id)
+        )
+    )
+
+
+def list_near_duplicate_documents(
+    session: Session,
+    org_id: uuid.UUID,
+    document_id: uuid.UUID,
+    viewer: tuple[uuid.UUID, str] | None = None,
+) -> list[Document]:
+    """Documents linked to this one as near duplicates, limited to what the viewer may see."""
+    query = (
+        select(Document)
+        .join(
+            DocumentLink,
+            and_(
+                DocumentLink.org_id == org_id,
+                DocumentLink.related_document_id == Document.id,
+                DocumentLink.kind == "near_duplicate",
+            ),
+        )
+        .where(Document.org_id == org_id, DocumentLink.document_id == document_id)
+    )
+    if viewer is not None:
+        user_id, role = viewer
+        query = query.where(accessible_document_clause(org_id, user_id, role))
+    return list(session.scalars(query.order_by(Document.created_at, Document.id)))
+
+
+def get_api_key_by_prefix(session: Session, key_prefix: str) -> ApiKey | None:
+    """Prefix lookup; on Postgres the caller sets the prefix context first (see app.db)."""
+    return session.scalar(select(ApiKey).where(ApiKey.key_prefix == key_prefix))
+
+
+def get_api_key(
+    session: Session, org_id: uuid.UUID, key_id: uuid.UUID, *, lock: bool = False
+) -> ApiKey | None:
+    query = select(ApiKey).where(ApiKey.org_id == org_id, ApiKey.id == key_id)
+    if lock:
+        query = query.with_for_update()
+    return session.scalar(query)
+
+
+def list_api_keys(session: Session, org_id: uuid.UUID) -> list[tuple[ApiKey, str | None]]:
+    rows = session.execute(
+        select(ApiKey, User.email)
+        .outerjoin(User, User.id == ApiKey.created_by)
+        .where(ApiKey.org_id == org_id)
+        .order_by(ApiKey.created_at.desc(), ApiKey.id.desc())
+    )
+    return [(key, email) for key, email in rows]
+
+
+def get_email_inbox(
+    session: Session, org_id: uuid.UUID, *, lock: bool = False
+) -> EmailInbox | None:
+    query = select(EmailInbox).where(EmailInbox.org_id == org_id)
+    if lock:
+        query = query.with_for_update(skip_locked=True).execution_options(populate_existing=True)
+    return session.scalar(query)
+
+
+def get_email_message(session: Session, org_id: uuid.UUID, uid: str) -> EmailMessage | None:
+    return session.scalar(
+        select(EmailMessage).where(EmailMessage.org_id == org_id, EmailMessage.uid == uid)
+    )
+
+
+def email_message_totals(session: Session, org_id: uuid.UUID) -> tuple[int, int]:
+    """(messages processed, documents created) for the organization's inbox."""
+    row = session.execute(
+        select(
+            func.count(EmailMessage.id), func.coalesce(func.sum(EmailMessage.document_count), 0)
+        ).where(EmailMessage.org_id == org_id)
+    ).one()
+    return int(row[0]), int(row[1])
+
+
+def count_actions_by_status(
+    session: Session, org_id: uuid.UUID, user_id: uuid.UUID, role: str
+) -> dict[str, int]:
+    rows = session.execute(
+        select(Action.status, func.count(Action.id))
+        .join(Document, and_(Document.org_id == org_id, Document.id == Action.document_id))
+        .where(Action.org_id == org_id, accessible_document_clause(org_id, user_id, role))
+        .group_by(Action.status)
+    )
+    return {str(status): int(count) for status, count in rows}

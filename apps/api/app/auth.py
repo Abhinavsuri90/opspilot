@@ -3,11 +3,12 @@
 import uuid
 from typing import Annotated
 
-from fastapi import Cookie, Depends, HTTPException, Response
+from fastapi import Cookie, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import api_keys
 from app.config import get_settings
 from app.db import get_session, set_org_context
 from app.models import Membership, Organization, User
@@ -15,6 +16,9 @@ from app.repositories import get_organization_by_id, get_user_by_id
 from app.security import make_session_token, read_session_token
 
 Identity = tuple[Session, User, Organization, Membership]
+# The only routes an API key may call: programmatic intake and status polling. Every other
+# route needs a browser session even when a Bearer header is present.
+API_KEY_ROUTES = frozenset({("POST", "/v1/documents"), ("GET", "/v1/documents/{document_id}")})
 
 
 class SessionResponse(BaseModel):
@@ -59,11 +63,44 @@ def membership_denial(membership: Membership) -> str:
     }.get(membership.status, "Your organization membership is not active.")
 
 
+def api_key_identity(request: Request, session: Session, authorization: str) -> Identity:
+    """Authenticate ``Authorization: Bearer opk_...`` on an intake route.
+
+    The acting user is the key's creator; the key itself is left on ``request.state`` so the
+    upload handler can record it in the audit trail and mark the document's source.
+    """
+    route = request.scope.get("route")
+    if (request.method, getattr(route, "path", None)) not in API_KEY_ROUTES:
+        raise HTTPException(status_code=401, detail="API keys can only submit and poll documents")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token.strip():
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    try:
+        key, user, org, membership = api_keys.authenticate(
+            session, token, charge_upload=request.method == "POST"
+        )
+    except api_keys.ApiKeyThrottled as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
+    except api_keys.ApiKeyRejected as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    request.state.api_key = key
+    return session, user, org, membership
+
+
 def current_session(
+    request: Request,
     session: Annotated[Session, Depends(get_session)],
     opspilot_session: Annotated[str | None, Cookie()] = None,
+    authorization: Annotated[str | None, Header()] = None,
 ) -> Identity:
-    claims = read_session_token(opspilot_session or "")
+    if authorization is not None:
+        return api_key_identity(request, session, authorization)
+    return cookie_identity(session, opspilot_session or "")
+
+
+def cookie_identity(session: Session, token: str) -> Identity:
+    """Resolve the browser session cookie; holds a KEY SHARE lock on the membership row."""
+    claims = read_session_token(token)
     if claims is None:
         raise HTTPException(status_code=401, detail="Not authenticated")
     user_id, org_id = claims

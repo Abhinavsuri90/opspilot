@@ -43,6 +43,7 @@ from app.repositories import (
     list_document_reviews,
     list_extraction_runs,
     list_field_corrections,
+    list_near_duplicate_documents,
 )
 from app.workflow_config import (
     DocumentTypeSpec,
@@ -100,12 +101,23 @@ class ReviewTaskResponse(BaseModel):
     overdue: bool
 
 
+class NearDuplicateRef(BaseModel):
+    document_id: uuid.UUID
+    filename: str
+    document_type: str
+    status: str
+    created_at: datetime
+
+
 class DocumentDetail(DocumentSummary):
     provider: str | None
     version: int
     fields: list[FieldDetail]
     rule_results: list[RuleResultResponse]
     review_task: ReviewTaskResponse | None
+    # Email body kept as reviewer context; null for uploads and API intake.
+    context_text: str | None
+    near_duplicates: list[NearDuplicateRef]
 
 
 class QueueItem(BaseModel):
@@ -221,7 +233,10 @@ def effective_rule_results(
     return evaluate_rules(values, type_spec)
 
 
-def document_detail(session: Session, document: Document) -> DocumentDetail:
+def document_detail(
+    session: Session, document: Document, viewer: tuple[uuid.UUID, str] | None = None
+) -> DocumentDetail:
+    """Full document view; ``viewer`` (user id, role) limits linked documents to visible ones."""
     org_id = document.org_id
     run = latest_extraction_run(session, org_id, document.id)
     type_spec = pinned_type(session, document)
@@ -268,6 +283,17 @@ def document_detail(session: Session, document: Document) -> DocumentDetail:
         review_task=_task_response(
             get_review_task(session, org_id, document.id), datetime.now(UTC)
         ),
+        context_text=document.context_text,
+        near_duplicates=[
+            NearDuplicateRef(
+                document_id=related.id,
+                filename=related.filename,
+                document_type=related.document_type,
+                status=related.status,
+                created_at=related.created_at,
+            )
+            for related in list_near_duplicate_documents(session, org_id, document.id, viewer)
+        ],
     )
 
 
@@ -298,7 +324,7 @@ def read_document(
     document = get_document_by_id(session, org_id, document_id)
     if document is None or not can_access_document(session, org_id, user_id, role, document):
         return None
-    return document_detail(session, document)
+    return document_detail(session, document, (user_id, role))
 
 
 def apply_correction(
@@ -413,7 +439,7 @@ def complete_review_task(
         task.version += 1
 
 
-def _effective_value_subquery(org_id: uuid.UUID, name: str) -> ScalarSelect[Any]:
+def effective_value_subquery(org_id: uuid.UUID, name: str) -> ScalarSelect[Any]:
     """Latest-run field value for the outer Document, overridden by its newest correction."""
     field = aliased(ExtractedField)
     correction = aliased(FieldCorrection)
@@ -455,9 +481,9 @@ def review_queue(
     limit: int = 50,
 ) -> list[QueueItem]:
     now = datetime.now(UTC)
-    vendor_value = _effective_value_subquery(org_id, "vendor")
-    total_value = _effective_value_subquery(org_id, "total")
-    currency_value = _effective_value_subquery(org_id, "currency")
+    vendor_value = effective_value_subquery(org_id, "vendor")
+    total_value = effective_value_subquery(org_id, "total")
+    currency_value = effective_value_subquery(org_id, "currency")
     query = (
         select(
             Document,
