@@ -172,7 +172,17 @@ jobs:
             done
           done
           docker save -o /tmp/base-images-compose.tar $images
-      - run: make demo
+      - name: Seed fictional demo and verify its API workflow
+        run: |
+          set +e
+          make demo > /tmp/opspilot-demo.log 2>&1
+          result=$?
+          tail -n 60 /tmp/opspilot-demo.log
+          if [ "$result" -ne 0 ]; then
+            detail="$(rg '^(RuntimeError|ModuleNotFoundError|KeyError|ValueError):' /tmp/opspilot-demo.log | tail -n 1)"
+            if [ -n "$detail" ]; then echo "::error::$detail"; fi
+            exit "$result"
+          fi
       - run: make eval
       - run: node --env-file=../../.env scripts/e2e-learning.mjs
         working-directory: apps/web

@@ -14,6 +14,8 @@ from typing import Any, cast
 
 import httpx
 
+from app.llm.provider import pdf_pages
+
 EXAMPLES = Path("/workspace/examples/demo")
 
 
@@ -123,7 +125,13 @@ def wait_for_review(admin: httpx.Client, document_id: str) -> dict[str, Any]:
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         document = checked(admin.get(f"/v1/documents/{document_id}"))
-        if document["status"] in {"needs_review", "approved", "rejected"}:
+        if document["status"] in {
+            "needs_review",
+            "approved",
+            "rejected",
+            "actions_pending",
+            "completed",
+        }:
             return cast(dict[str, Any], document)
         if document["status"] == "failed":
             raise RuntimeError(
@@ -131,6 +139,38 @@ def wait_for_review(admin: httpx.Client, document_id: str) -> dict[str, Any]:
             )
         time.sleep(2)
     raise RuntimeError(f"Demo document {document_id} did not reach review within 90 seconds")
+
+
+def resolve_flagged_fields(
+    reviewer: httpx.Client, document_id: str, pdf: bytes, example: Example
+) -> dict[str, Any]:
+    """Record a reviewer decision for each flagged field before approving."""
+    source: dict[str, str] = {}
+    for page in pdf_pages(pdf):
+        for line in page.splitlines():
+            label, separator, line_value = line.partition(":")
+            if separator and line_value.strip():
+                source[label.strip().lower().replace(" ", "_")] = line_value.strip()
+    detail = checked(reviewer.get(f"/v1/documents/{document_id}"))
+    for field in detail["fields"]:
+        if field["status"] != "needs_review":
+            continue
+        current = field["current_value"].strip()
+        if current or not field["required"]:
+            body = {"version": detail["version"], "action": "accept"}
+        else:
+            replacement = example.amount if field["name"] == "total" else source.get(field["name"])
+            if not replacement:
+                raise RuntimeError(
+                    f"Required field {field['name']} has no value in demo source {example.filename}"
+                )
+            body = {"version": detail["version"], "action": "edit", "value": replacement}
+        detail = checked(
+            reviewer.post(
+                f"/v1/documents/{document_id}/fields/{field['id']}", json=body
+            )
+        )
+    return cast(dict[str, Any], detail)
 
 
 def seed_org(
@@ -179,11 +219,12 @@ def seed_org(
                     )
                 )
             if example.approve and document["status"] == "needs_review":
+                detail = resolve_flagged_fields(reviewer, document_id, pdf, example)
                 checked(
                     reviewer.post(
                         f"/v1/documents/{document_id}/review",
                         json={
-                            "version": workspace["version"],
+                            "version": detail["version"],
                             "decision": "approve",
                             "comment": "Verified against the source PDF and team note.",
                         },
