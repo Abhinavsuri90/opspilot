@@ -1,6 +1,8 @@
 """Routes for intake channels and KPIs: API keys, the email inbox and the metrics overview."""
 
+import json
 import uuid
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,11 +13,13 @@ from app.api_keys import ApiKeyCreatedResponse, ApiKeyResponse
 from app.auth import Identity, current_session
 from app.connectors.base import ConnectorConfigError, CredentialsUnavailable
 from app.email_settings import EmailInboxResponse, InboxConflict, InboxTestResponse
-from app.metrics_service import MetricsOverview
+from app.metrics_service import AccuracyPoint, MetricsOverview
 from app.workflow_config import DOCUMENT_TYPE_PATTERN
 
 router = APIRouter(prefix="/v1", tags=["Intake"])
 SessionContext = Annotated[Identity, Depends(current_session)]
+REPORTS_DIR = Path("/workspace/evals/reports")
+MAX_EVAL_REPORT_BYTES = 512 * 1024
 
 
 class RequestModel(BaseModel):
@@ -33,6 +37,42 @@ class EmailInboxUpdate(RequestModel):
     config: dict[str, Any] = Field(default_factory=dict)
     credentials: dict[str, Any] | None = None
     active: bool = True
+
+
+class EvalReportResponse(BaseModel):
+    generated_at: str
+    provider: str
+    model: str
+    tier2_model: str | None
+    dataset: str
+    exact_match: float
+    grounded_fraction: float
+    flag_precision: float
+    flag_recall: float
+    type_detection: float
+    escalation_rate: float
+    cost: dict[str, Any]
+    learning: dict[str, Any]
+    limitations: str
+
+
+@router.get("/evals/latest", response_model=EvalReportResponse)
+def latest_eval_report(context: SessionContext) -> EvalReportResponse:
+    """Latest operator-run synthetic evaluation; available to organization admins only."""
+    _require_admin(context)
+    for path in sorted(REPORTS_DIR.glob("????????T??????Z-*.json"), reverse=True):
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > MAX_EVAL_REPORT_BYTES:
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                continue
+            return EvalReportResponse.model_validate(
+                {**data, "generated_at": path.name.split("-", 1)[0]}
+            )
+        except (OSError, ValueError):
+            continue
+    raise HTTPException(404, "No evaluation report is available. Run make eval first.")
 
 
 def _require_admin(identity: Identity) -> None:
@@ -134,9 +174,26 @@ def metrics_overview(
     """KPIs over the documents the caller may see.
 
     ``days`` counts back from today's UTC date and every ``series`` point is a UTC calendar
-    day; ``cost_per_document`` is null until LLM calls are metered.
+    day; ``cost_per_document`` (cents) is null until the range has a recorded model call.
     """
     session, user, org, membership = context
     return metrics_service.overview(
         session, org.id, user.id, membership.role, days=days, document_type=document_type
+    )
+
+
+@router.get("/metrics/accuracy", response_model=list[AccuracyPoint])
+def metrics_accuracy(
+    context: SessionContext,
+    weeks: Annotated[int, Query(ge=1, le=52)] = 12,
+    document_type: Annotated[str | None, Query(pattern=DOCUMENT_TYPE_PATTERN)] = None,
+) -> list[AccuracyPoint]:
+    """Field accuracy per ISO week (Monday start, UTC), oldest week first.
+
+    ``fields_assessed`` counts the fields of each document's latest extraction run and
+    ``fields_corrected`` those a reviewer edited; ``accuracy`` is null for an empty week.
+    """
+    session, user, org, membership = context
+    return metrics_service.accuracy_series(
+        session, org.id, user.id, membership.role, weeks=weeks, document_type=document_type
     )

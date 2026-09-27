@@ -1,10 +1,15 @@
-"""Extraction prompt v2: configuration-driven fields with self-reported confidence."""
+"""Extraction prompt v2: configuration-driven fields with self-reported confidence.
+
+Kept for reference and for runs recorded under ``extraction-v2``; the OpenRouter provider
+renders ``extraction_v3``, which adds retrieved examples to the same instructions.
+"""
 
 from app.prompts import load_prompt
 from app.workflow_config import DocumentTypeSpec
 
-PROMPT_VERSION = "extraction-v2"
-SYSTEM_PROMPT = load_prompt("extraction_v2")
+PROMPT = load_prompt("extraction_v2")
+PROMPT_VERSION = PROMPT.version
+SYSTEM_PROMPT = PROMPT.body
 
 
 def render_system_prompt(type_spec: DocumentTypeSpec) -> str:

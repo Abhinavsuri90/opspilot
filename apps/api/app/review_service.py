@@ -40,6 +40,7 @@ from app.repositories import (
     list_document_audit_events,
     list_document_comments,
     list_document_fields,
+    list_document_llm_calls,
     list_document_reviews,
     list_extraction_runs,
     list_field_corrections,
@@ -55,7 +56,7 @@ from app.workflow_config import (
 from app.workflow_models import FieldCorrection, InvoiceMetadata, ReviewTask
 
 FieldStatus = Literal["auto", "needs_review", "corrected", "approved"]
-TimelineKind = Literal["audit", "extraction", "correction", "review", "comment", "action"]
+TimelineKind = Literal["audit", "llm", "extraction", "correction", "review", "comment", "action"]
 AssignedFilter = Literal["me", "unassigned", "all"]
 
 
@@ -576,11 +577,12 @@ _TYPED_AUDIT_EVENTS = frozenset(
 )
 _KIND_ORDER = {
     "audit": 0,
-    "extraction": 1,
-    "correction": 2,
-    "review": 3,
-    "comment": 4,
-    "action": 5,
+    "llm": 1,
+    "extraction": 2,
+    "correction": 3,
+    "review": 4,
+    "comment": 5,
+    "action": 6,
 }
 
 
@@ -616,6 +618,31 @@ def timeline(session: Session, org_id: uuid.UUID, document_id: uuid.UUID) -> lis
             ),
             event.id,
         )
+    for call in list_document_llm_calls(session, org_id, document_id):
+        outcome = "succeeded" if call.ok else f"failed: {call.error or 'unknown error'}"
+        add(
+            TimelineEntry(
+                at=call.created_at,
+                kind="llm",
+                event_type="llm.call",
+                actor_email=None,
+                summary=f"Model call ({call.purpose}) with {call.provider} {call.model} {outcome}",
+                detail={
+                    "purpose": call.purpose,
+                    "provider": call.provider,
+                    "model": call.model,
+                    "prompt_version": call.prompt_version,
+                    "tokens_in": call.tokens_in,
+                    "tokens_out": call.tokens_out,
+                    "cost_cents": float(call.cost_cents) if call.cost_cents is not None else None,
+                    "latency_ms": call.latency_ms,
+                    "ok": call.ok,
+                    "error": call.error,
+                    "trace_id": call.trace_id,
+                },
+            ),
+            call.id,
+        )
     for run in list_extraction_runs(session, org_id, document_id):
         try:
             raw = json.loads(run.raw_json)
@@ -623,6 +650,7 @@ def timeline(session: Session, org_id: uuid.UUID, document_id: uuid.UUID) -> lis
             raw = {}
         payload = raw if isinstance(raw, dict) else {"fields": raw}
         field_rows = payload.get("fields")
+        escalation = payload.get("escalation")
         add(
             TimelineEntry(
                 at=run.created_at,
@@ -630,7 +658,8 @@ def timeline(session: Session, org_id: uuid.UUID, document_id: uuid.UUID) -> lis
                 event_type="extraction.completed",
                 actor_email=None,
                 summary=f"Extracted {len(field_rows) if isinstance(field_rows, list) else 0} "
-                f"field(s) with {run.provider}",
+                f"field(s) with {run.provider}"
+                + (f", escalated to {run.tier2_model}" if run.escalated else ""),
                 detail={
                     "provider": run.provider,
                     "model": run.model,
@@ -641,6 +670,13 @@ def timeline(session: Session, org_id: uuid.UUID, document_id: uuid.UUID) -> lis
                     "latency_ms": payload.get("latency_ms"),
                     "rule_results": payload.get("rule_results", []),
                     "notes": payload.get("notes", []),
+                    "tier1_model": run.tier1_model,
+                    "tier2_model": run.tier2_model,
+                    "escalated": run.escalated,
+                    "escalated_fields": (
+                        escalation.get("fields", []) if isinstance(escalation, dict) else []
+                    ),
+                    "cost_cents": float(run.cost_cents) if run.cost_cents is not None else None,
                 },
             ),
             run.id,

@@ -172,6 +172,14 @@ class ExtractionRun(Base):
     model: Mapped[str] = mapped_column(String(100), nullable=False)
     prompt_version: Mapped[str] = mapped_column(String(50), nullable=False)
     raw_json: Mapped[str] = mapped_column(Text, nullable=False)
+    # Router bookkeeping: the tier-1 model, the tier-2 model when fields were escalated, and
+    # the summed cost of every model call the run made (null when a model is unpriced).
+    tier1_model: Mapped[str | None] = mapped_column(String(100))
+    tier2_model: Mapped[str | None] = mapped_column(String(100))
+    escalated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    cost_cents: Mapped[Decimal | None] = mapped_column(Numeric(12, 4))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

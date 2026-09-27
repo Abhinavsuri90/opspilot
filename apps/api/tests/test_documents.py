@@ -4,6 +4,7 @@ import os
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -20,8 +21,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import SessionLocal, engine, set_org_context
 from app.llm.provider import (
+    ExtractionContext,
     ExtractionError,
     ExtractionResult,
+    FewShotExample,
     MockInvoiceProvider,
     OpenRouterInvoiceProvider,
 )
@@ -196,7 +199,7 @@ def test_openrouter_provider_uses_config_schema_and_drops_ungrounded_fields() ->
     ]
     assert result.notes == ["Dropped field 'vendor': evidence not found verbatim in the PDF"]
     assert result.tokens_in == 321 and result.tokens_out == 45
-    assert result.prompt_version == "extraction-v2"
+    assert result.prompt_version == "extraction-v3"
 
     def ungrounded(request: httpx.Request) -> httpx.Response:
         return openrouter_response(
@@ -380,10 +383,7 @@ def test_worker_rotates_tenants_even_when_one_has_a_backlog(
         )
 
     monkeypatch.setattr("app.worker.claim_next", claim_with_backlog)
-    monkeypatch.setattr(
-        "app.worker.complete",
-        lambda claim, result, evaluation, type_spec, provider, config: None,
-    )
+    monkeypatch.setattr("app.worker.complete", lambda claim, assessment, config: None)
     assert process_one(store)
     assert process_one(store)
     assert claimed_orgs == org_ids[:2]
@@ -433,8 +433,8 @@ def test_worker_lease_lock_prevents_reclaim_during_completion(
             def finish() -> None:
                 try:
                     provider = MockInvoiceProvider()
-                    result, type_spec, evaluation = assess(provider, data, CONFIG)
-                    complete(stale_claim, result, evaluation, type_spec, provider, CONFIG)
+                    assessment = assess(provider, data, CONFIG)
+                    complete(stale_claim, assessment, CONFIG)
                 except Exception as exc:
                     errors.append(exc)
 
@@ -663,9 +663,25 @@ def test_worker_fails_documents_whose_extraction_times_out(
     monkeypatch: pytest.MonkeyPatch, make_tenant: TenantFactory
 ) -> None:
     class SlowProvider(MockInvoiceProvider):
-        def extract(self, data: bytes, config: WorkflowConfigModel) -> ExtractionResult:
+        def extract_pages(
+            self,
+            pages: list[str],
+            config: WorkflowConfigModel,
+            context: ExtractionContext | None = None,
+            *,
+            document_type: str | None = None,
+            field_names: Sequence[str] | None = None,
+            examples: Sequence[FewShotExample] = (),
+        ) -> ExtractionResult:
             time.sleep(2)
-            return super().extract(data, config)
+            return super().extract_pages(
+                pages,
+                config,
+                context,
+                document_type=document_type,
+                field_names=field_names,
+                examples=examples,
+            )
 
     monkeypatch.setattr("app.worker.get_provider", SlowProvider)
     monkeypatch.setattr(
@@ -839,6 +855,7 @@ def test_review_flow_end_to_end_with_corrections(
                 "document.received",
                 "document.queued",
                 "document.extracting",
+                "llm.call",
                 "document.validating",
                 "extraction.completed",
                 "document.needs_review",
@@ -848,7 +865,22 @@ def test_review_flow_end_to_end_with_corrections(
             ]
             stamps = [entry["at"] for entry in timeline]
             assert stamps == sorted(stamps)
-            assert timeline[4]["detail"]["rule_results"][0]["passed"] is True
+            assert timeline[3]["detail"] == {
+                "purpose": "extraction",
+                "provider": "mock",
+                "model": "invoice-pattern-v2",
+                "prompt_version": "mock-v2",
+                "tokens_in": None,
+                "tokens_out": None,
+                "cost_cents": 0.0,
+                "latency_ms": timeline[3]["detail"]["latency_ms"],
+                "ok": True,
+                "error": None,
+                "trace_id": timeline[3]["detail"]["trace_id"],
+            }
+            assert timeline[5]["detail"]["rule_results"][0]["passed"] is True
+            assert timeline[5]["detail"]["escalated"] is False
+            assert timeline[5]["detail"]["cost_cents"] == 0.0
             approve_audit = dict(audit_events(tenant.org_id, document_id))["invoice.approve"]
             assert approve_audit["derived_money"] is True
             assert approve_audit["failed_rules"] == []

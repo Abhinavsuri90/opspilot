@@ -8,16 +8,22 @@ Definitions (see docs/adr/008-intake-channels-and-templates.md):
 - field accuracy: 1 minus (fields a reviewer edited / fields assessed) over the latest run;
 - time to complete: review task completed minus opened; zero for auto-approved documents;
 - hours saved: processed documents x baseline minutes minus actual review minutes, floored
-  at zero, in hours. Cost per document stays null until LLM calls are metered (Phase 5).
+  at zero, in hours;
+- cost per document: priced ``llm_calls`` spend of the range's processed documents divided
+  by their number, null until at least one call was recorded (calls by unpriced models are
+  counted in ``cost_unpriced_calls`` and contribute nothing);
+- escalation rate: latest runs that called the tier-2 model over latest runs in the range.
 
 Days are UTC calendar days: the range ends on today's UTC date and each series point
-buckets documents by the UTC date they were created.
+buckets documents by the UTC date they were created. The accuracy series groups the same
+field counts by ISO week (Monday start) of the document's creation.
 """
 
 import statistics
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal
 from typing import cast
 
 from pydantic import BaseModel
@@ -25,7 +31,8 @@ from sqlalchemy import and_, case, exists, func, select
 from sqlalchemy.orm import Session
 
 from app.access import accessible_document_clause
-from app.models import Document, ExtractedField
+from app.learning_models import LlmCall
+from app.models import Document, ExtractedField, ExtractionRun
 from app.repositories import latest_run_id_for, latest_workflow_config
 from app.workflow_config import InvalidWorkflowConfig, load_config
 from app.workflow_models import FieldCorrection, ReviewTask
@@ -59,10 +66,25 @@ class MetricsOverview(BaseModel):
     field_accuracy: float | None
     median_time_to_complete_minutes: float | None
     review_queue_depth: int
+    # Cents per processed document from the model-call ledger; null until calls exist.
     cost_per_document: float | None
+    cost_total_cents: float
+    cost_unpriced_calls: int
+    llm_calls: int
+    tokens_in: int
+    tokens_out: int
+    escalation_rate: float | None
+    escalated_documents: int
     hours_saved: float
     baseline_minutes: int
     series: list[SeriesPoint]
+
+
+class AccuracyPoint(BaseModel):
+    week_start: date
+    fields_assessed: int
+    fields_corrected: int
+    accuracy: float | None
 
 
 @dataclass
@@ -198,6 +220,36 @@ def overview(
             )
         )
 
+    # Query 4: the model-call ledger for the range's processed documents.
+    cost_row = session.execute(
+        select(
+            func.count(LlmCall.id),
+            func.coalesce(func.sum(LlmCall.cost_cents), 0),
+            func.sum(case((LlmCall.cost_cents.is_(None), 1), else_=0)),
+            func.coalesce(func.sum(LlmCall.tokens_in), 0),
+            func.coalesce(func.sum(LlmCall.tokens_out), 0),
+        )
+        .select_from(LlmCall)
+        .join(Document, and_(Document.org_id == org_id, Document.id == LlmCall.document_id))
+        .where(LlmCall.org_id == org_id, *filters)
+    ).one()
+    calls, cost_total, unpriced, tokens_in, tokens_out = cast(
+        tuple[int, Decimal | float | int, int | None, int, int], tuple(cost_row)
+    )
+
+    # Query 5: escalations among the latest runs of the range's processed documents.
+    latest_for_run = latest_run_id_for(org_id, ExtractionRun.document_id).correlate(ExtractionRun)
+    escalation_row = session.execute(
+        select(
+            func.count(ExtractionRun.id),
+            func.sum(case((ExtractionRun.escalated.is_(True), 1), else_=0)),
+        )
+        .select_from(ExtractionRun)
+        .join(Document, and_(Document.org_id == org_id, Document.id == ExtractionRun.document_id))
+        .where(ExtractionRun.org_id == org_id, ExtractionRun.id == latest_for_run, *filters)
+    ).one()
+    runs, escalated = cast(tuple[int, int | None], tuple(escalation_row))
+
     processed = len(rows)
     auto = sum(1 for row in rows if row.auto_approved)
     durations = [row.review_minutes for row in rows if row.review_minutes is not None]
@@ -205,6 +257,7 @@ def overview(
     corrected_total = sum(point.corrected_fields for point in series)
     baseline = baseline_minutes(session, org_id)
     review_minutes = sum(durations)
+    cost_cents = float(cost_total or 0)
     return MetricsOverview(
         range=MetricsRange(days=days, start=start, end=today, document_type=document_type),
         documents_processed=processed,
@@ -214,8 +267,88 @@ def overview(
             round(statistics.median(durations), 2) if durations else None
         ),
         review_queue_depth=queue_depth,
-        cost_per_document=None,
+        cost_per_document=(
+            round(cost_cents / processed, 4) if processed and int(calls or 0) else None
+        ),
+        cost_total_cents=round(cost_cents, 4),
+        cost_unpriced_calls=int(unpriced or 0),
+        llm_calls=int(calls or 0),
+        tokens_in=int(tokens_in or 0),
+        tokens_out=int(tokens_out or 0),
+        escalation_rate=round(int(escalated or 0) / runs, 4) if runs else None,
+        escalated_documents=int(escalated or 0),
         hours_saved=round(max(0.0, processed * baseline - review_minutes) / 60, 2),
         baseline_minutes=baseline,
         series=series,
     )
+
+
+def week_start_of(day: date) -> date:
+    return day - timedelta(days=day.weekday())
+
+
+def accuracy_series(
+    session: Session,
+    org_id: uuid.UUID,
+    user_id: uuid.UUID,
+    role: str,
+    *,
+    weeks: int,
+    document_type: str | None = None,
+    today: date | None = None,
+) -> list[AccuracyPoint]:
+    """Field accuracy per ISO week over the documents the caller may see, oldest first."""
+    today = today or datetime.now(UTC).date()
+    first_week = week_start_of(today) - timedelta(weeks=weeks - 1)
+    start_at = datetime.combine(first_week, datetime.min.time(), tzinfo=UTC)
+    filters = [
+        accessible_document_clause(org_id, user_id, role),
+        Document.created_at >= start_at,
+        Document.status.not_in(UNPROCESSED_STATUSES),
+    ]
+    if document_type:
+        filters.append(Document.document_type == document_type)
+    edited = (
+        exists()
+        .where(
+            FieldCorrection.org_id == org_id,
+            FieldCorrection.field_id == ExtractedField.id,
+            FieldCorrection.kind == "edit",
+        )
+        .correlate(ExtractedField)
+    )
+    latest_run = latest_run_id_for(org_id, ExtractedField.document_id).correlate(ExtractedField)
+    rows = session.execute(
+        select(
+            Document.created_at,
+            func.count(ExtractedField.id),
+            func.sum(case((edited, 1), else_=0)),
+        )
+        .select_from(ExtractedField)
+        .join(Document, and_(Document.org_id == org_id, Document.id == ExtractedField.document_id))
+        .where(
+            ExtractedField.org_id == org_id,
+            ExtractedField.extraction_run_id == latest_run,
+            *filters,
+        )
+        .group_by(Document.created_at)
+    )
+    buckets: dict[date, list[int]] = {}
+    for row in rows:
+        created_at, total, corrected = cast(tuple[datetime, int, int | None], tuple(row))
+        bucket = buckets.setdefault(week_start_of(_aware(created_at).date()), [0, 0])
+        bucket[0] += int(total or 0)
+        bucket[1] += int(corrected or 0)
+    points = []
+    for offset in range(weeks):
+        week = first_week + timedelta(weeks=offset)
+        assessed, corrected_count = buckets.get(week, [0, 0])
+        points.append(
+            AccuracyPoint(
+                week_start=week,
+                fields_assessed=assessed,
+                fields_corrected=corrected_count,
+                accuracy=round(1 - corrected_count / assessed, 4) if assessed else None,
+            )
+        )
+    return points

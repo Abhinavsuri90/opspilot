@@ -331,6 +331,7 @@ def test_policies_defaults_updates_audits_and_isolation(gov: Gov) -> None:
         "version": 0,
         "kill_switch": False,
         "shadow_mode": False,
+        "daily_llm_spend_cap_cents": None,
         "policies": {},
         "defaults_from_config": {"post_webhook": "auto", "create_record": "forbidden"},
         "known_action_types": ["append_row", "create_record", "post_webhook", "export_csv"],
@@ -1190,3 +1191,35 @@ def test_retry_and_decision_roles_and_restricted_documents(gov: Gov) -> None:
         ).status_code
         == 200
     )
+
+
+def test_spend_cap_is_set_cleared_and_audited(gov: Gov) -> None:
+    client = gov.client
+    assert client.get("/v1/settings/policies").json()["daily_llm_spend_cap_cents"] is None
+    capped = client.post(
+        "/v1/settings/policies", json={"version": 0, "daily_llm_spend_cap_cents": 250}
+    )
+    assert capped.status_code == 200, capped.text
+    assert capped.json()["daily_llm_spend_cap_cents"] == 250 and capped.json()["version"] == 1
+    # Omitting the field leaves the cap alone; sending null removes it.
+    kept = client.post("/v1/settings/policies", json={"version": 1, "shadow_mode": True})
+    assert kept.json()["daily_llm_spend_cap_cents"] == 250
+    cleared = client.post(
+        "/v1/settings/policies", json={"version": 2, "daily_llm_spend_cap_cents": None}
+    )
+    assert cleared.status_code == 200 and cleared.json()["daily_llm_spend_cap_cents"] is None
+    assert (
+        client.post(
+            "/v1/settings/policies", json={"version": 3, "daily_llm_spend_cap_cents": -1}
+        ).status_code
+        == 422
+    )
+    assert gov.audits("settings.spend_cap_changed") == [
+        {"from": None, "to": 250},
+        {"from": 250, "to": None},
+    ]
+    with Session(gov.engine) as session:
+        settings = session.get(OrgSettings, gov.org_id)
+        assert settings is not None and settings.daily_llm_spend_cap_cents is None
+    gov.actor = "external"
+    assert client.get("/v1/settings/policies").json()["daily_llm_spend_cap_cents"] is None

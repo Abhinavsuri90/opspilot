@@ -1,13 +1,15 @@
 """HTTP contracts for route and error paths outside the invoice happy path."""
 
+import json
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app import document_service, review_service
+from app import document_service, intake_api, review_service
 from app.db import get_session
 from app.document_service import (
     DocumentLimitReached,
@@ -46,6 +48,7 @@ def clear_route_overrides() -> Any:
             {"json": {"version": 0, "action": "accept"}},
         ),
         ("GET", "/v1/actions", {}),
+        ("GET", "/v1/evals/latest", {}),
         ("GET", f"/v1/actions/{uuid.uuid4()}", {}),
         (
             "POST",
@@ -71,6 +74,7 @@ def clear_route_overrides() -> Any:
         ("POST", "/v1/settings/email-inbox", {"json": {"version": 0, "backend": "mailpit"}}),
         ("POST", "/v1/settings/email-inbox/test", {}),
         ("GET", "/v1/metrics/overview", {}),
+        ("GET", "/v1/metrics/accuracy", {}),
         ("GET", "/v1/actions/summary", {}),
     ],
 )
@@ -126,6 +130,7 @@ def test_read_only_member_cannot_manage_documents_or_members(
         ("POST", "/v1/settings/api-keys", {"json": {"name": "ci"}}),
         ("POST", f"/v1/settings/api-keys/{uuid.uuid4()}/revoke", {}),
         ("GET", "/v1/settings/email-inbox", {}),
+        ("GET", "/v1/evals/latest", {}),
         ("POST", "/v1/settings/email-inbox", {"json": {"version": 0, "backend": "mailpit"}}),
         ("POST", "/v1/settings/email-inbox/test", {}),
     ]
@@ -156,6 +161,43 @@ def test_document_routes_reject_malformed_ids() -> None:
             assert any(
                 item["field"] == "path.document_id" for item in invalid.json()["error"]["details"]
             )
+
+
+def test_latest_eval_report_requires_admin_and_reads_latest_valid_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(intake_api, "REPORTS_DIR", tmp_path)
+    identity = (
+        object(),
+        SimpleNamespace(id=uuid.uuid4()),
+        SimpleNamespace(id=uuid.uuid4()),
+        SimpleNamespace(role="viewer"),
+    )
+    app.dependency_overrides[current_session] = lambda: identity
+    with TestClient(app) as client:
+        assert client.get("/v1/evals/latest").status_code == 403
+    identity[3].role = "admin"
+    with TestClient(app) as client:
+        missing = client.get("/v1/evals/latest")
+        assert missing.status_code == 404
+        assert "make eval" in missing.json()["error"]["message"]
+
+    report = {
+        "provider": "mock", "model": "synthetic", "tier2_model": None,
+        "dataset": "12 synthetic documents", "exact_match": 0.95,
+        "grounded_fraction": 1.0, "flag_precision": 0.75,
+        "flag_recall": 1.0, "type_detection": 1.0, "escalation_rate": 0.0,
+        "cost": {"cost_cents_total": 0.0},
+        "learning": {"passed": True, "deltas": {"exact_match": 0.0}},
+        "limitations": "Synthetic text only",
+    }
+    (tmp_path / "20260927T100000Z-mock.json").write_text(json.dumps(report))
+    (tmp_path / "20260927T110000Z-mock.json").write_text("invalid")
+    with TestClient(app) as client:
+        result = client.get("/v1/evals/latest")
+    assert result.status_code == 200
+    assert result.json()["generated_at"] == "20260927T100000Z"
+    assert result.json()["exact_match"] == 0.95
 
 
 @pytest.mark.parametrize(

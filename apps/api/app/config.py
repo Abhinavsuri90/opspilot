@@ -1,4 +1,5 @@
 import ipaddress
+import json
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
@@ -27,6 +28,22 @@ class Settings(BaseSettings):
     llm_provider: str = "rules"
     openrouter_api_key: str | None = None
     openrouter_model: str = "google/gemini-3.8-flash"
+    # Model router (app/llm/router.py): tier 1 defaults to OPENROUTER_MODEL; tier 2 is a
+    # stronger OpenRouter model that re-runs only the fields tier 1 could not settle. Unset
+    # means no escalation.
+    llm_tier1_model: str | None = None
+    llm_tier2_model: str | None = None
+    # JSON object {model id: [input cents per 1M tokens, output cents per 1M tokens]} merged
+    # over the built-in table in app/llm/pricing.py.
+    llm_price_table_json: str | None = None
+    # What the worker does for a paid provider once an organization's daily budget is spent:
+    # "defer" retries the document after 00:05 UTC, "rules" extracts with the rules provider.
+    llm_budget_fallback: Literal["defer", "rules"] = "defer"
+    # Optional OpenAI-compatible embeddings endpoint for memory retrieval; unset means the
+    # deterministic local hashing embedder (app/llm/embeddings.py).
+    embeddings_base_url: str | None = None
+    embeddings_model: str | None = None
+    embeddings_api_key: str | None = None
     max_documents_per_org: int = Field(default=100, ge=1, le=100_000)
     # Wall-clock limits for PDF parsing and extraction; see app/timeouts.py. The
     # extraction limit stays under the worker's 5-minute lease (app/worker.py).
@@ -63,6 +80,47 @@ class Settings(BaseSettings):
                 "CONNECTOR_ENCRYPTION_KEY must be a Fernet key (44 URL-safe base64 characters)"
             ) from exc
         return key
+
+    @field_validator("llm_tier1_model", "llm_tier2_model", "embeddings_model", "embeddings_api_key")
+    @classmethod
+    def blank_is_unset(cls, value: str | None) -> str | None:
+        text = (value or "").strip()
+        return text or None
+
+    @field_validator("llm_price_table_json")
+    @classmethod
+    def parse_price_table_json(cls, value: str | None) -> str | None:
+        text = (value or "").strip()
+        if not text:
+            return None
+        try:
+            decoded = json.loads(text)
+        except ValueError as exc:
+            raise ValueError("LLM_PRICE_TABLE_JSON must be a JSON object") from exc
+        if not isinstance(decoded, dict):
+            raise ValueError("LLM_PRICE_TABLE_JSON must be a JSON object")
+        for model, prices in decoded.items():
+            if (
+                not isinstance(model, str)
+                or not isinstance(prices, list)
+                or len(prices) != 2
+                or not all(isinstance(price, int | float) and price >= 0 for price in prices)
+            ):
+                raise ValueError(
+                    "LLM_PRICE_TABLE_JSON entries must be model id -> [input, output] cents per 1M"
+                )
+        return text
+
+    @field_validator("embeddings_base_url")
+    @classmethod
+    def parse_embeddings_base_url(cls, value: str | None) -> str | None:
+        url = (value or "").strip().rstrip("/")
+        if not url:
+            return None
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("EMBEDDINGS_BASE_URL must be an absolute http(s) URL")
+        return url
 
     @field_validator("mailpit_api_url")
     @classmethod

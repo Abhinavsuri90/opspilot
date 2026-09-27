@@ -24,6 +24,7 @@ from scripts.generate_synthetic import (
 )
 
 from app.llm.provider import MockInvoiceProvider
+from app.llm.router import ModelRouter
 
 ROOT = Path(__file__).parents[3]
 
@@ -74,7 +75,8 @@ def test_write_and_ensure_generated_round_trip(tmp_path: Path) -> None:
 
 def test_mock_eval_on_the_sample_reports_per_type_and_compares_to_baseline() -> None:
     cases = load_dataset(SAMPLE)
-    overall, by_type, failures = score_cases(MockInvoiceProvider(), cases)
+    router = ModelRouter(MockInvoiceProvider(recorder=lambda outcome: None))
+    overall, by_type, failures = score_cases(router, cases)
     metrics = overall.metrics()
     expected = sum(len(case.truth) for case in cases)
     wrong = sum(len(case.should_flag) for case in cases)

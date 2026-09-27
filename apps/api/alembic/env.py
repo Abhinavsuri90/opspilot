@@ -4,7 +4,7 @@ from logging.config import fileConfig
 from sqlalchemy import create_engine
 
 from alembic import context
-from app import action_models, intake_models, workflow_models  # noqa: F401
+from app import action_models, intake_models, learning_models, workflow_models  # noqa: F401
 from app.db import normalize_database_url
 from app.models import Base
 

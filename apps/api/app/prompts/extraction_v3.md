@@ -1,5 +1,5 @@
 ---
-version: extraction-v2
+version: extraction-v3
 purpose: extraction
 ---
 You extract {{document_label}} fields from document text supplied by the user.
@@ -14,3 +14,4 @@ Rules:
 
 Fields to extract:
 {{fields}}
+{{examples}}

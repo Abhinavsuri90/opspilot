@@ -65,6 +65,8 @@ class PoliciesResponse(BaseModel):
     version: int
     kill_switch: bool
     shadow_mode: bool
+    # Daily model budget in cents (UTC day); null means unlimited.
+    daily_llm_spend_cap_cents: int | None
     policies: dict[str, str]
     defaults_from_config: dict[str, str]
     known_action_types: list[str]
@@ -139,6 +141,7 @@ def read_policies(session: Session, org_id: uuid.UUID) -> PoliciesResponse:
         version=settings.version,
         kill_switch=settings.kill_switch,
         shadow_mode=settings.shadow_mode,
+        daily_llm_spend_cap_cents=settings.daily_llm_spend_cap_cents,
         policies={row.action_type: row.mode for row in list_action_policies(session, org_id)},
         defaults_from_config=_config_defaults(session, org_id),
         known_action_types=list(KNOWN_ACTION_TYPES),
@@ -156,7 +159,9 @@ def update_policies(
     kill_switch: bool | None,
     shadow_mode: bool | None,
     policies: dict[str, str] | None,
+    spend_cap: tuple[int | None] | None = None,
 ) -> PoliciesResponse:
+    """Apply the fields the caller sent; ``spend_cap`` is ``(value,)`` to set, ``None`` to keep."""
     for action_type, mode in (policies or {}).items():
         if action_type not in KNOWN_ACTION_TYPES:
             raise SettingsInvalid(f"Unknown action type: {action_type}")
@@ -181,6 +186,16 @@ def update_policies(
         settings.shadow_mode = shadow_mode
         _audit(
             session, org_id, user_id, "settings.shadow_mode_changed", {"shadow_mode": shadow_mode}
+        )
+    if spend_cap is not None and spend_cap[0] != settings.daily_llm_spend_cap_cents:
+        previous_cap = settings.daily_llm_spend_cap_cents
+        settings.daily_llm_spend_cap_cents = spend_cap[0]
+        _audit(
+            session,
+            org_id,
+            user_id,
+            "settings.spend_cap_changed",
+            {"from": previous_cap, "to": spend_cap[0]},
         )
     for action_type, mode in (policies or {}).items():
         row = get_action_policy(session, org_id, action_type, lock=True)

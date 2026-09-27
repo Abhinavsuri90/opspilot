@@ -1,24 +1,57 @@
-"""Evaluate extraction, flagging and document-type detection on synthetic datasets.
+"""Evaluate extraction, flagging, document-type detection, cost and learning on synthetic data.
 
 Datasets come from ``scripts/generate_synthetic.py``: a deterministic, gitignored set of 150
 documents (generated on demand into ``evals/datasets/generated``) and a committed sample of
 12 under ``evals/datasets/sample``. Each case carries the intended values and the fields a
 reviewer should be asked about; the confidence engine's needs_review decision is scored
 against that as precision and recall, per document type and overall.
+
+Every document goes through the production path (``ModelRouter`` over the provider, with
+tier 2 when ``LLM_TIER2_MODEL`` is set for OpenRouter), with an in-memory ledger recorder so
+the report can state tokens, cost and latency exactly as the worker would have logged them.
+
+The learning scenario splits each vendor's documents into a training half and a held-out
+half, scores the held-out half cold, ingests the training half's ground truth as reviewer
+corrections into an isolated in-memory copy of ``memory_items``, scores the held-out half
+again with that memory, and asserts that accuracy did not regress. With the mock provider
+memory only feeds the ``memory_prior`` signal (the deterministic extractor cannot read
+examples), so the scenario proves the plumbing and the no-regression guarantee; the real
+learning effect is measured on the live-model subset.
 """
 
 import argparse
 import json
+import statistics
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
-from scripts.generate_synthetic import DEFAULT_COUNT, DEFAULT_SEED, generate_dataset, write_dataset
-
-from app.confidence import evaluate
+from app import memory
 from app.config import get_settings
-from app.llm.provider import ExtractionProvider, MockInvoiceProvider, OpenRouterInvoiceProvider
+from app.llm.client import CallOutcome
+from app.llm.embeddings import LocalHashEmbedder
+from app.llm.provider import (
+    ExtractionContext,
+    ExtractionProvider,
+    MockInvoiceProvider,
+    OpenRouterInvoiceProvider,
+    pdf_pages,
+)
+from app.llm.router import Assessment, ModelRouter
+from app.models import Base
 from app.workflow_config import template_config
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
+from scripts.generate_synthetic import (
+    DEFAULT_COUNT,
+    DEFAULT_SEED,
+    generate_dataset,
+    write_dataset,
+)
 
 DATASETS = Path(__file__).with_name("datasets")
 GENERATED = DATASETS / "generated"
@@ -32,6 +65,9 @@ COMPARED_METRICS = (
     "flag_recall",
     "type_detection",
 )
+# A fixed tenant id for the in-memory ledger and memory store; never a real organization.
+EVAL_ORG = uuid.UUID("00000000-0000-4000-8000-0000000e7a10")
+LEARNING_METRICS = ("exact_match", "flag_recall", "flag_precision")
 
 
 @dataclass
@@ -43,6 +79,10 @@ class Case:
     truth: dict[str, str]
     # Fields whose printed value is deliberately wrong or absent.
     should_flag: set[str] = field(default_factory=set)
+
+    @property
+    def party(self) -> str | None:
+        return self.truth.get("vendor") or self.truth.get("supplier")
 
 
 @dataclass
@@ -56,6 +96,8 @@ class Tally:
     false_positive: int = 0
     false_negative: int = 0
     detected: int = 0
+    escalated: int = 0
+    with_prior: int = 0
 
     def metrics(self) -> dict[str, object]:
         flagged = self.true_positive + self.false_positive
@@ -71,12 +113,55 @@ class Tally:
             "flag_precision": round(self.true_positive / flagged, 4) if flagged else 1.0,
             "flag_recall": round(self.true_positive / should, 4) if should else 1.0,
             "type_detection": (round(self.detected / self.documents, 4) if self.documents else 0.0),
+            "escalation_rate": (
+                round(self.escalated / self.documents, 4) if self.documents else 0.0
+            ),
+            "fields_with_memory_prior": self.with_prior,
             "flag_counts": {
                 "true_positive": self.true_positive,
                 "false_positive": self.false_positive,
                 "false_negative": self.false_negative,
             },
         }
+
+
+@dataclass
+class Ledger:
+    """In-memory stand-in for ``llm_calls``: the same rows the worker would have written."""
+
+    calls: list[CallOutcome] = field(default_factory=list)
+
+    def record(self, outcome: CallOutcome) -> None:
+        self.calls.append(outcome)
+
+    def summary(self, documents: int) -> dict[str, object]:
+        priced = [call.cost_cents for call in self.calls if call.cost_cents is not None]
+        total = sum(priced, Decimal("0.0000"))
+        latencies = sorted(call.latency_ms for call in self.calls)
+        return {
+            "calls": len(self.calls),
+            "failed_calls": sum(1 for call in self.calls if not call.ok),
+            "tokens_in": sum(call.tokens_in or 0 for call in self.calls),
+            "tokens_out": sum(call.tokens_out or 0 for call in self.calls),
+            "cost_cents_total": float(total),
+            "cost_cents_per_document": (
+                round(float(total) / documents, 4) if documents and priced else None
+            ),
+            "unpriced_calls": len(self.calls) - len(priced),
+            "latency_ms": {
+                "mean": round(statistics.fmean(latencies), 1) if latencies else None,
+                "p50": _percentile(latencies, 0.5),
+                "p95": _percentile(latencies, 0.95),
+                "max": latencies[-1] if latencies else None,
+            },
+        }
+
+
+def _percentile(values: list[int], fraction: float) -> int | None:
+    if not values:
+        return None
+    index = min(len(values) - 1, max(0, round(fraction * (len(values) - 1))))
+    return values[index]
 
 
 def ensure_generated(
@@ -109,8 +194,46 @@ def load_dataset(directory: Path) -> list[Case]:
     return cases
 
 
+def make_providers(
+    provider_name: str, ledger: Ledger
+) -> tuple[ExtractionProvider, ExtractionProvider | None]:
+    """The tier-1 provider and, for OpenRouter with LLM_TIER2_MODEL, the tier-2 provider."""
+    settings = get_settings()
+    if provider_name == "mock":
+        return MockInvoiceProvider(recorder=ledger.record), None
+    if not settings.openrouter_api_key:
+        raise RuntimeError("Set OPENROUTER_API_KEY locally before running a live model eval")
+    tier1 = OpenRouterInvoiceProvider(
+        settings.openrouter_api_key,
+        settings.llm_tier1_model or settings.openrouter_model,
+        recorder=ledger.record,
+    )
+    tier2 = (
+        OpenRouterInvoiceProvider(
+            settings.openrouter_api_key, settings.llm_tier2_model, recorder=ledger.record
+        )
+        if settings.llm_tier2_model
+        else None
+    )
+    return tier1, tier2
+
+
+def assess_case(
+    router: ModelRouter, case: Case, memory_session: Session | None = None
+) -> Assessment:
+    config = template_config(case.template)
+    pages = pdf_pages(case.pdf)
+    context = ExtractionContext(EVAL_ORG, None, case.name)
+    memory_context = None
+    if memory_session is not None:
+        memory_context = memory.context_for(
+            memory_session, EVAL_ORG, pages, config, embedder=LocalHashEmbedder()
+        )
+    return router.run(pages, config, context, memory_context)
+
+
 def score_cases(
-    provider: ExtractionProvider, cases: list[Case]
+    router: ModelRouter, cases: list[Case], memory_session: Session | None = None
 ) -> tuple[Tally, dict[str, Tally], list[dict[str, object]]]:
     overall = Tally()
     by_type: dict[str, Tally] = {}
@@ -124,12 +247,13 @@ def score_cases(
             tally.documents += 1
             tally.expected += len(case.truth)
         try:
-            result = provider.extract(case.pdf, config)
-        except Exception as exc:
+            assessment = assess_case(router, case, memory_session)
+        except Exception as exc:  # noqa: BLE001 - evaluation records every case failure
             failures.append({"case": case.name, "error_type": type(exc).__name__})
             for tally in tallies:
                 tally.false_negative += len(case.should_flag)
             continue
+        result, evaluation = assessment.result, assessment.evaluation
         if result.document_type == case.document_type:
             for tally in tallies:
                 tally.detected += 1
@@ -137,8 +261,12 @@ def score_cases(
             failures.append(
                 {"case": case.name, "detected_type": result.document_type, "type_mismatch": True}
             )
+        for tally in tallies:
+            tally.escalated += 1 if assessment.escalated else 0
+            tally.with_prior += sum(
+                1 for value in assessment.memory_prior.values() if value is not None
+            )
         predicted = {item.name: item for item in result.fields}
-        evaluation = evaluate(result.fields, result.pages, type_spec)
         assessed = {item.name: item for item in evaluation.fields}
         for name, expected_value in case.truth.items():
             extracted = predicted.get(name)
@@ -171,48 +299,213 @@ def score_cases(
     return overall, by_type, failures
 
 
-def run(provider_name: str, output_dir: Path, dataset_dir: Path) -> dict[str, object]:
-    settings = get_settings()
-    provider: ExtractionProvider
-    if provider_name == "mock":
-        provider = MockInvoiceProvider()
-    else:
-        if not settings.openrouter_api_key:
-            raise RuntimeError("Set OPENROUTER_API_KEY locally before running a live model eval")
-        provider = OpenRouterInvoiceProvider(settings.openrouter_api_key, settings.openrouter_model)
+def split_by_party(cases: list[Case]) -> tuple[list[Case], list[Case]]:
+    """Per vendor, the first half of its documents trains and the rest is held out."""
+    by_party: dict[str, list[Case]] = {}
+    for case in cases:
+        if case.party:
+            by_party.setdefault(case.party, []).append(case)
+    train: list[Case] = []
+    held_out: list[Case] = []
+    for _, group in sorted(by_party.items()):
+        if len(group) < 2:
+            continue
+        group = sorted(group, key=lambda item: item.name)
+        half = len(group) // 2
+        train.extend(group[:half])
+        held_out.extend(group[half:])
+    return train, held_out
 
+
+def memory_store() -> Session:
+    engine = create_engine(
+        "sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool
+    )
+    Base.metadata.create_all(engine)
+    return Session(engine)
+
+
+def ingest_truth(session: Session, router: ModelRouter, cases: list[Case]) -> int:
+    """Apply the ground truth of each training case as reviewer corrections into memory."""
+    written = 0
+    for case in cases:
+        config = template_config(case.template)
+        type_spec = config.document_type(case.document_type)
+        assert type_spec is not None and case.party
+        try:
+            assessment = assess_case(router, case)
+            extracted = {item.name: item for item in assessment.result.fields}
+        except Exception:  # noqa: BLE001 - missing predictions become corrections
+            extracted = {}
+        corrections = [
+            memory.Correction(
+                name,
+                extracted[name].value if name in extracted else "",
+                truth,
+                extracted[name].evidence if name in extracted else f"{name}: {truth}",
+            )
+            for name, truth in case.truth.items()
+            if name not in extracted or extracted[name].value != truth
+        ]
+        _, count = memory.learn(
+            session,
+            EVAL_ORG,
+            vendor=case.party,
+            type_spec=type_spec,
+            values=case.truth,
+            corrections=corrections,
+            embedder=LocalHashEmbedder(),
+            trace_id=case.name,
+        )
+        written += count
+    session.commit()
+    return written
+
+
+def learning_scenario(router: ModelRouter, cases: list[Case], strict: bool) -> dict[str, object]:
+    """Score held-out documents cold, ingest the training half, score again with memory."""
+    train, held_out = split_by_party(cases)
+    if not train or not held_out:
+        return {"skipped": "Not enough documents per vendor to hold some out"}
+    before, _, _ = score_cases(router, held_out)
+    with memory_store() as session:
+        few_shots = ingest_truth(session, router, train)
+        after, _, _ = score_cases(router, held_out, session)
+    before_metrics, after_metrics = before.metrics(), after.metrics()
+    deltas = {
+        metric: round(float(str(after_metrics[metric])) - float(str(before_metrics[metric])), 4)
+        for metric in LEARNING_METRICS
+    }
+    tolerance = 0.0 if strict else TOLERANCE
+    regressions = []
+    for metric in ("exact_match", "flag_recall"):
+        current, previous = float(str(after_metrics[metric])), float(str(before_metrics[metric]))
+        if current < previous - tolerance:
+            regressions.append(f"{metric}: {current:.4f} < {previous:.4f}")
+    return {
+        "train_documents": len(train),
+        "held_out_documents": len(held_out),
+        "vendors": len({case.party for case in train}),
+        "few_shots_written": few_shots,
+        "before": {metric: before_metrics[metric] for metric in LEARNING_METRICS},
+        "after": {
+            **{metric: after_metrics[metric] for metric in LEARNING_METRICS},
+            "fields_with_memory_prior": after_metrics["fields_with_memory_prior"],
+        },
+        "deltas": deltas,
+        "regressions": regressions,
+        "passed": not regressions,
+    }
+
+
+def run(
+    provider_name: str, output_dir: Path, dataset_dir: Path, limit: int | None = None
+) -> dict[str, object]:
+    ledger = Ledger()
+    tier1, tier2 = make_providers(provider_name, ledger)
+    router = ModelRouter(tier1, tier2)
     cases = load_dataset(dataset_dir)
-    overall, by_type, failures = score_cases(provider, cases)
+    if limit is not None:
+        cases = cases[:limit]
+    overall, by_type, failures = score_cases(router, cases)
+    cost = ledger.summary(len(cases))
+    learning = learning_scenario(router, cases, strict=provider_name == "mock")
     perturbed = sum(1 for case in cases if case.should_flag)
     report: dict[str, object] = {
         "dataset": (
             f"{len(cases)} synthetic text-layer documents from {dataset_dir.name} "
             f"({perturbed} perturbed; types: {', '.join(sorted(by_type))})"
         ),
-        "provider": provider.name,
-        "model": provider.model,
+        "provider": tier1.name,
+        "model": tier1.model,
+        "tier2_model": tier2.model if tier2 is not None else None,
+        "prompt_version": tier1.prompt_version,
         **overall.metrics(),
+        "cost": cost,
+        "learning": learning,
         "by_document_type": {name: tally.metrics() for name, tally in sorted(by_type.items())},
         "failures": failures,
         "limitations": (
             "Synthetic text-layer documents only; these results do not measure scanned PDFs, "
-            "real customer documents, or human-review quality."
+            "real customer documents, or human-review quality. Cost and latency are for the "
+            "main pass only (the learning scenario's calls are excluded)."
         ),
     }
+    write_reports(report, output_dir, provider_name, tier1, by_type, len(cases))
+    return report
+
+
+def _pct(value: object) -> str:
+    return f"{float(str(value)):.1%}"
+
+
+def write_reports(
+    report: dict[str, object],
+    output_dir: Path,
+    provider_name: str,
+    provider: ExtractionProvider,
+    by_type: dict[str, Tally],
+    documents: int,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     stem = f"{timestamp}-{provider_name}"
     (output_dir / f"{stem}.json").write_text(json.dumps(report, indent=2) + "\n")
+    cost = dict(report["cost"]) if isinstance(report["cost"], dict) else {}
+    latency = dict(cost.get("latency_ms") or {})
+    learning = dict(report["learning"]) if isinstance(report["learning"], dict) else {}
     lines = [
         f"# Synthetic document eval: {provider_name}",
         "",
-        f"Model: `{provider.model}`  ",
-        f"Documents: {len(cases)}  ",
-        f"Exact field match: {float(str(report['exact_match'])):.1%}  ",
-        f"Grounded fields: {float(str(report['grounded_fraction'])):.1%}  ",
-        f"Flagging precision: {float(str(report['flag_precision'])):.1%}  ",
-        f"Flagging recall: {float(str(report['flag_recall'])):.1%}  ",
-        f"Type detection: {float(str(report['type_detection'])):.1%}",
+        f"Model: `{provider.model}` (tier 2: `{report['tier2_model'] or 'none'}`)  ",
+        f"Prompt: `{report['prompt_version']}`  ",
+        f"Documents: {documents}  ",
+        f"Exact field match: {_pct(report['exact_match'])}  ",
+        f"Grounded fields: {_pct(report['grounded_fraction'])}  ",
+        f"Flagging precision: {_pct(report['flag_precision'])}  ",
+        f"Flagging recall: {_pct(report['flag_recall'])}  ",
+        f"Type detection: {_pct(report['type_detection'])}  ",
+        f"Escalation rate: {_pct(report['escalation_rate'])}",
+        "",
+        "## Cost and latency",
+        "",
+        f"Model calls: {cost.get('calls')} ({cost.get('failed_calls')} failed, "
+        + f"{cost.get('unpriced_calls')} unpriced)  ",
+        f"Tokens: {cost.get('tokens_in')} in / {cost.get('tokens_out')} out  ",
+        f"Cost: {cost.get('cost_cents_total')} cents total, "
+        + f"{cost.get('cost_cents_per_document')} cents per document  ",
+        f"Latency (ms): mean {latency.get('mean')}, p50 {latency.get('p50')}, "
+        + f"p95 {latency.get('p95')}, max {latency.get('max')}",
+        "",
+        "## Learning scenario",
+        "",
+    ]
+    if "skipped" in learning:
+        lines.append(str(learning["skipped"]))
+    else:
+        before = dict(learning["before"])
+        after = dict(learning["after"])
+        lines += [
+            f"Trained on {learning['train_documents']} documents from {learning['vendors']} "
+            + f"vendors ({learning['few_shots_written']} few-shot examples); "
+            + f"held out {learning['held_out_documents']}.",
+            "",
+            "| Metric | Before memory | After memory | Delta |",
+            "|---|---:|---:|---:|",
+        ]
+        for metric in LEARNING_METRICS:
+            lines.append(
+                f"| {metric} | {_pct(before[metric])} | {_pct(after[metric])} | "
+                f"{float(str(dict(learning['deltas'])[metric])):+.4f} |"
+            )
+        lines.append("")
+        lines.append(
+            "Result: " + ("no regression" if learning["passed"] else "REGRESSED") + "; "
+            f"{after['fields_with_memory_prior']} held-out fields carried a memory prior."
+        )
+    lines += [
+        "",
+        "## By document type",
         "",
         "| Document type | Documents | Exact match | Flag precision | Flag recall | Detection |",
         "|---|---:|---:|---:|---:|---:|",
@@ -220,14 +513,12 @@ def run(provider_name: str, output_dir: Path, dataset_dir: Path) -> dict[str, ob
     for name, tally in sorted(by_type.items()):
         metrics = tally.metrics()
         lines.append(
-            f"| {name} | {metrics['documents']} | {float(str(metrics['exact_match'])):.1%} | "
-            f"{float(str(metrics['flag_precision'])):.1%} | "
-            f"{float(str(metrics['flag_recall'])):.1%} | "
-            f"{float(str(metrics['type_detection'])):.1%} |"
+            f"| {name} | {metrics['documents']} | {_pct(metrics['exact_match'])} | "
+            f"{_pct(metrics['flag_precision'])} | {_pct(metrics['flag_recall'])} | "
+            f"{_pct(metrics['type_detection'])} |"
         )
     lines += ["", str(report["limitations"]), ""]
     (output_dir / f"{stem}.md").write_text("\n".join(lines))
-    return report
 
 
 def baseline_entry(report: dict[str, object]) -> dict[str, object]:
@@ -267,6 +558,9 @@ def compare_with_baseline(report: dict[str, object]) -> list[str]:
                 regressions.append(
                     f"{name}.{metric}: {current:.4f} is below baseline {float(str(expected)):.4f}"
                 )
+    learning = report.get("learning")
+    if isinstance(learning, dict) and learning.get("passed") is False:
+        regressions.append("learning: " + "; ".join(str(item) for item in learning["regressions"]))
     return regressions
 
 
@@ -283,6 +577,9 @@ if __name__ == "__main__":
     parser.add_argument("--count", type=int, default=DEFAULT_COUNT)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument(
+        "--limit", type=int, default=None, help="Score only the first N documents (live runs)"
+    )
+    parser.add_argument(
         "--update-baseline",
         action="store_true",
         help="Rewrite evals/baseline.json from this mock run instead of comparing",
@@ -292,8 +589,11 @@ if __name__ == "__main__":
         directory = ensure_generated(GENERATED, args.count, args.seed)
     else:
         directory = SAMPLE
-    result = run(args.provider, args.output_dir, directory)
-    print(json.dumps({key: result[key] for key in ("provider", "model", *COMPARED_METRICS)}))
+    result = run(args.provider, args.output_dir, directory, args.limit)
+    summary = {key: result[key] for key in ("provider", "model", *COMPARED_METRICS)}
+    summary["cost"] = result["cost"]
+    summary["learning"] = result["learning"]
+    print(json.dumps(summary))
     if args.provider == "mock":
         if args.update_baseline:
             BASELINE.write_text(json.dumps(baseline_entry(result), indent=2) + "\n")
@@ -301,3 +601,7 @@ if __name__ == "__main__":
             problems = compare_with_baseline(result)
             if problems:
                 raise SystemExit("Mock extraction regressed: " + "; ".join(problems))
+    else:
+        learning = result["learning"]
+        if isinstance(learning, dict) and learning.get("passed") is False:
+            raise SystemExit("Live model learning scenario regressed: " + str(learning))

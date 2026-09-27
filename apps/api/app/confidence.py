@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
@@ -194,8 +195,21 @@ def score(signals: dict[str, float | None]) -> float:
 
 
 def evaluate(
-    fields: list[ExtractedValue], pages: list[str], type_spec: DocumentTypeSpec
+    fields: list[ExtractedValue],
+    pages: list[str],
+    type_spec: DocumentTypeSpec,
+    *,
+    model_agreement: Mapping[str, float] | None = None,
+    memory_prior: Mapping[str, float | None] | None = None,
+    extra_reasons: Mapping[str, Sequence[str]] | None = None,
 ) -> Evaluation:
+    """Score every configured field.
+
+    ``model_agreement`` (per field, from the router) and ``memory_prior`` (per field, from
+    the vendor profile) fill the two signals that the deterministic checks cannot compute;
+    both stay ``None`` when the caller has nothing to say. ``extra_reasons`` are appended
+    to a field's reasons, for example "Models disagreed".
+    """
     by_name = {value.name: value for value in fields}
     typed: dict[str, rules.Value] = {}
     for spec in type_spec.fields:
@@ -233,6 +247,13 @@ def evaluate(
             reasons.extend(_rule_reason(rule) for rule in failed)
         if extracted.self_confidence is not None:
             signals["self_report"] = min(1.0, max(0.0, float(extracted.self_confidence)))
+        if model_agreement is not None and spec.name in model_agreement:
+            signals["model_agreement"] = min(1.0, max(0.0, float(model_agreement[spec.name])))
+        if memory_prior is not None and memory_prior.get(spec.name) is not None:
+            prior = memory_prior[spec.name]
+            signals["memory_prior"] = min(1.0, max(0.0, float(prior if prior is not None else 0)))
+        if extra_reasons is not None:
+            reasons.extend(extra_reasons.get(spec.name, ()))
         confidence = score(signals)
         status: FieldStatus = "auto" if confidence >= spec.threshold else "needs_review"
         if status == "needs_review":

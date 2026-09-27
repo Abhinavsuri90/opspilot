@@ -19,23 +19,27 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
-from app import actions_service, email_intake, near_duplicates
+from app import actions_service, email_intake, memory, near_duplicates
 from app.action_models import Action
 from app.actions_service import ExecutionPlan
-from app.confidence import Evaluation, evaluate
 from app.config import get_settings
 from app.connectors import get_connector
 from app.connectors.base import CredentialsUnavailable, ExecutionResult
 from app.connectors.credentials import decrypt_credentials
 from app.db import SessionLocal, set_org_context
 from app.document_service import document_audit
+from app.llm import budget
 from app.llm.provider import (
+    ExtractionContext,
     ExtractionError,
     ExtractionProvider,
-    ExtractionResult,
     ProviderUnavailable,
+    RulesInvoiceProvider,
     get_provider,
+    get_tier2_provider,
+    pdf_pages,
 )
+from app.llm.router import Assessment, ModelRouter
 from app.models import (
     AuditEvent,
     Document,
@@ -54,7 +58,6 @@ from app.review_service import open_review_task
 from app.storage import ObjectStore, StorageError, StoredDocumentTooLarge, get_store
 from app.timeouts import OperationTimeout, ParserBusy, run_connector_call, run_with_timeout
 from app.workflow_config import (
-    DocumentTypeSpec,
     InvalidWorkflowConfig,
     WorkflowConfigModel,
     load_config,
@@ -83,6 +86,7 @@ class Claim:
     claimed_at: datetime
     attempts: int
     workflow_config_version: int
+    trace_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -145,6 +149,8 @@ def claim_next(org_id: uuid.UUID, document_id: uuid.UUID | None = None) -> Claim
         if row is None:
             return None
         event, document = row
+        # One trace id per document ties its ledger rows and runs together across retries.
+        trace_id = document.trace_id or uuid.uuid4().hex
         changed = session.scalar(
             update(Document)
             .where(
@@ -152,7 +158,7 @@ def claim_next(org_id: uuid.UUID, document_id: uuid.UUID | None = None) -> Claim
                 Document.org_id == org_id,
                 Document.status == document.status,
             )
-            .values(status="extracting", updated_at=now)
+            .values(status="extracting", updated_at=now, trace_id=trace_id)
             .returning(Document.id)
         )
         if changed is None:
@@ -170,6 +176,7 @@ def claim_next(org_id: uuid.UUID, document_id: uuid.UUID | None = None) -> Claim
             now,
             event.attempts,
             document.workflow_config_version,
+            trace_id,
         )
 
 
@@ -241,19 +248,20 @@ def _current_lease(session: Session, claim: Claim) -> tuple[OutboxEvent, Documen
 
 
 def _store_run(
-    claim: Claim,
-    result: ExtractionResult,
-    provider: ExtractionProvider,
-    evaluation: Evaluation,
-    created_at: datetime,
+    claim: Claim, assessment: Assessment, provider_name: str, created_at: datetime
 ) -> tuple[ExtractionRun, list[ExtractedField]]:
+    result, evaluation = assessment.result, assessment.evaluation
     run = ExtractionRun(
         id=uuid.uuid4(),
         org_id=claim.org_id,
         document_id=claim.document_id,
-        provider=provider.name,
+        provider=provider_name,
         model=result.model,
         prompt_version=result.prompt_version,
+        tier1_model=assessment.tier1_model,
+        tier2_model=assessment.tier2_model,
+        escalated=assessment.escalated,
+        cost_cents=assessment.cost_cents,
         created_at=created_at,
         raw_json=json.dumps(
             {
@@ -264,6 +272,20 @@ def _store_run(
                 "latency_ms": result.latency_ms,
                 "notes": result.notes,
                 "rule_results": [asdict(rule) for rule in evaluation.rule_results],
+                "escalation": {
+                    "escalated": assessment.escalated,
+                    "fields": assessment.escalated_fields,
+                    "tier1_model": assessment.tier1_model,
+                    "tier2_model": assessment.tier2_model,
+                    "agreement": assessment.agreement,
+                },
+                "memory": {
+                    "vendor_key": assessment.vendor_key,
+                    "priors": assessment.memory_prior,
+                },
+                "cost_cents": (
+                    str(assessment.cost_cents) if assessment.cost_cents is not None else None
+                ),
             }
         ),
     )
@@ -294,24 +316,48 @@ def _decimal4(value: float) -> Decimal:
     return Decimal(str(round(value, 4)))
 
 
+def load_memory(
+    context: ExtractionContext, pages: list[str], config: WorkflowConfigModel
+) -> memory.MemoryContext:
+    """Vendor profiles and few-shot examples for this tenant's page text; empty on error."""
+    if context.org_id is None:
+        return memory.EMPTY_CONTEXT
+    try:
+        with SessionLocal() as session:
+            set_org_context(session, context.org_id)
+            return memory.context_for(
+                session,
+                context.org_id,
+                pages,
+                config,
+                document_id=context.document_id,
+                trace_id=context.trace_id,
+            )
+    except Exception:
+        logger.exception("Could not load memory for org %s; extracting without it", context.org_id)
+        return memory.EMPTY_CONTEXT
+
+
 def assess(
-    provider: ExtractionProvider, data: bytes, config: WorkflowConfigModel
-) -> tuple[ExtractionResult, DocumentTypeSpec, Evaluation]:
-    """Extraction plus confidence scoring; runs under the worker's hard timeout."""
-    result = provider.extract(data, config)
-    type_spec = config.document_type(result.document_type) or config.document_types[0]
-    return result, type_spec, evaluate(result.fields, result.pages, type_spec)
-
-
-def complete(
-    claim: Claim,
-    result: ExtractionResult,
-    evaluation: Evaluation,
-    type_spec: DocumentTypeSpec,
     provider: ExtractionProvider,
+    data: bytes,
     config: WorkflowConfigModel,
-) -> None:
+    context: ExtractionContext | None = None,
+    *,
+    tier2: ExtractionProvider | None = None,
+    memory_context: memory.MemoryContext | None = None,
+) -> Assessment:
+    """Parse, extract (tier 1, tier 2 for failing fields) and score; runs under the timeout."""
+    pages = pdf_pages(data)
+    if memory_context is None and context is not None:
+        memory_context = load_memory(context, pages, config)
+    router = ModelRouter(provider, tier2, allow_paid_call=budget.allows_for_org)
+    return router.run(pages, config, context, memory_context)
+
+
+def complete(claim: Claim, assessment: Assessment, config: WorkflowConfigModel) -> None:
     now = datetime.now(UTC)
+    evaluation, type_spec = assessment.evaluation, assessment.type_spec
     with SessionLocal() as session, session.begin():
         set_org_context(session, claim.org_id)
         # Serialize completion with lease reclamation. Reading the lease without
@@ -345,7 +391,7 @@ def complete(
                 )
             )
 
-        run, fields = _store_run(claim, result, provider, evaluation, now)
+        run, fields = _store_run(claim, assessment, assessment.provider_name, now)
         session.add(run)
         session.flush()
         session.add_all(fields)
@@ -410,12 +456,68 @@ def fail(claim: Claim, reason: str, retryable: bool) -> None:
             )
 
 
+def defer_for_budget(claim: Claim, state: budget.BudgetStatus) -> None:
+    """Hand the document back until the next UTC day without spending an attempt."""
+    now = datetime.now(UTC)
+    resume_at = budget.next_window_start(now)
+    with SessionLocal() as session, session.begin():
+        set_org_context(session, claim.org_id)
+        lease = _current_lease(session, claim)
+        if lease is None:
+            return
+        event, document = lease
+        document.status = "queued"
+        document.updated_at = now
+        document.failure_reason = budget.BUDGET_REASON
+        event.available_at = resume_at
+        event.claimed_at = None
+        event.attempts = max(0, event.attempts - 1)
+        session.add(
+            audit(
+                claim.org_id,
+                claim.document_id,
+                "document.budget_deferred",
+                {"reason": budget.BUDGET_REASON, "available_at": resume_at.isoformat()},
+                now,
+            )
+        )
+        budget.audit_exhausted(session, claim.org_id, state, now, "deferred")
+
+
+def budget_gate(
+    claim: Claim, provider: ExtractionProvider
+) -> tuple[ExtractionProvider | None, bool]:
+    """Apply the daily budget to a paid provider: (provider to use, whether to skip tier 2).
+
+    Returns ``(None, True)`` when the document was deferred to the next day.
+    """
+    if not provider.paid:
+        return provider, False
+    now = datetime.now(UTC)
+    with SessionLocal() as session, session.begin():
+        set_org_context(session, claim.org_id)
+        state = budget.status(session, claim.org_id, now)
+        if not state.exhausted:
+            return provider, False
+        if get_settings().llm_budget_fallback == "rules":
+            budget.audit_exhausted(session, claim.org_id, state, now, "rules_fallback")
+            logger.info(
+                "Org %s reached its daily model budget; extracting with the rules provider",
+                claim.org_id,
+            )
+            return RulesInvoiceProvider(), True
+    defer_for_budget(claim, state)
+    logger.info("Org %s reached its daily model budget; document deferred", claim.org_id)
+    return None, True
+
+
 def process_one(
     store: ObjectStore | None = None, document_id: uuid.UUID | None = None
 ) -> bool:
     global _last_org_id
     object_store = store or get_store()
-    provider = get_provider()
+    configured_provider = get_provider()
+    configured_tier2 = get_tier2_provider()
     with SessionLocal() as session:
         org_ids = list(session.scalars(select(Organization.id).order_by(Organization.id)))
     # Starting at the same tenant after every job can starve later tenants if
@@ -445,6 +547,12 @@ def process_one(
         if config is None:
             fail(claim, "Workflow configuration version is missing", retryable=False)
             return True
+        # The budget is read immediately before the paid call, in this claim's own step.
+        provider, skip_tier2 = budget_gate(claim, configured_provider)
+        if provider is None:
+            return True
+        tier2 = None if skip_tier2 else configured_tier2
+        context = ExtractionContext(claim.org_id, claim.document_id, claim.trace_id or None)
         try:
             data = object_store.get(claim.storage_key)
             if (
@@ -455,8 +563,8 @@ def process_one(
                 return True
             # Parsing, extraction and scoring run under a hard wall-clock limit so
             # one hostile PDF or hung provider cannot hold the worker forever.
-            result, type_spec, evaluation = run_with_timeout(
-                partial(assess, provider, data, config),
+            assessment = run_with_timeout(
+                partial(assess, provider, data, config, context, tier2=tier2),
                 get_settings().extraction_timeout_seconds,
             )
         except ExtractionError as exc:
@@ -473,7 +581,7 @@ def process_one(
             logger.exception("Unexpected extraction error for document %s", claim.document_id)
             fail(claim, "Extraction failed after retries", retryable=True)
         else:
-            complete(claim, result, evaluation, type_spec, provider, config)
+            complete(claim, assessment, config)
         return True
     return False
 
@@ -708,6 +816,7 @@ def main() -> None:
     # Invalid provider configuration is a deployment error, not a recoverable
     # document error. Let the process exit so the platform reports it clearly.
     get_provider()
+    get_tier2_provider()
     # Mailbox polling runs on its own daemon thread so a slow IMAP server never holds up
     # extraction or action execution; it dies with the process.
     email_intake.start_poller()

@@ -62,6 +62,8 @@ class PoliciesUpdate(RequestModel):
     policies: dict[str, Literal["auto", "needs_approval", "forbidden"]] | None = Field(
         default=None, max_length=50
     )
+    # Sent as null to remove the budget; omitted to leave it unchanged.
+    daily_llm_spend_cap_cents: int | None = Field(default=None, ge=0, le=100_000_000)
 
 
 class ConnectorCreate(RequestModel):
@@ -309,6 +311,11 @@ def update_policies(payload: PoliciesUpdate, context: SessionContext) -> Policie
             kill_switch=payload.kill_switch,
             shadow_mode=payload.shadow_mode,
             policies=dict(payload.policies) if payload.policies is not None else None,
+            spend_cap=(
+                (payload.daily_llm_spend_cap_cents,)
+                if "daily_llm_spend_cap_cents" in payload.model_fields_set
+                else None
+            ),
         )
     except (SettingsConflict, SettingsInvalid) as exc:
         raise _settings_errors(exc) from exc

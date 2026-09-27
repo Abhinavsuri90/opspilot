@@ -295,7 +295,8 @@ def readyz(session: Annotated[Session, Depends(get_session)]) -> dict[str, str]:
                 "field_corrections AS fc, review_tasks AS rt, org_settings AS os, "
                 "action_policies AS ap, connector_instances AS ci, actions AS ac, "
                 "action_attempts AS aa, document_links AS dl, api_keys AS ak, "
-                "email_inboxes AS ei, email_messages AS em LIMIT 0"
+                "email_inboxes AS ei, email_messages AS em, llm_calls AS lc, "
+                "memory_items AS mi LIMIT 0"
             )
         )
     except SQLAlchemyError as exc:

@@ -1,9 +1,11 @@
 import json
 import uuid
 from collections.abc import Iterable
+from datetime import datetime
+from decimal import Decimal
 from typing import Any, Literal
 
-from sqlalchemy import ScalarSelect, Select, and_, exists, func, select
+from sqlalchemy import Float, ScalarSelect, Select, and_, case, exists, func, literal, select
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session, aliased
 
@@ -16,6 +18,7 @@ from app.action_models import (
     OrgSettings,
 )
 from app.intake_models import ApiKey, DocumentLink, EmailInbox, EmailMessage
+from app.learning_models import Embedding, LlmCall, MemoryItem
 from app.models import (
     AuditEvent,
     Document,
@@ -582,3 +585,116 @@ def count_actions_by_status(
         .group_by(Action.status)
     )
     return {str(status): int(count) for status, count in rows}
+
+
+# Learning loop: the model-call ledger and per-organization memory.
+
+
+def list_document_llm_calls(
+    session: Session, org_id: uuid.UUID, document_id: uuid.UUID
+) -> list[LlmCall]:
+    return list(
+        session.scalars(
+            select(LlmCall)
+            .where(LlmCall.org_id == org_id, LlmCall.document_id == document_id)
+            .order_by(LlmCall.created_at, LlmCall.id)
+        )
+    )
+
+
+def sum_llm_cost_since(session: Session, org_id: uuid.UUID, since: datetime) -> Decimal:
+    """Priced spend of the organization since ``since``; unpriced calls count as zero."""
+    total = session.scalar(
+        select(func.coalesce(func.sum(LlmCall.cost_cents), 0)).where(
+            LlmCall.org_id == org_id, LlmCall.created_at >= since
+        )
+    )
+    return Decimal(str(total or 0)).quantize(Decimal("0.0001"))
+
+
+def count_audit_events_since(
+    session: Session, org_id: uuid.UUID, event_type: str, since: datetime
+) -> int:
+    return int(
+        session.scalar(
+            select(func.count(AuditEvent.id)).where(
+                AuditEvent.org_id == org_id,
+                AuditEvent.event_type == event_type,
+                AuditEvent.created_at >= since,
+            )
+        )
+        or 0
+    )
+
+
+def get_vendor_profile(
+    session: Session, org_id: uuid.UUID, key: str, *, lock: bool = False
+) -> MemoryItem | None:
+    query = select(MemoryItem).where(
+        MemoryItem.org_id == org_id, MemoryItem.kind == "vendor_profile", MemoryItem.key == key
+    )
+    if lock:
+        query = query.with_for_update()
+    return session.scalar(query)
+
+
+def list_vendor_profile_keys(session: Session, org_id: uuid.UUID, limit: int) -> list[str]:
+    return list(
+        session.scalars(
+            select(MemoryItem.key)
+            .where(MemoryItem.org_id == org_id, MemoryItem.kind == "vendor_profile")
+            .order_by(MemoryItem.updated_at.desc(), MemoryItem.id)
+            .limit(limit)
+        )
+    )
+
+
+def list_vendor_profiles(
+    session: Session, org_id: uuid.UUID, keys: Iterable[str]
+) -> list[MemoryItem]:
+    wanted = [key for key in keys if key]
+    if not wanted:
+        return []
+    return list(
+        session.scalars(
+            select(MemoryItem).where(
+                MemoryItem.org_id == org_id,
+                MemoryItem.kind == "vendor_profile",
+                MemoryItem.key.in_(wanted),
+            )
+        )
+    )
+
+
+def list_few_shots(
+    session: Session, org_id: uuid.UUID, key: str | None = None, limit: int = 1000
+) -> list[MemoryItem]:
+    query = select(MemoryItem).where(MemoryItem.org_id == org_id, MemoryItem.kind == "few_shot")
+    if key is not None:
+        query = query.where(MemoryItem.key == key)
+    return list(
+        session.scalars(query.order_by(MemoryItem.updated_at.desc(), MemoryItem.id).limit(limit))
+    )
+
+
+def list_few_shots_by_similarity(
+    session: Session,
+    org_id: uuid.UUID,
+    vendor_key: str | None,
+    query_embedding: list[float] | None,
+    limit: int,
+) -> list[MemoryItem]:
+    """pgvector ordering: same vendor first, then cosine distance, then recency."""
+    query = select(MemoryItem).where(MemoryItem.org_id == org_id, MemoryItem.kind == "few_shot")
+    if vendor_key:
+        query = query.order_by(case((MemoryItem.key == vendor_key, 0), else_=1))
+    if query_embedding is not None:
+        distance = MemoryItem.embedding.op("<=>", return_type=Float)(
+            literal(query_embedding, type_=Embedding())
+        )
+        query = query.order_by(distance.asc().nulls_last())
+    return list(
+        session.scalars(
+            query.order_by(MemoryItem.updated_at.desc(), MemoryItem.id).limit(limit)
+        )
+    )

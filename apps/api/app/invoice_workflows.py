@@ -1,6 +1,7 @@
 """Tenant scoped invoice review, sharing, categories and grounded workspace answers."""
 
 import json
+import logging
 import re
 import uuid
 from datetime import UTC, datetime
@@ -13,10 +14,11 @@ from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import actions_service, review_service
+from app import actions_service, memory, review_service
 from app.access import accessible_document_clause, can_access_document
 from app.auth import Identity, current_session
 from app.models import AuditEvent, Document, ExtractedField, Membership, Organization, User
+from app.repositories import list_field_corrections
 from app.review_service import DocumentDetail, QueueItem, TimelineEntry
 from app.workflow_models import (
     InvoiceCategory,
@@ -28,6 +30,7 @@ from app.workflow_models import (
 
 __all__ = ["accessible_document_clause", "can_access_document", "router"]
 
+logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["Invoice workspace"])
 SessionContext = Annotated[Identity, Depends(current_session)]
 # Explicit supported ISO 4217 codes; a dollar sign is never treated as a currency.
@@ -630,6 +633,7 @@ def review_invoice(
             new_status = "approved"
             # Destinations are proposed by the worker; the outbox row commits with the review.
             actions_service.enqueue_propose_actions(session, org.id, document.id)
+            approval["memory_examples"] = _learn(session, document)
         else:
             new_status = "rejected"
         review_service.complete_review_task(
@@ -665,6 +669,40 @@ def review_invoice(
         document_id=document.id,
     )
     return _finish(session, document, user, membership)
+
+
+def _learn(session: Session, document: Document, edit: tuple[str, str, str] | None = None) -> int:
+    """Feed the vendor profile and few-shot memory from the document's effective values.
+
+    On an edit only that correction becomes an example; on approval every edit made during
+    the review is (re)confirmed. Memory failures are logged, never surfaced to the reviewer.
+    """
+    type_spec = review_service.pinned_type(session, document)
+    effective = review_service.effective_fields(session, document.org_id, document.id)
+    current = {item.field.name: item.current_value for item in effective}
+    evidence = {item.field.name: item.field.evidence for item in effective}
+    if edit is not None:
+        corrections = [edit]
+    else:
+        corrections = [
+            (row.field_name, row.before_value, row.after_value)
+            for row, _ in list_field_corrections(session, document.org_id, document.id)
+            if row.kind == "edit"
+        ]
+    try:
+        return memory.learn_from_review(
+            session,
+            document.org_id,
+            document_id=document.id,
+            trace_id=document.trace_id,
+            type_spec=type_spec,
+            current_values=current,
+            evidence=evidence,
+            corrections=corrections,
+        )
+    except Exception:
+        logger.exception("Memory update failed for document %s", document.id)
+        return 0
 
 
 def _prepare_approval(
@@ -744,6 +782,12 @@ def correct_field(
         },
         document_id=document.id,
     )
+    if payload.action == "edit":
+        _learn(
+            session,
+            document,
+            (correction.field_name, correction.before_value, correction.after_value),
+        )
     session.flush()
     response = review_service.document_detail(session, document, (user.id, membership.role))
     session.commit()
