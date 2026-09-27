@@ -36,9 +36,11 @@ from app.repositories import (
     get_action_by_idempotency_key,
     get_action_policy,
     get_connector_by_name,
+    get_connector_instance,
     get_document_by_id,
     get_org_settings,
     list_action_attempts,
+    list_connector_actions,
     list_document_actions,
 )
 from app.review_service import effective_fields
@@ -49,9 +51,11 @@ logger = logging.getLogger(__name__)
 MAX_ACTION_ATTEMPTS = 5
 KILL_SWITCH_RECHECK_SECONDS = 60
 KILL_SWITCH_AUDIT_INTERVAL = timedelta(hours=1)
+# A worker at its connector-call cap defers the attempt instead of spending budget on it.
+BUSY_RETRY_SECONDS = 30
 DECIDER_ROLES = frozenset({"admin", "reviewer"})
 Decision = Literal["approve", "reject"]
-Gate = Literal["execute", "kill_switch", "forbidden", "shadow"]
+Gate = Literal["execute", "kill_switch", "forbidden", "shadow", "needs_approval"]
 
 
 class ActionNotFound(Exception):
@@ -121,6 +125,8 @@ class ExecutionPlan:
     request: ActionRequest
     idempotency_key: str
     attempt: int
+    # Status before the attempt started, restored when the worker could not even begin it.
+    previous_status: str
 
 
 def _aware(value: datetime) -> datetime:
@@ -561,22 +567,68 @@ def retry_action(
     return action
 
 
-def withdraw_proposed_actions(
+def _undecided(action: Action) -> bool:
+    """Approved automatically and not started: no human has looked at it yet."""
+    return action.status == "approved" and action.decided_by is None and action.attempts == 0
+
+
+def _withdrawable_on_reopen(action: Action) -> bool:
+    return action.status in {"proposed", "retrying", "dead_lettered"} or _undecided(action)
+
+
+def _reject(action: Action, user_id: uuid.UUID, now: datetime, reason: str) -> AuditEvent:
+    previous = action.status
+    action.status = "rejected"
+    action.decided_by = user_id
+    action.decided_at = now
+    action.decision_comment = reason
+    action.next_attempt_at = None
+    action.version += 1
+    return _audit_action(
+        action,
+        "action.rejected",
+        {"withdrawn": True, "reason": reason, "from_status": previous},
+        user_id,
+        now,
+    )
+
+
+def withdraw_open_actions(
     session: Session, document: Document, user_id: uuid.UUID, now: datetime
 ) -> int:
-    """Reject still-proposed actions when their document goes back to review."""
+    """Reject actions built from values that are about to be reviewed again.
+
+    Proposed, retrying and dead-lettered actions, and auto-approved ones that have not
+    started, are superseded. An action a worker is executing right now is left alone; the
+    row lock makes that decision atomic with the worker's own transition.
+    """
     withdrawn = 0
-    for action in list_document_actions(session, document.org_id, document.id):
-        if action.status != "proposed":
+    for action in list_document_actions(session, document.org_id, document.id, lock=True):
+        if not _withdrawable_on_reopen(action):
             continue
-        action.status = "rejected"
-        action.decided_by = user_id
-        action.decided_at = now
-        action.decision_comment = "Withdrawn: document reopened for review"
-        action.version += 1
-        session.add(_audit_action(action, "action.rejected", {"withdrawn": True}, user_id, now))
+        session.add(_reject(action, user_id, now, "Superseded: document reopened"))
         withdrawn += 1
     return withdrawn
+
+
+def supersede_connector_actions(
+    session: Session, org_id: uuid.UUID, connector_id: uuid.UUID, user_id: uuid.UUID, now: datetime
+) -> int:
+    """A changed connector configuration invalidates previews nobody has approved yet."""
+    superseded = 0
+    touched: dict[uuid.UUID, Document] = {}
+    for action in list_connector_actions(session, org_id, connector_id, ("proposed", "approved")):
+        if action.status == "approved" and not _undecided(action):
+            continue
+        session.add(_reject(action, user_id, now, "Superseded: connector changed"))
+        superseded += 1
+        if action.document_id not in touched:
+            document = get_document_by_id(session, org_id, action.document_id)
+            if document is not None:
+                touched[action.document_id] = document
+    for document in touched.values():
+        recompute_document_status(session, document, now + timedelta(microseconds=1))
+    return superseded
 
 
 # Worker-side gate and bookkeeping
@@ -595,7 +647,7 @@ def resolve_connector(
             return None
         action.connector_id = row.id
         return row
-    return session.get(ConnectorInstance, action.connector_id)
+    return get_connector_instance(session, action.org_id, action.connector_id)
 
 
 def gate(session: Session, action: Action, config: WorkflowConfigModel) -> Gate:
@@ -620,9 +672,86 @@ def gate(session: Session, action: Action, config: WorkflowConfigModel) -> Gate:
     )
     if mode == "forbidden":
         return "forbidden"
+    if mode == "needs_approval" and action.decided_by is None:
+        # The policy was tightened after an automatic approval: a human must decide first.
+        return "needs_approval"
     if shadow:
         return "shadow"
     return "execute"
+
+
+def require_approval(
+    session: Session, action: Action, event: OutboxEvent, document: Document, now: datetime
+) -> None:
+    """Send an auto-approved action back to the queue because the policy now needs a human."""
+    action.status = "proposed"
+    action.policy_mode = "needs_approval"
+    action.claimed_at = None
+    action.next_attempt_at = None
+    action.version += 1
+    event.published_at = now
+    session.add(_audit_action(action, "action.needs_approval", None, None, now))
+    recompute_document_status(session, document, now + timedelta(microseconds=1))
+
+
+def defer_attempt(
+    session: Session, action: Action, event: OutboxEvent, plan: ExecutionPlan, now: datetime
+) -> None:
+    """The worker could not start the connector call; give the slot back without cost."""
+    retry_at = now + timedelta(seconds=BUSY_RETRY_SECONDS)
+    action.status = plan.previous_status
+    action.attempts = max(0, action.attempts - 1)
+    action.claimed_at = None
+    action.next_attempt_at = retry_at
+    action.version += 1
+    event.available_at = retry_at
+    event.claimed_at = None
+    event.attempts = 0
+
+
+def abandon_event(
+    session: Session,
+    event: OutboxEvent,
+    action: Action | None,
+    document: Document | None,
+    now: datetime,
+) -> None:
+    """A job that keeps interrupting the worker is published so it cannot poison the queue."""
+    event.published_at = now
+    session.add(
+        document_audit(
+            event.org_id,
+            event.document_id,
+            None,
+            "action.event_abandoned",
+            {
+                "topic": event.topic,
+                "event_id": str(event.id),
+                "attempts": event.attempts,
+                "action_id": str(action.id) if action is not None else None,
+            },
+            now,
+        )
+    )
+    if (
+        action is not None
+        and document is not None
+        and action.status
+        in {
+            "approved",
+            "retrying",
+            "executing",
+        }
+    ):
+        settle(
+            session,
+            action,
+            event,
+            document,
+            "failed",
+            now + timedelta(microseconds=1),
+            error="worker interrupted repeatedly",
+        )
 
 
 def block_for_kill_switch(
@@ -633,6 +762,9 @@ def block_for_kill_switch(
     action.claimed_at = None
     event.available_at = retry_at
     event.claimed_at = None
+    # A deliberate hand-back is not an interruption: the poison-event cap counts only
+    # consecutive claims that never recorded an outcome.
+    event.attempts = 0
     if _should_audit_block(session, action, now):
         session.add(
             _audit_action(
@@ -695,6 +827,7 @@ def settle(
 def start_attempt(
     session: Session, action: Action, connector_row: ConnectorInstance, now: datetime
 ) -> ExecutionPlan:
+    previous_status = action.status
     action.status = "executing"
     action.attempts += 1
     action.claimed_at = now
@@ -707,6 +840,7 @@ def start_attempt(
         request=action_request(action, connector_row.id),
         idempotency_key=action.idempotency_key,
         attempt=action.attempts,
+        previous_status=previous_status,
     )
 
 
@@ -763,6 +897,7 @@ def finish_attempt(
         action.next_attempt_at = retry_at
         event.available_at = retry_at
         event.claimed_at = None
+        event.attempts = 0  # an outcome was recorded; only unfinished claims count
         session.add(
             _audit_action(
                 action,

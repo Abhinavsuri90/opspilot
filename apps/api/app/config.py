@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     # Wall-clock limit for one connector execution; see app/worker.py. It stays under
     # the worker lease so a hung destination cannot be reclaimed mid-call.
     action_execute_timeout_seconds: float = Field(default=30, gt=0, le=120)
+    # Per-process cap on concurrent connector calls, separate from PDF parsing.
+    max_concurrent_connector_calls: int = Field(default=4, ge=1, le=64)
     # Fernet key for connector credentials at rest; see app/connectors/credentials.py.
     # Development derives a local-only key from JWT_SECRET when this is unset.
     connector_encryption_key: str | None = None

@@ -6,7 +6,7 @@ import time
 import pytest
 
 from app import timeouts
-from app.timeouts import OperationTimeout, ParserBusy, run_with_timeout
+from app.timeouts import OperationTimeout, ParserBusy, run_connector_call, run_with_timeout
 
 
 def test_returns_results_and_propagates_errors() -> None:
@@ -44,3 +44,15 @@ def test_busy_when_every_slot_is_taken(monkeypatch: pytest.MonkeyPatch) -> None:
         run_with_timeout(lambda: 1, 1)
     slots.release()
     assert run_with_timeout(lambda: "ok", 1) == "ok"
+
+
+def test_connector_calls_have_their_own_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    exhausted = threading.BoundedSemaphore(1)
+    assert exhausted.acquire(blocking=False)
+    monkeypatch.setattr(timeouts, "_connector_slots", exhausted)
+    with pytest.raises(ParserBusy):
+        run_connector_call(lambda: 1, 1)
+    # Parsing keeps its own slots, and vice versa.
+    assert run_with_timeout(lambda: 2, 1) == 2
+    exhausted.release()
+    assert run_connector_call(lambda: 3, 1) == 3

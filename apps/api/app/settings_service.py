@@ -8,9 +8,11 @@ from typing import Any
 
 import yaml
 from pydantic import BaseModel, ValidationError
+from sqlalchemy import update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import actions_service
 from app.action_models import POLICY_MODES, ConnectorInstance, OrgActionPolicy
 from app.connectors import connector_types, get_connector
 from app.connectors.base import (
@@ -32,7 +34,7 @@ from app.repositories import (
     list_action_policies,
     list_connectors,
 )
-from app.timeouts import OperationTimeout, ParserBusy, run_with_timeout
+from app.timeouts import OperationTimeout, ParserBusy, run_connector_call
 from app.workflow_config import (
     ACTION_TYPE_CONNECTORS,
     InvalidWorkflowConfig,
@@ -325,11 +327,16 @@ def update_connector(
         raise SettingsConflict("Connector changed. Refresh it before saving again.")
     connector = get_connector(row.connector_type)
     changes: dict[str, object] = {}
+    now = datetime.now(UTC)
     if config is not None:
         row.config_json = json.dumps(
             validate_with(connector.config_model, config, "config"), sort_keys=True
         )
         changes["config"] = True
+        # Previews of actions nobody approved yet were built against the old configuration.
+        changes["superseded_actions"] = actions_service.supersede_connector_actions(
+            session, org_id, row.id, user_id, now
+        )
     if credentials is not None:
         row.credentials_encrypted = _validated_credentials(
             row.connector_type, credentials, required=True
@@ -345,7 +352,7 @@ def update_connector(
         row.active = active
         changes["active"] = active
     row.version += 1
-    row.updated_at = datetime.now(UTC)
+    row.updated_at = now
     try:
         session.flush()
     except IntegrityError as exc:
@@ -360,9 +367,16 @@ def update_connector(
 def test_connector(
     session: Session, org_id: uuid.UUID, user_id: uuid.UUID, connector_id: uuid.UUID
 ) -> ConnectionTestResponse:
-    row = get_connector_instance(session, org_id, connector_id, lock=True)
+    """An explicit administrator probe of a destination; it is not an Action.
+
+    It never runs while the kill switch is on, and the connector row is read without a lock
+    so the network call cannot hold a row lock open.
+    """
+    row = get_connector_instance(session, org_id, connector_id)
     if row is None:
         raise ConnectorNotFound("Connector not found")
+    if ensure_org_settings(session, org_id).kill_switch:
+        raise SettingsConflict("Agent paused: turn the kill switch off before testing connectors")
     connector = get_connector(row.connector_type)
     try:
         config = json.loads(row.config_json)
@@ -372,7 +386,7 @@ def test_connector(
         credentials = (
             decrypt_credentials(row.credentials_encrypted) if row.credentials_encrypted else None
         )
-        outcome = run_with_timeout(
+        outcome = run_connector_call(
             partial(connector.test_connection, config, credentials), CONNECTION_TEST_TIMEOUT_SECONDS
         )
     except CredentialsUnavailable as exc:
@@ -384,9 +398,11 @@ def test_connector(
     except Exception as exc:
         outcome = ConnectionTest(False, f"Connection test failed: {type(exc).__name__}")
     now = datetime.now(UTC)
-    row.last_test_at = now
-    row.last_test_ok = outcome.ok
-    row.last_test_message = outcome.message[:300]
+    session.execute(
+        update(ConnectorInstance)
+        .where(ConnectorInstance.org_id == org_id, ConnectorInstance.id == row.id)
+        .values(last_test_at=now, last_test_ok=outcome.ok, last_test_message=outcome.message[:300])
+    )
     _audit(
         session,
         org_id,
@@ -436,7 +452,7 @@ def parse_workflow(config: dict[str, Any] | None, yaml_text: str | None) -> Work
             raise SettingsInvalid("YAML is larger than 64 KB")
         try:
             raw = yaml.safe_load(yaml_text)
-        except yaml.YAMLError as exc:
+        except (yaml.YAMLError, RecursionError) as exc:
             raise SettingsInvalid(f"YAML could not be parsed: {_yaml_problem(exc)}") from exc
     if not isinstance(raw, dict):
         raise SettingsInvalid("Workflow configuration must be a mapping")
@@ -453,7 +469,9 @@ def parse_workflow(config: dict[str, Any] | None, yaml_text: str | None) -> Work
         raise SettingsInvalid("Workflow configuration is invalid", details) from exc
 
 
-def _yaml_problem(exc: yaml.YAMLError) -> str:
+def _yaml_problem(exc: BaseException) -> str:
+    if isinstance(exc, RecursionError):
+        return "document is nested too deeply"
     mark = getattr(exc, "problem_mark", None)
     problem = getattr(exc, "problem", None) or "syntax error"
     if mark is not None:

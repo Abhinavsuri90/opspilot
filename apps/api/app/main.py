@@ -22,9 +22,10 @@ from fastapi import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from psycopg.errors import DeadlockDetected, SerializationFailure
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -178,6 +179,16 @@ async def retry_limit_error_handler(
 @app.exception_handler(SettingsInvalid)
 async def settings_invalid_handler(request: Request, exc: SettingsInvalid) -> JSONResponse:
     return error_response(422, "validation_error", str(exc), exc.details or None)
+
+
+@app.exception_handler(OperationalError)
+async def transient_database_error_handler(request: Request, exc: OperationalError) -> JSONResponse:
+    """Two writers on the same rows (a reviewer and the worker, say) lose nothing by retrying."""
+    if isinstance(exc.orig, DeadlockDetected | SerializationFailure):
+        return error_response(
+            409, "conflict", "Try again", headers={"X-Request-ID": request_id_of(request)}
+        )
+    return await unexpected_error_handler(request, exc)
 
 
 @app.middleware("http")

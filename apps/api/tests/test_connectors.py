@@ -17,6 +17,7 @@ import psycopg
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from psycopg.conninfo import conninfo_to_dict
 
 from app.connectors import connector_type_for, connector_types, get_connector
 from app.connectors import credentials as credentials_module
@@ -89,6 +90,9 @@ def test_credentials_round_trip_and_key_rotation_failure(monkeypatch: pytest.Mon
     token = encrypt_credentials({"secret": "s" * 20, "nested": {"a": 1}})
     assert "s" * 20 not in token
     assert decrypt_credentials(token) == {"secret": "s" * 20, "nested": {"a": 1}}
+    garbage = credentials_module._fernet().encrypt(b"not json").decode("ascii")
+    with pytest.raises(CredentialsUnavailable, match="cannot be decrypted"):
+        decrypt_credentials(garbage)
     assert derive_development_key("one") != derive_development_key("two")
     assert derive_development_key("one") == derive_development_key("one")
     credentials_module._fernet.cache_clear()
@@ -183,6 +187,9 @@ def test_webhook_config_rejects_reserved_headers() -> None:
     for headers in (
         {"X-OpsPilot-Signature": "forged"},
         {"Host": "evil.example"},
+        {"Authorization": "Bearer leaked"},
+        {"Proxy-Authorization": "Basic leaked"},
+        {"Cookie": "session=leaked"},
         {"Bad Name": "x"},
         {"X-Ok": "line\nbreak"},
     ):
@@ -366,7 +373,7 @@ def service_account() -> tuple[dict[str, str], Any]:
         "type": "service_account",
         "client_email": "bot@project.iam.gserviceaccount.com",
         "private_key": pem,
-        "token_uri": "https://oauth2.example.test/token",
+        "token_uri": "https://oauth2.googleapis.com/token",
     }
     return account, private_key.public_key()
 
@@ -381,14 +388,14 @@ class FakeSheets:
 
     def handler(self, incoming: httpx.Request) -> httpx.Response:
         url = str(incoming.url)
-        if url == "https://oauth2.example.test/token":
+        if url == "https://oauth2.googleapis.com/token":
             form = dict(pair.split("=", 1) for pair in incoming.content.decode().split("&"))
             assertion = httpx.QueryParams(f"a={form['assertion']}")["a"]
             claims = jwt.decode(
                 assertion,
                 self.public_key,
                 algorithms=["RS256"],
-                audience="https://oauth2.example.test/token",
+                audience="https://oauth2.googleapis.com/token",
             )
             assert claims["iss"] == "bot@project.iam.gserviceaccount.com"
             assert claims["scope"].endswith("/auth/spreadsheets")
@@ -404,7 +411,7 @@ class FakeSheets:
         if incoming.method == "POST" and url.startswith(
             "https://sheets.googleapis.com/v4/spreadsheets/sheet_1234567890/values/%27Ledger%27%21A1:append"
         ):
-            assert incoming.url.params["valueInputOption"] == "USER_ENTERED"
+            assert incoming.url.params["valueInputOption"] == "RAW"
             self.appended.append(json.loads(incoming.content))
             return httpx.Response(200, json={"updates": {"updatedRange": "Ledger!A2:D2"}})
         return httpx.Response(404, json={"error": "unexpected"})
@@ -475,7 +482,13 @@ def test_postgres_config_and_dsn_validation() -> None:
     normalized = PostgresCredentials.model_validate(
         {"dsn": "postgresql+psycopg://u:p@db.example.test:5432/ledger"}
     )
-    assert normalized.dsn == "postgresql://u:p@db.example.test:5432/ledger"
+    assert conninfo_to_dict(normalized.dsn) == {
+        "host": "db.example.test",
+        "port": "5432",
+        "dbname": "ledger",
+        "user": "u",
+        "password": "p",
+    }
     with pytest.raises(ConnectorConfigError, match="host"):
         validate_with(PostgresCredentials, {"dsn": "dbname=ledger user=u"}, "credentials")
     unreachable = PostgresTableConnector().execute(
@@ -530,7 +543,10 @@ def test_postgres_table_inserts_once_under_scratch_schema() -> None:
             "k2",
         )
         assert (
-            not bad.ok and not bad.retryable and "InvalidTextRepresentation" in bad.response_summary
+            not bad.ok
+            and not bad.retryable
+            and bad.response_summary == "InvalidTextRepresentation (22P02)"
+            and "not-a-number" not in bad.response_summary
         )
         preview = connector.preview(config, request(values, "create_record"))
         assert preview.title == f"INSERT INTO {schema}.ap_ledger"
@@ -551,3 +567,113 @@ def test_registry_exposes_the_phase_3_catalogue() -> None:
         get_connector("browser")
     for name in connector_types():
         assert get_connector(name).describe_capabilities()["action_types"]
+
+
+def test_webhook_pins_the_checked_address_and_keeps_the_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.connectors.network.get_settings", lambda: SimpleNamespace(environment="production")
+    )
+    monkeypatch.setattr(
+        "app.connectors.network.socket.getaddrinfo",
+        fake_resolver({"hooks.example.test": ["93.184.216.34"]}),
+    )
+    secret = "shared-secret-value-1"
+    handler, seen = signed_receiver(secret)
+    result = webhook(handler).execute(
+        {"url": "https://hooks.example.test:8443/in?tenant=1"}, {"secret": secret}, request(), "k"
+    )
+    assert result.ok, result.response_summary
+    sent = seen[0]
+    # The connection goes to the address that passed the check; the name travels in the
+    # Host header and the TLS extension, so verification and SNI still use the real name.
+    assert sent.url.scheme == "https" and sent.url.host == "93.184.216.34"
+    assert sent.url.port == 8443 and sent.url.path == "/in" and sent.url.query == b"tenant=1"
+    assert sent.headers["Host"] == "hooks.example.test"
+    assert sent.extensions["sni_hostname"] == "hooks.example.test"
+    monkeypatch.setattr(
+        "app.connectors.network.socket.getaddrinfo",
+        fake_resolver({"hooks.example.test": ["2606:2800:220:1:248:1893:25c8:1946"]}),
+    )
+    six = check_destination("https://hooks.example.test/in")
+    assert six.pinned_url == "https://[2606:2800:220:1:248:1893:25c8:1946]/in"
+    assert six.hostname == "hooks.example.test"
+    development = check_destination("http://localhost:9/in", allow_private=True)
+    assert development.address is None and development.pinned_url == "http://localhost:9/in"
+    with pytest.raises(DestinationBlocked, match="port"):
+        check_destination("https://hooks.example.test:99999/in")
+
+
+def test_postgres_dsn_guard_outside_development(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "app.connectors.network.get_settings", lambda: SimpleNamespace(environment="production")
+    )
+    monkeypatch.setattr(
+        "app.connectors.network.socket.getaddrinfo",
+        fake_resolver({"db.example.test": ["93.184.216.34"], "postgres": ["10.0.0.5"]}),
+    )
+    for dsn, fragment in (
+        ("host=postgres dbname=ledger user=u password=p", "private"),
+        ("host=/var/run/postgresql dbname=ledger user=u", "socket"),
+        ("hostaddr=10.0.0.5 host=db.example.test dbname=ledger user=u", "hostaddr"),
+        ("passfile=/etc/passwd host=db.example.test dbname=ledger user=u", "passfile"),
+        ("host=db.example.test dbname=ledger user=u sslmode=disable", "sslmode"),
+        ("host=db.example.test sslrootcert=/etc/ssl/x dbname=ledger user=u", "sslrootcert"),
+        ("host=db.example.test options=-csearch_path=x dbname=ledger user=u", "options"),
+        ("host=db.example.test,db2.example.test dbname=ledger user=u", "exactly one host"),
+        ("host=localhost dbname=ledger user=u", "not publicly routable"),
+        ("dbname=ledger user=u", "host"),
+    ):
+        with pytest.raises(ConnectorConfigError, match=fragment):
+            validate_with(PostgresCredentials, {"dsn": dsn}, "credentials")
+    accepted = validate_with(
+        PostgresCredentials,
+        {"dsn": "postgresql://u:p@db.example.test:5432/ledger"},
+        "credentials",
+    )
+    parts = conninfo_to_dict(accepted["dsn"])
+    assert parts["host"] == "db.example.test" and parts["sslmode"] == "require"
+    assert "hostaddr" not in parts
+
+    captured: dict[str, Any] = {}
+
+    def fake_connect(conninfo: str, **kwargs: Any) -> None:
+        captured.update(conninfo_to_dict(conninfo))
+        captured["kwargs"] = kwargs
+        raise psycopg.OperationalError("connection refused")
+
+    monkeypatch.setattr("app.connectors.postgres_table.psycopg.connect", fake_connect)
+    connector = PostgresTableConnector()
+    config = {"schema": "public", "table": "ap_ledger"}
+    result = connector.execute(config, accepted, request(action_type="create_record"), "k")
+    assert not result.ok and result.retryable
+    # Connect to the checked address, keep the name for certificate verification, force TLS.
+    assert captured["hostaddr"] == "93.184.216.34" and captured["host"] == "db.example.test"
+    assert captured["sslmode"] == "require" and captured["kwargs"]["connect_timeout"] == 5
+    monkeypatch.setattr(
+        "app.connectors.network.socket.getaddrinfo",
+        fake_resolver({"db.example.test": ["10.0.0.9"]}),
+    )
+    captured.clear()
+    flipped = connector.execute(config, accepted, request(action_type="create_record"), "k")
+    assert not flipped.ok and not flipped.retryable and "private" in flipped.response_summary
+    assert captured == {}
+    assert not connector.test_connection(config, accepted).ok
+
+
+def test_google_sheets_rejects_foreign_token_endpoints_and_partial_keys() -> None:
+    account, _ = service_account()
+    for changed, fragment in (
+        ({"token_uri": "https://oauth2.example.test/token"}, "token_uri"),
+        ({"token_uri": "http://oauth2.googleapis.com/token"}, "token_uri"),
+        ({"client_email": None}, "client_email"),
+        ({"private_key": None}, "private_key"),
+    ):
+        broken = {key: value for key, value in (account | changed).items() if value is not None}
+        with pytest.raises(ConnectorConfigError, match=fragment):
+            validate_with(
+                GoogleSheetsCredentials, {"service_account_json": json.dumps(broken)}, "credentials"
+            )
+    without_uri = {key: value for key, value in account.items() if key != "token_uri"}
+    GoogleSheetsCredentials.model_validate({"service_account_json": json.dumps(without_uri)})

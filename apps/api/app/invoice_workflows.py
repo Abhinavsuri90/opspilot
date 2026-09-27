@@ -617,7 +617,7 @@ def review_invoice(
         new_status = "needs_review"
         review_service.open_review_task(session, org.id, document.id, config.review_sla_minutes)
         # Proposals built from the old values must not be approved later by mistake.
-        actions_service.withdraw_proposed_actions(session, document, user.id, datetime.now(UTC))
+        actions_service.withdraw_open_actions(session, document, user.id, datetime.now(UTC))
         if metadata.verified_source == "derived":
             # Derived money reflects the fields at approval time; a reopened review
             # may change them, so the next approval derives it again.

@@ -22,6 +22,7 @@ from app.models import (
     ExtractionRun,
     Membership,
     Organization,
+    OutboxEvent,
     User,
     WorkflowConfig,
 )
@@ -91,11 +92,21 @@ def get_document_by_hash(session: Session, org_id: uuid.UUID, digest: str) -> Do
 
 
 def get_document_by_id(
-    session: Session, org_id: uuid.UUID, document_id: uuid.UUID
+    session: Session, org_id: uuid.UUID, document_id: uuid.UUID, *, lock: bool = False
 ) -> Document | None:
-    return session.scalar(
-        select(Document).where(Document.org_id == org_id, Document.id == document_id)
-    )
+    query = select(Document).where(Document.org_id == org_id, Document.id == document_id)
+    if lock:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    return session.scalar(query)
+
+
+def get_outbox_event(
+    session: Session, org_id: uuid.UUID, event_id: uuid.UUID, *, lock: bool = False
+) -> OutboxEvent | None:
+    query = select(OutboxEvent).where(OutboxEvent.org_id == org_id, OutboxEvent.id == event_id)
+    if lock:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    return session.scalar(query)
 
 
 def list_document_fields(
@@ -349,13 +360,33 @@ def get_action_by_idempotency_key(
 
 
 def list_document_actions(
-    session: Session, org_id: uuid.UUID, document_id: uuid.UUID
+    session: Session, org_id: uuid.UUID, document_id: uuid.UUID, *, lock: bool = False
 ) -> list[Action]:
+    query = (
+        select(Action)
+        .where(Action.org_id == org_id, Action.document_id == document_id)
+        .order_by(Action.proposed_at, Action.id)
+    )
+    if lock:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    return list(session.scalars(query))
+
+
+def list_connector_actions(
+    session: Session, org_id: uuid.UUID, connector_id: uuid.UUID, statuses: Iterable[str]
+) -> list[Action]:
+    """Actions bound to one connector in the given statuses, locked for a state change."""
     return list(
         session.scalars(
             select(Action)
-            .where(Action.org_id == org_id, Action.document_id == document_id)
+            .where(
+                Action.org_id == org_id,
+                Action.connector_id == connector_id,
+                Action.status.in_(list(statuses)),
+            )
             .order_by(Action.proposed_at, Action.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
     )
 

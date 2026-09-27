@@ -8,9 +8,12 @@ private destinations so the compose stack can post to local receivers.
 
 import ipaddress
 import socket
+from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from app.config import get_settings
+
+Address = ipaddress.IPv4Address | ipaddress.IPv6Address
 
 # Beyond ipaddress' own private/loopback/link-local classification.
 _BLOCKED_NETWORKS = (
@@ -31,7 +34,7 @@ def private_destinations_allowed() -> bool:
     return get_settings().environment == "development"
 
 
-def address_is_public(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+def address_is_public(address: Address) -> bool:
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
         address = address.ipv4_mapped
     if (
@@ -47,7 +50,7 @@ def address_is_public(address: ipaddress.IPv4Address | ipaddress.IPv6Address) ->
     return not any(address in network for network in _BLOCKED_NETWORKS)
 
 
-def resolve_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+def resolve_addresses(host: str) -> list[Address]:
     try:
         literal = ipaddress.ip_address(host.strip("[]"))
     except ValueError:
@@ -69,11 +72,54 @@ def resolve_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6A
     return addresses
 
 
-def check_destination(url: str, *, allow_private: bool | None = None) -> None:
+def check_host(host: str, *, allow_private: bool | None = None) -> Address | None:
+    """Validate a destination host name and return the address the caller must connect to.
+
+    Returns ``None`` when private destinations are allowed (development), meaning "connect by
+    name". Otherwise every resolved address must be public and the first one is returned so the
+    caller can pin the connection to it; resolving again at connect time would reopen the
+    DNS-rebinding window between check and use.
+    """
+    permissive = private_destinations_allowed() if allow_private is None else allow_private
+    if permissive:
+        return None
+    lowered = host.lower().strip("[]")
+    if not lowered:
+        raise DestinationBlocked("Destination host is empty")
+    if lowered == "localhost" or lowered.endswith((".localhost", ".internal", ".local")):
+        raise DestinationBlocked("Destination host is not publicly routable")
+    addresses = resolve_addresses(lowered)
+    for address in addresses:
+        if not address_is_public(address):
+            raise DestinationBlocked("Destination resolves to a private or reserved address")
+    return addresses[0]
+
+
+@dataclass(frozen=True)
+class Destination:
+    """A checked webhook URL plus the address to send to (``None`` when connecting by name)."""
+
+    url: str
+    hostname: str
+    address: Address | None
+
+    @property
+    def pinned_url(self) -> str:
+        """The URL rewritten to the validated address; the Host header carries the name."""
+        if self.address is None:
+            return self.url
+        parsed = urlparse(self.url)
+        literal = f"[{self.address}]" if self.address.version == 6 else str(self.address)
+        port = f":{parsed.port}" if parsed.port is not None else ""
+        query = f"?{parsed.query}" if parsed.query else ""
+        return f"{parsed.scheme}://{literal}{port}{parsed.path or '/'}{query}"
+
+
+def check_destination(url: str, *, allow_private: bool | None = None) -> Destination:
     """Raise :class:`DestinationBlocked` unless ``url`` points at a public HTTPS endpoint.
 
     ``allow_private`` defaults to the environment rule (development only). When private
-    destinations are allowed the scheme may also be plain HTTP.
+    destinations are allowed the scheme may also be plain HTTP and no address is pinned.
     """
     permissive = private_destinations_allowed() if allow_private is None else allow_private
     parsed = urlparse(url)
@@ -83,11 +129,9 @@ def check_destination(url: str, *, allow_private: bool | None = None) -> None:
         raise DestinationBlocked("Destination URL must not embed credentials")
     if parsed.scheme != "https" and not permissive:
         raise DestinationBlocked("Destination must use https")
-    if permissive:
-        return
-    host = parsed.hostname.lower()
-    if host == "localhost" or host.endswith((".localhost", ".internal", ".local")):
-        raise DestinationBlocked("Destination host is not publicly routable")
-    for address in resolve_addresses(host):
-        if not address_is_public(address):
-            raise DestinationBlocked("Destination resolves to a private or reserved address")
+    try:
+        _ = parsed.port  # raises ValueError for an out-of-range port
+    except ValueError as exc:
+        raise DestinationBlocked("Destination port is invalid") from exc
+    hostname = parsed.hostname.lower()
+    return Destination(url, hostname, check_host(hostname, allow_private=permissive))

@@ -12,16 +12,23 @@ from typing import Any
 
 import psycopg
 from psycopg import sql
-from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.connectors.base import ActionRequest, ConnectionTest, Diff, ExecutionResult
+from app.connectors.network import DestinationBlocked, check_host, private_destinations_allowed
 
 logger = logging.getLogger(__name__)
 IDENTIFIER_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,62}$"
 ACTION_ID_COLUMN = "opspilot_action_id"
 CONNECT_TIMEOUT_SECONDS = 5
 STATEMENT_TIMEOUT_MS = 10_000
+# Everything else libpq understands (hostaddr, passfile, service, sslcert, sslkey,
+# sslrootcert, options, ...) can read local files or steer the connection, so it is refused.
+ALLOWED_DSN_KEYS = frozenset(
+    {"host", "port", "dbname", "user", "password", "sslmode", "connect_timeout"}
+)
+ALLOWED_SSL_MODES = frozenset({"require", "verify-ca", "verify-full"})
 
 
 class PostgresTableConfig(BaseModel):
@@ -45,14 +52,10 @@ class PostgresCredentials(BaseModel):
     @field_validator("dsn")
     @classmethod
     def parse_dsn(cls, value: str) -> str:
-        value = normalize_dsn(value)
         try:
-            parts = conninfo_to_dict(value)
-        except psycopg.ProgrammingError as exc:
-            raise ValueError("dsn is not a valid Postgres connection string") from exc
-        if not parts.get("host") and not parts.get("hostaddr"):
-            raise ValueError("dsn must name a host")
-        return value
+            return make_conninfo(**validated_dsn_parts(value))
+        except DestinationBlocked as exc:
+            raise ValueError(str(exc)) from exc
 
 
 def normalize_dsn(value: str) -> str:
@@ -60,13 +63,61 @@ def normalize_dsn(value: str) -> str:
     return re.sub(r"^postgres(ql)?\+psycopg(2)?://", "postgresql://", value.strip())
 
 
+def validated_dsn_parts(value: str) -> dict[str, str]:
+    """Allow-listed connection parameters with a checked TCP host.
+
+    Raises :class:`DestinationBlocked` for socket hosts, refused keys, and (outside
+    development) hosts that resolve to private or reserved addresses.
+    """
+    try:
+        raw = conninfo_to_dict(normalize_dsn(value))
+    except psycopg.ProgrammingError as exc:
+        raise DestinationBlocked("dsn is not a valid Postgres connection string") from exc
+    parts = {str(key): str(item) for key, item in raw.items() if item is not None}
+    refused = sorted(set(parts) - ALLOWED_DSN_KEYS)
+    if refused:
+        raise DestinationBlocked(f"dsn parameter is not allowed: {refused[0]}")
+    host = parts.get("host", "")
+    if not host or "," in host:
+        raise DestinationBlocked("dsn must name exactly one host")
+    if host.startswith(("/", "@")):
+        raise DestinationBlocked("dsn must use a TCP host, not a socket directory")
+    if "port" in parts and not parts["port"].isdigit():
+        raise DestinationBlocked("dsn port must be a number")
+    if not private_destinations_allowed():
+        parts.setdefault("sslmode", "require")
+        if parts["sslmode"] not in ALLOWED_SSL_MODES:
+            raise DestinationBlocked("dsn sslmode must be require, verify-ca or verify-full")
+    check_host(host)
+    return parts
+
+
 def _connect(dsn: str) -> psycopg.Connection[Any]:
+    """Connect to the checked address; ``host`` stays set for certificate verification."""
+    parts = validated_dsn_parts(dsn)
+    address = check_host(parts["host"])
+    if address is not None:
+        parts["hostaddr"] = str(address)
     return psycopg.connect(
-        dsn,
+        make_conninfo(**parts),
         connect_timeout=CONNECT_TIMEOUT_SECONDS,
         application_name="opspilot-connector",
         options=f"-c statement_timeout={STATEMENT_TIMEOUT_MS}",
     )
+
+
+def describe_failure(exc: psycopg.Error) -> str:
+    """Class, SQLSTATE and the offending constraint or column; never the server message,
+    which may echo a payload value."""
+    text = f"{type(exc).__name__} ({exc.sqlstate or 'no sqlstate'})"
+    diag = getattr(exc, "diag", None)
+    constraint = getattr(diag, "constraint_name", None)
+    column = getattr(diag, "column_name", None)
+    if constraint:
+        text += f" constraint={constraint}"
+    if column:
+        text += f" column={column}"
+    return text[:500]
 
 
 class PostgresTableConnector:
@@ -97,6 +148,8 @@ class PostgresTableConnector:
                     (schema, table),
                 )
                 columns = {str(row[0]) for row in cursor.fetchall()}
+        except DestinationBlocked as exc:
+            return ConnectionTest(False, str(exc))
         except psycopg.Error as exc:
             return ConnectionTest(False, f"Connection failed: {type(exc).__name__}")
         if not columns:
@@ -144,15 +197,14 @@ class PostgresTableConnector:
             with _connect(dsn) as connection, connection.cursor() as cursor:
                 cursor.execute(statement, parameters)
                 inserted = cursor.rowcount
+        except DestinationBlocked as exc:
+            return ExecutionResult(False, None, str(exc), retryable=False)
         except psycopg.OperationalError as exc:
             return ExecutionResult(
                 False, None, f"Connection failed: {type(exc).__name__}", retryable=True
             )
         except psycopg.Error as exc:
-            primary = getattr(exc.diag, "message_primary", None) or str(exc)
-            return ExecutionResult(
-                False, None, f"{type(exc).__name__}: {primary}"[:500], retryable=False
-            )
+            return ExecutionResult(False, None, describe_failure(exc), retryable=False)
         if inserted == 0:
             return ExecutionResult(
                 True, str(request.action_id), "Row already present", retryable=False, duplicate=True

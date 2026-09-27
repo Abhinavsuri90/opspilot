@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { formatDateTime } from "@/lib/format";
 import type { components } from "@/lib/schema";
 
@@ -9,7 +10,9 @@ const kinds: Record<TimelineEntry["kind"], { label: string; glyph: string; class
   correction: { label: "Correction", glyph: "✎", className: "bg-violet-100 text-violet-800" },
   review: { label: "Review", glyph: "✓", className: "bg-emerald-100 text-emerald-800" },
   comment: { label: "Comment", glyph: "❝", className: "bg-amber-100 text-amber-800" },
+  action: { label: "Action", glyph: "⇢", className: "bg-fuchsia-100 text-fuchsia-800" },
 };
+const unknownKind = { label: "Event", glyph: "•", className: "bg-slate-100 text-slate-600" };
 
 function formatValue(value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";
@@ -22,17 +25,20 @@ type TimelineProps = {
   isLoading: boolean;
   isError: boolean;
   refetch: () => unknown;
+  /** When known, action entries link to the Actions page filtered to this document. */
+  documentId?: string;
 };
 
 /** Everything that happened to a document, oldest first, with the raw detail one click away. */
-export function Timeline({ entries, isLoading, isError, refetch }: TimelineProps) {
+export function Timeline({ entries, isLoading, isError, refetch, documentId }: TimelineProps) {
   return <section aria-label="Document timeline">
     {isLoading && <p role="status" className="text-sm text-slate-500">Loading timeline…</p>}
     {isError && <p role="alert" className="text-sm text-rose-700">Could not load the timeline. <button type="button" className="underline" onClick={() => refetch()}>Try again</button></p>}
     {entries && entries.length === 0 && <p className="text-sm text-slate-500">Nothing has happened to this document yet.</p>}
     {entries && entries.length > 0 && <ol className="relative space-y-4 border-l-2 border-slate-200 pl-6">
       {entries.map((entry, index) => {
-        const kind = kinds[entry.kind];
+        // The API may add kinds before this build learns their look; they still render.
+        const kind = (kinds as Record<string, typeof unknownKind>)[entry.kind] ?? unknownKind;
         const detail = Object.entries(entry.detail).filter(([key]) => key !== "document_id");
         return <li key={`${entry.at}-${entry.event_type}-${index}`} className="relative text-sm" data-kind={entry.kind}>
           <span aria-hidden="true" className={`absolute -left-[31px] grid h-6 w-6 place-items-center rounded-full text-xs font-bold ring-4 ring-white ${kind.className}`}>{kind.glyph}</span>
@@ -42,6 +48,7 @@ export function Timeline({ entries, isLoading, isError, refetch }: TimelineProps
             {entry.actor_email && <span className="break-all text-xs text-slate-500">· {entry.actor_email}</span>}
           </div>
           <p className="mt-1 font-semibold text-slate-900">{entry.summary}</p>
+          {entry.kind === "action" && documentId && <Link href={`/actions?document=${encodeURIComponent(documentId)}`} className="mt-1 inline-block text-xs font-semibold text-[#11627a] hover:underline">View in Actions →</Link>}
           {detail.length > 0 && <details className="mt-1">
             <summary className="cursor-pointer text-xs font-semibold text-slate-600">Details</summary>
             <dl className="mt-2 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-[minmax(0,10rem)_minmax(0,1fr)]">

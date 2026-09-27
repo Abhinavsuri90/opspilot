@@ -28,7 +28,9 @@ from app.connectors.base import (
 
 logger = logging.getLogger(__name__)
 SHEETS_API = "https://sheets.googleapis.com/v4/spreadsheets"
-DEFAULT_TOKEN_URI = "https://oauth2.googleapis.com/token"
+# The only token endpoint a service-account key may name; anything else would make the worker
+# post a signed assertion to an attacker-chosen URL.
+TOKEN_URI = "https://oauth2.googleapis.com/token"
 SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 KEY_COLUMN = "opspilot_idempotency_key"
 REQUEST_TIMEOUT_SECONDS = 10.0
@@ -63,18 +65,18 @@ def parse_service_account(raw: str) -> dict[str, str]:
         raise ValueError("service_account_json must be a JSON object")
     email = decoded.get("client_email")
     private_key = decoded.get("private_key")
-    token_uri = decoded.get("token_uri", DEFAULT_TOKEN_URI)
+    token_uri = decoded.get("token_uri", TOKEN_URI)
     if not isinstance(email, str) or "@" not in email:
         raise ValueError("service_account_json lacks client_email")
     if not isinstance(private_key, str) or "PRIVATE KEY" not in private_key:
         raise ValueError("service_account_json lacks a PEM private_key")
-    if not isinstance(token_uri, str) or not token_uri.startswith("https://"):
-        raise ValueError("service_account_json token_uri must be https")
+    if token_uri != TOKEN_URI:
+        raise ValueError(f"service_account_json token_uri must be {TOKEN_URI}")
     try:
         serialization.load_pem_private_key(private_key.encode("utf-8"), password=None)
     except (ValueError, TypeError) as exc:
         raise ValueError("service_account_json private_key is not a readable PEM key") from exc
-    return {"client_email": email, "private_key": private_key, "token_uri": token_uri}
+    return {"client_email": email, "private_key": private_key, "token_uri": TOKEN_URI}
 
 
 class SheetsError(Exception):
@@ -104,7 +106,8 @@ class GoogleSheetsConnector:
         return {
             "action_types": ["append_row"],
             "authentication": "service account JWT (RS256) exchanged for an OAuth token",
-            "idempotency": f"column A holds {KEY_COLUMN}; existing keys are skipped",
+            "idempotency": f"column A holds {KEY_COLUMN}; existing keys are skipped "
+            "(check-then-act: two workers appending the same key at once can both write)",
             "requirement": "share the spreadsheet with the service account email as an editor",
         }
 
@@ -244,7 +247,8 @@ class GoogleSheetsConnector:
                     client,
                     "POST",
                     f"{SHEETS_API}/{spreadsheet}/values/{a1_range(sheet, 'A1')}:append",
-                    params={"valueInputOption": "USER_ENTERED", "insertDataOption": "INSERT_ROWS"},
+                    # RAW keeps every value literal; USER_ENTERED would parse formulas.
+                    params={"valueInputOption": "RAW", "insertDataOption": "INSERT_ROWS"},
                     headers=headers,
                     json={"values": rows},
                     what="append",

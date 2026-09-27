@@ -43,11 +43,11 @@ def encrypt_credentials(credentials: dict[str, Any]) -> str:
 def decrypt_credentials(token: str) -> dict[str, Any]:
     try:
         payload = _fernet().decrypt(token.encode("ascii"))
+        decoded = json.loads(payload.decode("utf-8"))
     except (InvalidToken, ValueError) as exc:
         raise CredentialsUnavailable(
             "Stored credentials cannot be decrypted with the configured key"
         ) from exc
-    decoded = json.loads(payload.decode("utf-8"))
     if not isinstance(decoded, dict):
         raise CredentialsUnavailable("Stored credentials are malformed")
     return {str(key): value for key, value in decoded.items()}

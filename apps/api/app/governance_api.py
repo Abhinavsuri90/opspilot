@@ -197,9 +197,11 @@ def retry_action(
 
 
 def _export_connector(context: SessionContext, connector_id: uuid.UUID) -> Any:
+    # Export files are organization-wide sinks and may hold rows from restricted documents,
+    # so only administrators (who can already read every document) may download them.
     session, _, org, membership = context
-    if membership.role not in {"admin", "reviewer"}:
-        raise HTTPException(403, "Only a reviewer or administrator can download exports")
+    if membership.role != "admin":
+        raise HTTPException(403, "Administrator access required")
     connector = get_connector_instance(session, org.id, connector_id)
     if connector is None or connector.connector_type != "csv_export":
         raise HTTPException(404, "Export connector not found")
@@ -353,7 +355,7 @@ def test_connector(connector_id: uuid.UUID, context: SessionContext) -> Connecti
     session, user, org, _ = context
     try:
         result = settings_service.test_connector(session, org.id, user.id, connector_id)
-    except ConnectorNotFound as exc:
+    except (ConnectorNotFound, SettingsConflict) as exc:
         raise _settings_errors(exc) from exc
     session.commit()
     return result

@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from scripts.generate_demo_invoice import invoice_pdf
 from sqlalchemy import select, text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import actions_service
@@ -287,7 +287,7 @@ def test_auto_approved_document_flows_through_actions_to_completed(
             assert config == {"url": "http://localhost:9/hook"}
             assert credentials == {"secret": "shared-secret-value-1"}
             assert request.values["vendor"] == "Northwind Traders"
-            assert key == rows["hook"]["id"] and False or len(key) == 64
+            assert len(key) == 64
             hook = client.get(f"/v1/actions/{rows['hook']['id']}").json()
             assert hook["status"] == "succeeded" and hook["attempts"] == 1
             assert hook["result"]["external_id"] == "evt_1"
@@ -339,12 +339,16 @@ class PausingSession(Session):
     gate = threading.Event()
     proceed = threading.Event()
 
-    def get(self, entity: Any, ident: Any, **kwargs: Any) -> Any:
-        row = super().get(entity, ident, **kwargs)
-        if threading.current_thread().name == "executor" and entity is Action:
+    def scalar(self, statement: Any, *args: Any, **kwargs: Any) -> Any:
+        row = super().scalar(statement, *args, **kwargs)
+        if (
+            threading.current_thread().name == "executor"
+            and isinstance(row, Action)
+            and not PausingSession.gate.is_set()
+        ):
             PausingSession.gate.set()
             if not PausingSession.proceed.wait(timeout=10):
-                raise TimeoutError("kill switch test gate timed out")
+                raise TimeoutError("worker test gate timed out")
         return row
 
 
@@ -645,3 +649,209 @@ def test_governance_tables_enforce_tenant_rls_and_grants(make_tenant: TenantFact
             with pytest.raises(DBAPIError):
                 session.execute(text(statement), {"org": first.org_id})
             session.rollback()
+
+
+def test_policy_tightened_after_auto_approval_requires_a_human(
+    monkeypatch: pytest.MonkeyPatch, make_tenant: TenantFactory
+) -> None:
+    tenant = make_tenant(worker_config())
+    add_connectors(tenant)
+    fake, store = FakeWebhook(), MemoryStore()
+    patch_registry(monkeypatch, fake, store)
+    document_id = seed_approved_document(tenant)
+    assert process_one(store, document_id) is True  # propose: hook auto-approved
+    assert actions_of(tenant, document_id)["hook"].status == "approved"
+    with TestClient(app) as client:
+        tenant_login(client, tenant, "admin")
+        tightened = client.post(
+            "/v1/settings/policies",
+            json={"version": 0, "policies": {"post_webhook": "needs_approval"}},
+        )
+        assert tightened.status_code == 200, tightened.text
+    assert process_one(store, document_id) is True
+    hook = actions_of(tenant, document_id)["hook"]
+    assert hook.status == "proposed" and hook.policy_mode == "needs_approval"
+    assert hook.attempts == 0 and fake.calls == []
+    assert "action.needs_approval" in audit_types(tenant, document_id)
+    assert document_status(tenant, document_id) == "actions_pending"
+    assert process_one(store, document_id) is False
+    with TestClient(app) as client:
+        tenant_login(client, tenant, "reviewer")
+        approved = client.post(
+            f"/v1/actions/{hook.id}/decision", json={"version": hook.version, "decision": "approve"}
+        )
+        assert approved.status_code == 200, approved.text
+    assert process_one(store, document_id) is True
+    assert actions_of(tenant, document_id)["hook"].status == "succeeded"
+    assert len(fake.calls) == 1
+
+
+def test_busy_worker_defers_the_attempt_without_spending_budget(
+    monkeypatch: pytest.MonkeyPatch, make_tenant: TenantFactory
+) -> None:
+    tenant = make_tenant(worker_config())
+    add_connectors(tenant)
+    fake, store = FakeWebhook(), MemoryStore()
+    patch_registry(monkeypatch, fake, store)
+    document_id = seed_approved_document(tenant)
+    assert process_one(store, document_id) is True  # propose
+    exhausted = threading.BoundedSemaphore(1)
+    assert exhausted.acquire(blocking=False)
+    monkeypatch.setattr("app.timeouts._connector_slots", exhausted)
+    before = datetime.now(UTC)
+    assert process_one(store, document_id) is True
+    hook = actions_of(tenant, document_id)["hook"]
+    assert hook.status == "approved" and hook.attempts == 0 and fake.calls == []
+    assert hook.next_attempt_at is not None
+    assert hook.next_attempt_at >= before + timedelta(seconds=25)
+    with SessionLocal() as session:
+        set_org_context(session, tenant.org_id)
+        assert (
+            session.scalars(select(ActionAttempt).where(ActionAttempt.action_id == hook.id)).all()
+            == []
+        )
+    assert process_one(store, document_id) is False  # deferred, not claimable yet
+    exhausted.release()
+    release_action(tenant, hook.id)
+    assert process_one(store, document_id) is True
+    hook = actions_of(tenant, document_id)["hook"]
+    assert hook.status == "succeeded" and hook.attempts == 1 and len(fake.calls) == 1
+    assert audit_types(tenant, document_id).count("action.retry_scheduled") == 0
+
+
+def test_poison_events_are_abandoned_after_three_claims(
+    monkeypatch: pytest.MonkeyPatch, make_tenant: TenantFactory
+) -> None:
+    tenant = make_tenant(worker_config())
+    add_connectors(tenant)
+    fake, store = FakeWebhook(), MemoryStore()
+    patch_registry(monkeypatch, fake, store)
+    document_id = seed_approved_document(tenant)
+    assert process_one(store, document_id) is True  # propose
+    with Session(owner_engine()) as session, session.begin():
+        for event in session.scalars(
+            select(OutboxEvent).where(
+                OutboxEvent.document_id == document_id, OutboxEvent.published_at.is_(None)
+            )
+        ):
+            event.attempts = 3  # claimed three times without finishing
+            event.claimed_at = None
+    assert process_one(store, document_id) is True
+    hook = actions_of(tenant, document_id)["hook"]
+    assert hook.status == "failed" and hook.error == "worker interrupted repeatedly"
+    assert fake.calls == []
+    assert "action.event_abandoned" in audit_types(tenant, document_id)
+    assert process_one(store, document_id) is False
+    other = seed_approved_document(tenant, "poison-propose.pdf")
+    with Session(owner_engine()) as session, session.begin():
+        for event in session.scalars(select(OutboxEvent).where(OutboxEvent.document_id == other)):
+            event.attempts = 3
+    assert process_one(store, other) is True
+    assert actions_of(tenant, other) == {}
+    assert "action.event_abandoned" in audit_types(tenant, other)
+    assert process_one(store, other) is False
+
+
+def test_outcome_recording_retries_transient_database_errors(
+    monkeypatch: pytest.MonkeyPatch, make_tenant: TenantFactory
+) -> None:
+    tenant = make_tenant(worker_config())
+    add_connectors(tenant)
+    fake, store = FakeWebhook(), MemoryStore()
+    patch_registry(monkeypatch, fake, store)
+    real = actions_service.finish_attempt
+    calls: list[int] = []
+
+    def flaky(*args: Any, **kwargs: Any) -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            raise OperationalError("UPDATE actions", {}, Exception("connection reset"))
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(actions_service, "finish_attempt", flaky)
+    monkeypatch.setattr("app.worker.FINISH_RETRY_DELAY_SECONDS", 0)
+    document_id = seed_approved_document(tenant)
+    assert process_one(store, document_id) is True  # propose
+    assert process_one(store, document_id) is True  # execute, first recording fails
+    hook = actions_of(tenant, document_id)["hook"]
+    assert hook.status == "succeeded" and hook.attempts == 1
+    assert len(fake.calls) == 1 and len(calls) == 2
+    with SessionLocal() as session:
+        set_org_context(session, tenant.org_id)
+        attempts = session.scalars(
+            select(ActionAttempt).where(ActionAttempt.action_id == hook.id)
+        ).all()
+        assert len(attempts) == 1 and attempts[0].ok is True
+
+
+def test_second_worker_skips_an_event_another_worker_holds(
+    monkeypatch: pytest.MonkeyPatch, make_tenant: TenantFactory
+) -> None:
+    tenant = make_tenant(worker_config())
+    add_connectors(tenant)
+    fake, store = FakeWebhook(), MemoryStore()
+    patch_registry(monkeypatch, fake, store)
+    document_id = seed_approved_document(tenant)
+    assert process_one(store, document_id) is True  # propose
+    PausingSession.gate.clear()
+    PausingSession.proceed.clear()
+    monkeypatch.setattr(
+        "app.worker.SessionLocal",
+        sessionmaker(bind=engine, class_=PausingSession, expire_on_commit=False),
+    )
+    outcomes: list[bool] = []
+    errors: list[Exception] = []
+
+    def run() -> None:
+        try:
+            outcomes.append(process_one(store, document_id))
+        except Exception as exc:  # pragma: no cover - surfaced by the assertion below
+            errors.append(exc)
+
+    thread = threading.Thread(target=run, name="executor")
+    thread.start()
+    try:
+        assert PausingSession.gate.wait(timeout=10)
+        # The first worker holds the outbox row; SKIP LOCKED makes the second find nothing.
+        assert process_one(store, document_id) is False
+        assert fake.calls == []
+    finally:
+        PausingSession.proceed.set()
+        thread.join(timeout=15)
+    assert not thread.is_alive() and not errors and outcomes == [True]
+    assert len(fake.calls) == 1
+    assert actions_of(tenant, document_id)["hook"].status == "succeeded"
+    assert process_one(store, document_id) is False
+
+
+def test_action_attempts_cannot_reference_another_tenants_action(
+    make_tenant: TenantFactory,
+) -> None:
+    first, second = make_tenant(), make_tenant()
+    document_id = seed_approved_document(first)
+    action_id = uuid.uuid4()
+    with Session(owner_engine()) as session, session.begin():
+        session.add(
+            Action(
+                id=action_id,
+                org_id=first.org_id,
+                document_id=document_id,
+                action_type="post_webhook",
+                destination="hook",
+                payload_json="{}",
+                preview_json="{}",
+                status="proposed",
+                policy_mode="needs_approval",
+                idempotency_key=uuid.uuid4().hex,
+                attempts=0,
+                version=0,
+            )
+        )
+    with Session(owner_engine()) as session:
+        session.add(ActionAttempt(org_id=second.org_id, action_id=action_id, attempt=1, ok=False))
+        with pytest.raises(IntegrityError):
+            session.flush()
+        session.rollback()
+        session.add(ActionAttempt(org_id=first.org_id, action_id=action_id, attempt=1, ok=False))
+        session.flush()
+        session.rollback()

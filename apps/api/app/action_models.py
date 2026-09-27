@@ -116,6 +116,7 @@ class Action(Base):
             ["org_id", "connector_id"], ["connector_instances.org_id", "connector_instances.id"]
         ),
         UniqueConstraint("org_id", "idempotency_key", name="uq_actions_org_idempotency"),
+        UniqueConstraint("org_id", "id", name="uq_actions_org_id"),
         CheckConstraint(
             "status IN (" + ", ".join(f"'{status}'" for status in ACTION_STATUSES) + ")",
             name="ck_actions_status",
@@ -159,11 +160,15 @@ class ActionAttempt(Base):
     """Append-only record of one connector execution attempt."""
 
     __tablename__ = "action_attempts"
-    __table_args__ = (Index("ix_action_attempts_org_action", "org_id", "action_id"),)
+    __table_args__ = (
+        # Tenant-inclusive foreign key: an attempt can never point at another tenant's action.
+        ForeignKeyConstraint(["org_id", "action_id"], ["actions.org_id", "actions.id"]),
+        Index("ix_action_attempts_org_action", "org_id", "action_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
-    action_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("actions.id"), nullable=False)
+    action_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
     attempt: Mapped[int] = mapped_column(Integer, nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime] = mapped_column(

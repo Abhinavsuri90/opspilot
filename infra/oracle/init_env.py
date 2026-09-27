@@ -78,6 +78,7 @@ def main() -> None:
         "UPLOAD_PARSE_TIMEOUT_SECONDS": "15",
         "MAX_CONCURRENT_PARSES": "4",
         "ACTION_EXECUTE_TIMEOUT_SECONDS": "30",
+        "MAX_CONCURRENT_CONNECTOR_CALLS": "4",
         "MAX_DOCUMENTS_PER_ORG": "1000",
         "OPENROUTER_API_KEY": "",
         "OPENROUTER_MODEL": "",

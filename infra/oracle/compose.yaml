@@ -36,6 +36,7 @@ x-app-environment: &app-environment
   EXTRACTION_TIMEOUT_SECONDS: ${EXTRACTION_TIMEOUT_SECONDS:-60}
   MAX_CONCURRENT_PARSES: ${MAX_CONCURRENT_PARSES:-4}
   ACTION_EXECUTE_TIMEOUT_SECONDS: ${ACTION_EXECUTE_TIMEOUT_SECONDS:-30}
+  MAX_CONCURRENT_CONNECTOR_CALLS: ${MAX_CONCURRENT_CONNECTOR_CALLS:-4}
   # Caddy and the web proxy sit on private Compose networks, so the default trusted ranges apply.
 
 services:

@@ -16,6 +16,7 @@ from decimal import Decimal
 from functools import partial
 
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app import actions_service
@@ -43,10 +44,15 @@ from app.models import (
     Organization,
     OutboxEvent,
 )
-from app.repositories import get_document_by_id, get_workflow_config_version
+from app.repositories import (
+    get_action,
+    get_document_by_id,
+    get_outbox_event,
+    get_workflow_config_version,
+)
 from app.review_service import open_review_task
 from app.storage import ObjectStore, StorageError, StoredDocumentTooLarge, get_store
-from app.timeouts import OperationTimeout, ParserBusy, run_with_timeout
+from app.timeouts import OperationTimeout, ParserBusy, run_connector_call, run_with_timeout
 from app.workflow_config import (
     DocumentTypeSpec,
     InvalidWorkflowConfig,
@@ -91,6 +97,13 @@ class ActionClaim:
 
 
 ACTION_TOPICS = ("propose_actions", "execute_action")
+# An action job that has been claimed this many consecutive times without recording an
+# outcome (a worker crash loop) is abandoned; deliberate hand-backs reset the count.
+MAX_ACTION_EVENT_ATTEMPTS = 3
+# Recording the outcome after a successful external call is the double-execution path, so
+# a transient database error there is retried briefly instead of leaving the job to replay.
+FINISH_RETRY_ATTEMPTS = 3
+FINISH_RETRY_DELAY_SECONDS = 0.5
 
 
 def audit(
@@ -446,17 +459,39 @@ def process_one(
 
 
 def handle_action_claim(claim: ActionClaim) -> None:
-    if claim.topic == "propose_actions":
+    if claim.attempts > MAX_ACTION_EVENT_ATTEMPTS:
+        abandon_event(claim)
+    elif claim.topic == "propose_actions":
         propose_actions(claim)
     else:
         execute_action(claim)
 
 
 def _leased_event(session: Session, claim: ActionClaim) -> OutboxEvent | None:
-    event = session.get(OutboxEvent, claim.event_id, with_for_update=True)
+    event = get_outbox_event(session, claim.org_id, claim.event_id, lock=True)
     if event is None or event.claimed_at != claim.claimed_at or event.published_at is not None:
         return None
     return event
+
+
+def abandon_event(claim: ActionClaim) -> None:
+    """Publish a job that keeps interrupting the worker and fail its action, if any."""
+    now = datetime.now(UTC)
+    with SessionLocal() as session, session.begin():
+        set_org_context(session, claim.org_id)
+        event = _leased_event(session, claim)
+        if event is None:
+            return
+        action = (
+            get_action(session, claim.org_id, claim.action_id, lock=True)
+            if claim.action_id is not None
+            else None
+        )
+        document = get_document_by_id(session, claim.org_id, claim.document_id)
+        actions_service.abandon_event(session, event, action, document, now)
+        logger.warning(
+            "Abandoned %s event %s after %d claims", claim.topic, claim.event_id, claim.attempts
+        )
 
 
 def propose_actions(claim: ActionClaim) -> None:
@@ -467,7 +502,7 @@ def propose_actions(claim: ActionClaim) -> None:
         event = _leased_event(session, claim)
         if event is None:
             return
-        document = session.get(Document, claim.document_id, with_for_update=True)
+        document = get_document_by_id(session, claim.org_id, claim.document_id, lock=True)
         event.published_at = now
         if document is None or document.status not in {
             "approved",
@@ -499,7 +534,7 @@ def execute_action(claim: ActionClaim) -> None:
         event = _leased_event(session, claim)
         if event is None:
             return
-        action = session.get(Action, claim.action_id, with_for_update=True)
+        action = get_action(session, claim.org_id, claim.action_id, lock=True)
         document = get_document_by_id(session, claim.org_id, claim.document_id)
         if action is None or document is None:
             event.published_at = now
@@ -522,6 +557,10 @@ def execute_action(claim: ActionClaim) -> None:
             return
         if decision == "forbidden":
             actions_service.settle(session, action, event, document, "forbidden", now)
+            return
+        if decision == "needs_approval":
+            actions_service.require_approval(session, action, event, document, now)
+            logger.info("Action %s now needs human approval", action.id)
             return
         if decision == "shadow":
             actions_service.settle(
@@ -553,14 +592,54 @@ def execute_action(claim: ActionClaim) -> None:
             return
         plan = actions_service.start_attempt(session, action, connector_row, now)
     started = datetime.now(UTC)
-    result = run_connector(plan)
+    try:
+        result = run_connector(plan)
+    except ParserBusy:
+        defer_attempt(claim, plan)
+        return
     finished = datetime.now(UTC)
+    for remaining in range(FINISH_RETRY_ATTEMPTS - 1, -1, -1):
+        try:
+            record_outcome(claim, result, started, finished)
+            return
+        except OperationalError:
+            if remaining == 0:
+                raise
+            logger.warning(
+                "Recording action %s outcome hit a transient database error; retrying",
+                claim.action_id,
+            )
+            time.sleep(FINISH_RETRY_DELAY_SECONDS)
+
+
+def defer_attempt(claim: ActionClaim, plan: ExecutionPlan) -> None:
+    """Every connector slot is busy: hand the job back untouched for a short retry."""
+    now = datetime.now(UTC)
+    with SessionLocal() as session, session.begin():
+        set_org_context(session, claim.org_id)
+        event = _leased_event(session, claim)
+        action = (
+            get_action(session, claim.org_id, claim.action_id, lock=True)
+            if claim.action_id is not None
+            else None
+        )
+        if event is None or action is None or action.status != "executing":
+            return
+        actions_service.defer_attempt(session, action, event, plan, now)
+        logger.info("Deferred action %s: worker at its connector-call limit", action.id)
+
+
+def record_outcome(
+    claim: ActionClaim, result: ExecutionResult, started: datetime, finished: datetime
+) -> None:
+    if claim.action_id is None:
+        return
     with SessionLocal() as session, session.begin():
         set_org_context(session, claim.org_id)
         event = _leased_event(session, claim)
         if event is None:
             return
-        action = session.get(Action, claim.action_id, with_for_update=True)
+        action = get_action(session, claim.org_id, claim.action_id, lock=True)
         document = get_document_by_id(session, claim.org_id, claim.document_id)
         if action is None or document is None or action.status != "executing":
             return
@@ -574,24 +653,27 @@ def execute_action(claim: ActionClaim) -> None:
 
 
 def run_connector(plan: ExecutionPlan) -> ExecutionResult:
-    """The only place an external side effect happens; bounded by a hard timeout."""
+    """The only place an external side effect happens; bounded by a hard timeout.
+
+    Raises :class:`ParserBusy` when every connector slot is taken, before anything ran.
+    """
     try:
         credentials = (
             decrypt_credentials(plan.credentials_encrypted) if plan.credentials_encrypted else None
         )
         connector = get_connector(plan.connector_type)
-        return run_with_timeout(
+        return run_connector_call(
             partial(
                 connector.execute, plan.config, credentials, plan.request, plan.idempotency_key
             ),
             get_settings().action_execute_timeout_seconds,
         )
+    except ParserBusy:
+        raise
     except CredentialsUnavailable as exc:
         return ExecutionResult(False, None, str(exc), retryable=False)
     except OperationTimeout:
         return ExecutionResult(False, None, "Connector call timed out", retryable=True)
-    except ParserBusy:
-        return ExecutionResult(False, None, "Worker is at its concurrency limit", retryable=True)
     except Exception as exc:
         logger.exception(
             "Connector %s raised for action %s", plan.connector_type, plan.request.action_id

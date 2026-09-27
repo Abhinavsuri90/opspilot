@@ -176,3 +176,28 @@ def test_upload_returns_actionable_failure_status(
     assert response.status_code == status_code
     assert response.json()["error"]["message"] == str(failure)
     assert response.json()["error"]["details"] is None
+
+
+def test_transient_database_conflicts_return_409_and_other_failures_500() -> None:
+    from psycopg.errors import DeadlockDetected
+    from sqlalchemy.exc import OperationalError
+
+    def deadlocked() -> None:
+        raise OperationalError("UPDATE actions", {}, DeadlockDetected())
+
+    app.dependency_overrides[current_session] = deadlocked
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/v1/actions", headers={"X-Request-ID": "deadlock-1"})
+    assert response.status_code == 409
+    assert response.json()["error"] == {"code": "conflict", "message": "Try again", "details": None}
+    assert response.headers["x-request-id"] == "deadlock-1"
+
+    def broken() -> None:
+        raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+    app.dependency_overrides[current_session] = broken
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/v1/actions")
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "internal_error"
+    assert "connection refused" not in response.text

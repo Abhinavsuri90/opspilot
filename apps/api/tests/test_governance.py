@@ -963,6 +963,10 @@ def test_reopen_withdraws_proposals_and_timeline_shows_action_events(gov: Gov) -
     assert not any(
         entry["kind"] == "audit" and entry["event_type"] == "action.proposed" for entry in timeline
     )
+    with Session(gov.engine) as session, session.begin():
+        ghost = session.get(Action, created["ghost"].id)
+        assert ghost is not None
+        ghost.status = "dead_lettered"
     workspace = client.get(f"/v1/documents/{gov.document_id}/workspace").json()
     assert workspace["capabilities"]["can_review"] is True
     reopened = client.post(
@@ -972,14 +976,24 @@ def test_reopen_withdraws_proposals_and_timeline_shows_action_events(gov: Gov) -
     assert reopened.status_code == 200, reopened.text
     rows = gov.by_destination()
     assert rows["archive"]["status"] == "rejected"
-    assert rows["archive"]["decision_comment"] == "Withdrawn: document reopened for review"
+    assert rows["archive"]["decision_comment"] == "Superseded: document reopened"
     assert rows["archive"]["decided_by_email"] == "admin@example.com"
-    assert rows["hook"]["status"] == "approved"  # already approved actions are not withdrawn
+    # Auto-approved but never started, and dead-lettered, actions are superseded as well;
+    # a forbidden one is already settled.
+    assert rows["hook"]["status"] == "rejected"
+    assert rows["ghost"]["status"] == "rejected"
+    assert rows["ledger"]["status"] == "forbidden"
     assert client.get(f"/v1/documents/{gov.document_id}").json()["status"] == "needs_review"
-    withdrawn = gov.audits("action.rejected")
-    assert withdrawn[-1]["withdrawn"] is True and withdrawn[-1]["action_id"] == str(
-        created["archive"].id
-    )
+    withdrawn = [event for event in gov.audits("action.rejected") if event.get("withdrawn")]
+    assert {event["action_id"] for event in withdrawn} == {
+        str(created[name].id) for name in ("hook", "archive", "ghost")
+    }
+    assert {event["from_status"] for event in withdrawn} == {
+        "approved",
+        "proposed",
+        "dead_lettered",
+    }
+    assert all(event["reason"] == "Superseded: document reopened" for event in withdrawn)
 
 
 # Exports
@@ -1033,9 +1047,8 @@ def test_exports_listing_and_download(gov: Gov) -> None:
         client.get("/v1/exports", params={"connector_id": str(gov.connectors["hook"])}).status_code
         == 404
     )
-    gov.actor = "reviewer"
-    assert client.get(f"/v1/exports/{archive_id}/2026-09.csv").status_code == 200
-    for actor in ("member", "viewer"):
+    # Export files are organization-wide sinks that may hold restricted rows: admins only.
+    for actor in ("reviewer", "member", "viewer"):
         gov.actor = actor
         assert client.get(f"/v1/exports/{archive_id}/2026-09.csv").status_code == 403
         assert (
@@ -1043,3 +1056,137 @@ def test_exports_listing_and_download(gov: Gov) -> None:
         )
     gov.actor = "external"
     assert client.get(f"/v1/exports/{archive_id}/2026-09.csv").status_code == 404
+
+
+def test_connector_test_is_refused_while_the_agent_is_paused(
+    gov: Gov, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = FakeConnector()
+    monkeypatch.setattr(settings_service, "get_connector", lambda kind: fake)
+    client = gov.client
+    assert (
+        client.post("/v1/settings/policies", json={"version": 0, "kill_switch": True}).status_code
+        == 200
+    )
+    paused = client.post(f"/v1/settings/connectors/{gov.connectors['hook']}/test")
+    assert paused.status_code == 409
+    assert paused.json()["error"]["message"].startswith("Agent paused")
+    assert fake.calls == []
+    listed = {row["name"]: row for row in client.get("/v1/settings/connectors").json()}
+    assert listed["hook"]["last_test_at"] is None
+    assert (
+        client.post("/v1/settings/policies", json={"version": 1, "kill_switch": False}).status_code
+        == 200
+    )
+    resumed = client.post(f"/v1/settings/connectors/{gov.connectors['hook']}/test")
+    assert resumed.status_code == 200 and resumed.json()["ok"] is True
+    assert len(fake.calls) == 1
+    listed = {row["name"]: row for row in client.get("/v1/settings/connectors").json()}
+    assert listed["hook"]["last_test_ok"] is True and listed["hook"]["version"] == 1
+
+
+def test_connector_config_change_supersedes_unapproved_actions(gov: Gov) -> None:
+    created = {action.destination: action for action in gov.propose()}
+    client = gov.client
+    archive_id, hook_id = gov.connectors["archive"], gov.connectors["hook"]
+    # Renaming or deactivating does not touch actions; only a configuration change does.
+    renamed = client.post(
+        f"/v1/settings/connectors/{archive_id}", json={"version": 1, "name": "archive-2"}
+    )
+    assert renamed.status_code == 200, renamed.text
+    assert gov.by_destination()["archive"]["status"] == "proposed"
+    restored = client.post(
+        f"/v1/settings/connectors/{archive_id}", json={"version": 2, "name": "archive"}
+    )
+    assert restored.status_code == 200, restored.text
+    changed = client.post(
+        f"/v1/settings/connectors/{archive_id}",
+        json={"version": 3, "config": {"file_prefix": "renamed"}},
+    )
+    assert changed.status_code == 200, changed.text
+    rows = gov.by_destination()
+    assert rows["archive"]["status"] == "rejected"
+    assert rows["archive"]["decision_comment"] == "Superseded: connector changed"
+    assert rows["archive"]["decided_by_email"] == "admin@example.com"
+    assert rows["hook"]["status"] == "approved"
+    assert gov.audits("connector.updated")[-1]["changes"]["superseded_actions"] == 1
+    # A human-approved action keeps its approval; an automatic, unstarted one does not.
+    with Session(gov.engine) as session, session.begin():
+        fresh = make_document(gov.org_id, gov.actors["member"], "fourth.pdf", "approved")
+        session.add(fresh)
+        session.flush()
+        add_fields(session, fresh, {"vendor": "Fourth", "invoice_number": "F-4", "total": "$4.00"})
+        fourth_id = fresh.id
+    fourth = {action.destination: action for action in gov.propose(fourth_id)}
+    gov.actor = "reviewer"
+    approved = client.post(
+        f"/v1/actions/{fourth['archive'].id}/decision", json={"version": 0, "decision": "approve"}
+    )
+    assert approved.status_code == 200, approved.text
+    gov.actor = "admin"
+    changed_hook = client.post(
+        f"/v1/settings/connectors/{hook_id}",
+        json={"version": 1, "config": {"url": "http://localhost:9/hook-v2"}},
+    )
+    assert changed_hook.status_code == 200, changed_hook.text
+    statuses = {
+        (row["document_id"], row["destination"]): row["status"] for row in gov.actions(limit=100)
+    }
+    assert statuses[(str(gov.document_id), "hook")] == "rejected"
+    assert statuses[(str(fourth_id), "hook")] == "rejected"
+    assert gov.audits("connector.updated")[-1]["changes"]["superseded_actions"] == 2
+    changed_archive = client.post(
+        f"/v1/settings/connectors/{archive_id}",
+        json={"version": 4, "config": {"file_prefix": "again"}},
+    )
+    assert changed_archive.status_code == 200, changed_archive.text
+    assert client.get(f"/v1/actions/{fourth['archive'].id}").json()["status"] == "approved"
+    assert client.get(f"/v1/documents/{gov.document_id}").json()["status"] == "completed"
+    assert {row["status"] for row in gov.actions(document_id=str(gov.document_id))} == {
+        "rejected",
+        "forbidden",
+        "failed",
+    }
+    assert created["archive"].id != fourth["archive"].id
+
+
+def test_retry_and_decision_roles_and_restricted_documents(gov: Gov) -> None:
+    created = {action.destination: action for action in gov.propose()}
+    client = gov.client
+    ghost, archive = created["ghost"], created["archive"]
+    for actor in ("member", "viewer"):
+        gov.actor = actor
+        assert client.post(f"/v1/actions/{ghost.id}/retry", json={"version": 0}).status_code == 403
+    gov.actor = "reviewer"
+    assert client.get(f"/v1/actions/{archive.id}").status_code == 200
+    with Session(gov.engine) as session, session.begin():
+        metadata = session.get(InvoiceMetadata, gov.document_id)
+        assert metadata is not None
+        metadata.visibility = "restricted"
+    # A reviewer without an assignment or grant cannot see, decide or retry actions of a
+    # restricted document; the uploader can see them but cannot decide.
+    assert gov.actions() == []
+    assert client.get(f"/v1/actions/{archive.id}").status_code == 404
+    assert (
+        client.post(
+            f"/v1/actions/{archive.id}/decision", json={"version": 0, "decision": "approve"}
+        ).status_code
+        == 404
+    )
+    assert client.post(f"/v1/actions/{ghost.id}/retry", json={"version": 0}).status_code == 404
+    gov.actor = "member"
+    assert len(gov.actions()) == 4
+    assert (
+        client.post(
+            f"/v1/actions/{archive.id}/decision", json={"version": 0, "decision": "approve"}
+        ).status_code
+        == 403
+    )
+    gov.actor = "admin"
+    assert len(gov.actions()) == 4
+    assert (
+        client.post(
+            f"/v1/actions/{archive.id}/decision", json={"version": 0, "decision": "approve"}
+        ).status_code
+        == 200
+    )

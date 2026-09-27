@@ -19,14 +19,25 @@ from app.connectors.base import (
     Diff,
     ExecutionResult,
 )
-from app.connectors.network import DestinationBlocked, check_destination
+from app.connectors.network import Destination, DestinationBlocked, check_destination
 
 logger = logging.getLogger(__name__)
 REQUEST_TIMEOUT_SECONDS = 10.0
 RETRYABLE_STATUSES = frozenset({408, 429})
 _HEADER_NAME = re.compile(r"^[A-Za-z0-9-]{1,64}$")
+# Secrets belong in the credential secret, never in config_json; the transport headers are
+# owned by the connector.
 _RESERVED_HEADERS = frozenset(
-    {"host", "content-length", "content-type", "transfer-encoding", "connection"}
+    {
+        "host",
+        "content-length",
+        "content-type",
+        "transfer-encoding",
+        "connection",
+        "authorization",
+        "proxy-authorization",
+        "cookie",
+    }
 )
 
 
@@ -97,7 +108,12 @@ class WebhookConnector:
         }
 
     def _post(
-        self, config: dict[str, Any], secret: str, payload: dict[str, Any], idempotency_key: str
+        self,
+        config: dict[str, Any],
+        destination: Destination,
+        secret: str,
+        payload: dict[str, Any],
+        idempotency_key: str,
     ) -> httpx.Response:
         body = canonical_body(payload)
         timestamp = str(int(time.time()))
@@ -109,8 +125,19 @@ class WebhookConnector:
             "X-OpsPilot-Idempotency-Key": idempotency_key,
             "X-OpsPilot-Signature": sign(secret, timestamp, body),
         }
+        extensions: dict[str, Any] = {}
+        if destination.address is not None:
+            # Connect to the address that passed the check; keep the real name for the
+            # Host header, TLS verification and SNI so a DNS change cannot redirect the send.
+            headers["Host"] = destination.hostname
+            extensions["sni_hostname"] = destination.hostname
         with self._client_factory() as client:
-            return client.post(str(config["url"]), content=body.encode("utf-8"), headers=headers)
+            return client.post(
+                destination.pinned_url,
+                content=body.encode("utf-8"),
+                headers=headers,
+                extensions=extensions,
+            )
 
     def test_connection(
         self, config: dict[str, Any], credentials: dict[str, Any] | None
@@ -119,9 +146,9 @@ class WebhookConnector:
         if not secret:
             return ConnectionTest(False, "Webhook secret is missing")
         try:
-            check_destination(str(config["url"]))
+            destination = check_destination(str(config["url"]))
             response = self._post(
-                config, secret, {"type": "test", "sent_at": int(time.time())}, "test"
+                config, destination, secret, {"type": "test", "sent_at": int(time.time())}, "test"
             )
         except DestinationBlocked as exc:
             return ConnectionTest(False, str(exc))
@@ -162,9 +189,12 @@ class WebhookConnector:
         if not secret:
             return ExecutionResult(False, None, "Webhook secret is missing", retryable=False)
         try:
-            # Re-check at send time: DNS may have changed since the URL was saved.
-            check_destination(str(config["url"]))
-            response = self._post(config, secret, self._payload(request), idempotency_key)
+            # Re-check at send time and pin the send to the checked address: DNS may have
+            # changed since the URL was saved, or between this check and the connection.
+            destination = check_destination(str(config["url"]))
+            response = self._post(
+                config, destination, secret, self._payload(request), idempotency_key
+            )
         except DestinationBlocked as exc:
             return ExecutionResult(False, None, str(exc), retryable=False)
         except httpx.TimeoutException:
