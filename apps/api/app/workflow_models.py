@@ -57,6 +57,10 @@ class InvoiceMetadata(Base):
             "(verified_amount IS NOT NULL AND verified_amount >= 0 AND currency IS NOT NULL)",
             name="ck_invoice_verified_money",
         ),
+        CheckConstraint(
+            "verified_source IS NULL OR verified_source IN ('reviewer', 'derived')",
+            name="ck_invoice_verified_source",
+        ),
         Index("ix_invoice_metadata_category", "org_id", "category_id"),
     )
 
@@ -66,6 +70,9 @@ class InvoiceMetadata(Base):
     assigned_reviewer_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     verified_amount: Mapped[Decimal | None] = mapped_column(Numeric(20, 4))
     currency: Mapped[str | None] = mapped_column(String(3))
+    # 'reviewer' when entered through /metadata, 'derived' when approval computed it
+    # from the effective fields; derived money is cleared again on reopen.
+    verified_source: Mapped[str | None] = mapped_column(String(10))
     visibility: Mapped[str] = mapped_column(String(20), default="workspace", nullable=False)
     version: Mapped[int] = mapped_column(default=0, nullable=False)
 

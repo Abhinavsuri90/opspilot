@@ -6,8 +6,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 MAX_ATTEMPTS_PER_WINDOW = 10
-# A single client address may try many accounts; this bounds credential stuffing
-# without letting one shared office address lock out a whole organization.
+# A single client address may try many accounts; this bounds credential stuffing.
+# Only failures count, so a shared office address is not locked out by successes.
 MAX_IP_ATTEMPTS_PER_WINDOW = 50
 WINDOW_MINUTES = 15
 
@@ -50,18 +50,25 @@ def reserve_attempt(
     return _reserve(session, identity_hash(org_slug, email), limit)
 
 
-def reserve_client_attempt(
-    session: Session, client_ip: str, *, limit: int | None = None
-) -> bool:
-    """Count a login attempt against the client address, independent of the account."""
-    return _reserve(session, client_ip_hash(client_ip), limit or MAX_IP_ATTEMPTS_PER_WINDOW)
+def client_blocked(session: Session, client_ip: str, *, limit: int | None = None) -> bool:
+    """Whether the address already spent its failure budget in the current window.
+
+    Only failed credential checks are charged (see record_client_failure), so many
+    people signing in correctly from one shared address never block each other.
+    """
+    attempts = session.scalar(
+        text(
+            "SELECT attempts FROM login_attempts WHERE identity_hash = :key "
+            "AND window_started_at > now() - interval '15 minutes'"
+        ),
+        {"key": client_ip_hash(client_ip)},
+    )
+    return attempts is not None and attempts >= (limit or MAX_IP_ATTEMPTS_PER_WINDOW)
 
 
-def reserve_login(session: Session, org_slug: str, email: str, client_ip: str) -> bool:
-    """Reserve both the account and the address budgets; either limit blocks the login."""
-    account_ok = reserve_attempt(session, org_slug, email)
-    client_ok = reserve_client_attempt(session, client_ip)
-    return account_ok and client_ok
+def record_client_failure(session: Session, client_ip: str) -> None:
+    """Charge one failed login to the client address; commits so the count persists."""
+    _reserve(session, client_ip_hash(client_ip), MAX_IP_ATTEMPTS_PER_WINDOW)
 
 
 def clear_attempts(session: Session, org_slug: str, email: str) -> None:

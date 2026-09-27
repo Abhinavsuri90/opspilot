@@ -167,6 +167,7 @@ class WorkspaceResponse(BaseModel):
     assigned_reviewer_id: uuid.UUID | None
     verified_amount: str | None
     currency: str | None
+    verified_source: Literal["reviewer", "derived"] | None
     visibility: str
     comments: list[CommentResponse]
     grants: list[GrantResponse]
@@ -361,6 +362,7 @@ def _workspace(
         if metadata and metadata.verified_amount is not None
         else None,
         currency=metadata.currency if metadata else None,
+        verified_source=_verified_source(metadata),
         visibility=metadata.visibility if metadata else "workspace",
         comments=comments,
         grants=[GrantResponse(user_id=user_id, email=email) for user_id, email in grant_rows],
@@ -378,6 +380,13 @@ def _workspace(
 # Statuses a reviewer can act on: decide an open review, or reopen a completed one.
 COMPLETED_STATUSES = frozenset({"approved", "rejected", "auto_approved"})
 REVIEWABLE_STATUSES = COMPLETED_STATUSES | {"needs_review"}
+
+
+def _verified_source(metadata: InvoiceMetadata | None) -> Literal["reviewer", "derived"] | None:
+    if metadata is None or metadata.verified_amount is None:
+        return None
+    # Money verified before provenance was recorded was always entered by a reviewer.
+    return "derived" if metadata.verified_source == "derived" else "reviewer"
 
 
 def _finish(
@@ -539,6 +548,7 @@ def update_metadata(
     if (amount is None) != (currency is None):
         raise HTTPException(422, "Verified amount and explicit currency must be provided together")
     metadata.verified_amount, metadata.currency = amount, currency
+    metadata.verified_source = "reviewer" if amount is not None else None
     metadata.version += 1
     document.updated_at = datetime.now(UTC)
     _audit(
@@ -598,16 +608,21 @@ def review_invoice(
             403, "Only an eligible reviewer or administrator can review this invoice"
         )
     config = review_service.pinned_config(session, document)
+    approval: dict[str, object] = {}
     if payload.decision == "reopen":
         if document.status not in COMPLETED_STATUSES:
             raise HTTPException(409, "Only approved or rejected invoices can be reopened")
         new_status = "needs_review"
         review_service.open_review_task(session, org.id, document.id, config.review_sla_minutes)
+        if metadata.verified_source == "derived":
+            # Derived money reflects the fields at approval time; a reopened review
+            # may change them, so the next approval derives it again.
+            metadata.verified_amount, metadata.currency, metadata.verified_source = None, None, None
     else:
         if document.status != "needs_review":
             raise HTTPException(409, "Invoice is not awaiting review")
         if payload.decision == "approve":
-            _prepare_approval(session, org, document, metadata)
+            approval = _prepare_approval(session, org, document, metadata)
             new_status = "approved"
         else:
             new_status = "rejected"
@@ -639,6 +654,7 @@ def review_invoice(
             "comment": payload.comment,
             "verified_amount": metadata.verified_amount,
             "currency": metadata.currency,
+            **approval,
         },
         document_id=document.id,
     )
@@ -647,17 +663,36 @@ def review_invoice(
 
 def _prepare_approval(
     session: Session, org: Organization, document: Document, metadata: InvoiceMetadata
-) -> None:
-    """Every flagged field needs a reviewer decision, and money must be verifiable."""
+) -> dict[str, object]:
+    """Every flagged field needs a reviewer decision, and money must be verifiable.
+
+    Returns audit detail: whether money was derived and which rules currently fail
+    against the corrected values (recorded, never blocking).
+    """
     unresolved = review_service.unresolved_flag_count(session, org.id, document.id)
     if unresolved:
         raise HTTPException(422, f"{unresolved} field(s) still need review")
-    if metadata.verified_amount is not None and metadata.currency is not None:
-        return
-    derived = review_service.derive_verified_money(session, document, org.default_currency)
+    failed_rules = [
+        rule.name
+        for rule in review_service.effective_rule_results(session, document)
+        if rule.passed is False
+    ]
+    reviewer_entered = (
+        metadata.verified_amount is not None
+        and metadata.currency is not None
+        and metadata.verified_source != "derived"
+    )
+    if reviewer_entered:
+        return {"derived_money": False, "failed_rules": failed_rules}
+    preferred_currency = metadata.currency if metadata.verified_source == "reviewer" else None
+    derived = review_service.derive_verified_money(
+        session, document, org.default_currency, preferred_currency
+    )
     if derived is None or derived[1] not in SUPPORTED_CURRENCIES:
         raise HTTPException(422, "Verify the invoice amount and currency before approval")
     metadata.verified_amount, metadata.currency = derived
+    metadata.verified_source = "derived"
+    return {"derived_money": True, "failed_rules": failed_rules}
 
 
 @router.post("/documents/{document_id}/fields/{field_id}", response_model=DocumentDetail)
@@ -669,11 +704,13 @@ def correct_field(
 ) -> DocumentDetail:
     session, user, org, membership = context
     document = _document(session, org, user, membership, document_id, lock=True)
-    metadata = _mutable_metadata(session, document, payload.version)
-    if not _may_review(membership, user, metadata):
+    # Authorization before the optimistic-concurrency check: a forbidden caller
+    # gets 403 rather than learning about version drift through a 409.
+    if not _may_review(membership, user, _metadata(session, document)):
         raise HTTPException(
             403, "Only an eligible reviewer or administrator can correct this invoice"
         )
+    metadata = _mutable_metadata(session, document, payload.version)
     if document.status != "needs_review":
         raise HTTPException(
             409, "Invoice must be ready for review; reopen a completed review first"

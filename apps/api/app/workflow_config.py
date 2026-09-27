@@ -16,10 +16,65 @@ ReviewPolicy = Literal["always", "threshold"]
 ActionPolicy = Literal["auto", "needs_approval", "forbidden"]
 FIELD_NAME_PATTERN = r"^[a-z][a-z0-9_]{0,99}$"
 DOCUMENT_TYPE_PATTERN = r"^[a-z][a-z0-9_]{0,49}$"
+MAX_REGEX_LENGTH = 200
+_BRACE_QUANTIFIER = re.compile(r"\{\d*,?\d*\}")
 
 
 def default_label(name: str) -> str:
     return name.replace("_", " ").title()
+
+
+def has_nested_quantifier(pattern: str) -> bool:
+    """Detect a quantifier applied to a group that itself repeats or alternates.
+
+    Patterns such as ``(a+)+``, ``(\\d*)*`` and ``(a|aa)+`` backtrack exponentially
+    on non-matching input. Tenant regexes run on every extracted value, so they
+    are rejected at configuration time. Character classes and escapes are skipped.
+    """
+    stack: list[bool] = []  # per open group: contains a quantifier or alternation
+    index = 0
+    length = len(pattern)
+    while index < length:
+        char = pattern[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            end = index + 1
+            if end < length and pattern[end] == "^":
+                end += 1
+            if end < length and pattern[end] == "]":
+                end += 1
+            while end < length and pattern[end] != "]":
+                end += 2 if pattern[end] == "\\" else 1
+            index = end + 1
+            continue
+        if char == "(":
+            stack.append(False)
+            index += 1
+            if index < length and pattern[index] == "?":
+                # Skip the extension marker: (?:  (?=  (?!  (?<=  (?<!  (?P<name>  (?P=name)
+                index += 1
+                while index < length and pattern[index] not in ":=!)>":
+                    index += 1
+                index += 1
+            continue
+        if char == ")":
+            inner = stack.pop() if stack else False
+            index += 1
+            quantified = index < length and (
+                pattern[index] in "+*?" or _BRACE_QUANTIFIER.match(pattern, index) is not None
+            )
+            if quantified and inner:
+                return True
+            if stack:
+                stack[-1] = stack[-1] or inner or quantified
+            continue
+        if char in "+*?|" or (char == "{" and _BRACE_QUANTIFIER.match(pattern, index)):
+            if stack:
+                stack[-1] = True
+        index += 1
+    return False
 
 
 class FieldSpec(BaseModel):
@@ -36,11 +91,18 @@ class FieldSpec(BaseModel):
     @field_validator("regex")
     @classmethod
     def compile_regex(cls, value: str | None) -> str | None:
-        if value is not None:
-            try:
-                re.compile(value)
-            except re.error as exc:
-                raise ValueError(f"Invalid regular expression: {exc}") from exc
+        if value is None:
+            return None
+        if len(value) > MAX_REGEX_LENGTH:
+            raise ValueError(f"Regular expression is longer than {MAX_REGEX_LENGTH} characters")
+        try:
+            re.compile(value)
+        except re.error as exc:
+            raise ValueError(f"Invalid regular expression: {exc}") from exc
+        if has_nested_quantifier(value):
+            raise ValueError(
+                "Regular expression repeats a group that itself repeats or alternates"
+            )
         return value
 
     @model_validator(mode="after")

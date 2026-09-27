@@ -9,7 +9,7 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast
 
 from pydantic import BaseModel
@@ -17,7 +17,14 @@ from sqlalchemy import ScalarSelect, and_, func, select
 from sqlalchemy.orm import Session, aliased
 
 from app.access import accessible_document_clause, can_access_document
-from app.confidence import evaluate_rules, format_problem, parse_money, typed_value
+from app.confidence import (
+    RuleResult,
+    evaluate_rules,
+    format_problem,
+    magnitude_problem,
+    parse_money,
+    typed_value,
+)
 from app.document_service import DocumentSummary, summary
 from app.models import AuditEvent, Document, ExtractedField, User
 from app.repositories import (
@@ -27,6 +34,7 @@ from app.repositories import (
     get_review_task,
     get_workflow_config_version,
     latest_extraction_run,
+    latest_run_id_for,
     list_document_audit_events,
     list_document_comments,
     list_document_fields,
@@ -191,11 +199,16 @@ def _task_response(task: ReviewTask | None, now: datetime) -> ReviewTaskResponse
     )
 
 
-def document_detail(session: Session, document: Document) -> DocumentDetail:
-    org_id = document.org_id
-    run = latest_extraction_run(session, org_id, document.id)
-    type_spec = pinned_type(session, document)
-    effective = effective_fields(session, org_id, document.id)
+def effective_rule_results(
+    session: Session,
+    document: Document,
+    effective: list[EffectiveField] | None = None,
+    type_spec: DocumentTypeSpec | None = None,
+) -> list[RuleResult]:
+    """Re-run the configured rules against the current (corrected) field values."""
+    type_spec = type_spec or pinned_type(session, document)
+    if effective is None:
+        effective = effective_fields(session, document.org_id, document.id)
     current_values = {item.field.name: item.current_value for item in effective}
     values = {
         spec.name: typed_value(spec, current_values[spec.name])
@@ -203,6 +216,14 @@ def document_detail(session: Session, document: Document) -> DocumentDetail:
         else None
         for spec in type_spec.fields
     }
+    return evaluate_rules(values, type_spec)
+
+
+def document_detail(session: Session, document: Document) -> DocumentDetail:
+    org_id = document.org_id
+    run = latest_extraction_run(session, org_id, document.id)
+    type_spec = pinned_type(session, document)
+    effective = effective_fields(session, org_id, document.id)
     metadata = session.scalar(
         select(InvoiceMetadata).where(
             InvoiceMetadata.org_id == org_id, InvoiceMetadata.document_id == document.id
@@ -240,7 +261,7 @@ def document_detail(session: Session, document: Document) -> DocumentDetail:
             RuleResultResponse(
                 name=rule.name, expression=rule.expression, passed=rule.passed, message=rule.message
             )
-            for rule in evaluate_rules(values, type_spec)
+            for rule in effective_rule_results(session, document, effective, type_spec)
         ],
         review_task=_task_response(
             get_review_task(session, org_id, document.id), datetime.now(UTC)
@@ -322,18 +343,29 @@ def unresolved_flag_count(session: Session, org_id: uuid.UUID, document_id: uuid
 
 
 def derive_verified_money(
-    session: Session, document: Document, default_currency: str
+    session: Session,
+    document: Document,
+    default_currency: str,
+    preferred_currency: str | None = None,
 ) -> tuple[Decimal, str] | None:
-    """Verified amount and currency from the effective total/currency fields."""
+    """Verified amount and currency from the effective total/currency fields.
+
+    A currency the reviewer entered wins over the extracted currency field, which in
+    turn wins over the organization default.
+    """
     values = {
         item.field.name: item.current_value
         for item in effective_fields(session, document.org_id, document.id)
     }
     total = parse_money(values.get("total", ""))
-    if total is None or total < 0:
+    if total is None or total < 0 or magnitude_problem(total) is not None:
         return None
-    currency = (values.get("currency") or default_currency).strip().upper()
-    return total.quantize(Decimal("0.0001")), currency
+    try:
+        amount = total.quantize(Decimal("0.0001"))
+    except InvalidOperation:
+        return None
+    currency = (preferred_currency or values.get("currency") or default_currency).strip().upper()
+    return amount, currency
 
 
 def open_review_task(
@@ -380,6 +412,7 @@ def complete_review_task(
 
 
 def _effective_value_subquery(org_id: uuid.UUID, name: str) -> ScalarSelect[Any]:
+    """Latest-run field value for the outer Document, overridden by its newest correction."""
     field = aliased(ExtractedField)
     correction = aliased(FieldCorrection)
     latest_after = (
@@ -390,9 +423,15 @@ def _effective_value_subquery(org_id: uuid.UUID, name: str) -> ScalarSelect[Any]
         .correlate(field)
         .scalar_subquery()
     )
+    latest_run = latest_run_id_for(org_id, Document.id).correlate(Document)
     return (
         select(func.coalesce(latest_after, field.value))
-        .where(field.org_id == org_id, field.document_id == Document.id, field.name == name)
+        .where(
+            field.org_id == org_id,
+            field.document_id == Document.id,
+            field.extraction_run_id == latest_run,
+            field.name == name,
+        )
         .order_by(field.id)
         .limit(1)
         .correlate(Document)

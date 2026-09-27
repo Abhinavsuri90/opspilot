@@ -1,8 +1,9 @@
 import uuid
 from collections.abc import Iterable
+from typing import Any
 
-from sqlalchemy import exists, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy import ScalarSelect, exists, func, select
+from sqlalchemy.orm import Session, aliased
 
 from app.models import (
     AuditEvent,
@@ -160,10 +161,22 @@ def get_review_task(
     return session.scalar(query)
 
 
+def latest_run_id_for(org_id: uuid.UUID, document_id_column: Any) -> ScalarSelect[Any]:
+    """Correlated subquery: id of the newest extraction run for the given document column."""
+    run = aliased(ExtractionRun)
+    return (
+        select(run.id)
+        .where(run.org_id == org_id, run.document_id == document_id_column)
+        .order_by(run.created_at.desc(), run.id.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+
+
 def flagged_counts(
     session: Session, org_id: uuid.UUID, document_ids: Iterable[uuid.UUID]
 ) -> dict[uuid.UUID, int]:
-    """Count still-flagged fields per document in one grouped query."""
+    """Count still-flagged fields of the latest run per document in one grouped query."""
     ids = list(document_ids)
     if not ids:
         return {}
@@ -175,11 +188,13 @@ def flagged_counts(
         )
         .correlate(ExtractedField)
     )
+    latest_run = latest_run_id_for(org_id, ExtractedField.document_id).correlate(ExtractedField)
     rows = session.execute(
         select(ExtractedField.document_id, func.count(ExtractedField.id))
         .where(
             ExtractedField.org_id == org_id,
             ExtractedField.document_id.in_(ids),
+            ExtractedField.extraction_run_id == latest_run,
             ExtractedField.status == "needs_review",
             ~corrected,
         )

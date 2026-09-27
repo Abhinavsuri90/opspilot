@@ -1,8 +1,9 @@
+import ipaddress
 from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,9 +27,29 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_model: str = "google/gemini-3.8-flash"
     max_documents_per_org: int = Field(default=100, ge=1, le=100_000)
-    # Wall-clock limits for PDF parsing and extraction; see app/timeouts.py.
-    extraction_timeout_seconds: float = Field(default=60, gt=0, le=600)
+    # Wall-clock limits for PDF parsing and extraction; see app/timeouts.py. The
+    # extraction limit stays under the worker's 5-minute lease (app/worker.py).
+    extraction_timeout_seconds: float = Field(default=60, gt=0, le=240)
     upload_parse_timeout_seconds: float = Field(default=15, gt=0, le=120)
+    # Per-process cap on concurrent PDF parses; see app/timeouts.py.
+    max_concurrent_parses: int = Field(default=4, ge=1, le=64)
+    # Peers allowed to supply X-Forwarded-For; see app/client_ip.py.
+    trusted_proxy_cidrs: str = (
+        "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7"
+    )
+
+    @field_validator("trusted_proxy_cidrs")
+    @classmethod
+    def parse_trusted_proxy_cidrs(cls, value: str) -> str:
+        networks = []
+        for entry in value.split(","):
+            if not entry.strip():
+                continue
+            try:
+                networks.append(str(ipaddress.ip_network(entry.strip(), strict=False)))
+            except ValueError as exc:
+                raise ValueError(f"TRUSTED_PROXY_CIDRS entry is not a CIDR: {entry!r}") from exc
+        return ",".join(networks)
 
     @model_validator(mode="after")
     def reject_unsafe_deployment(self) -> "Settings":

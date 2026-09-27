@@ -2,7 +2,7 @@
 
 ## 1. Last updated
 
-2026-09-27, mid-session. Latest commit `7ffb822` (spec wording; no code change). Uncommitted work in progress: see section 4.
+2026-09-27, mid-session. Latest commits: `e01614f` web fixes, `52172bb` Phase 2 API, `e729ebc` CI retry, plus the review fix pass (migration 0007, 210 API tests). Review split view UI in progress: see section 4.
 
 ## 2. Current status
 
@@ -41,7 +41,7 @@ The owner then chose to implement the rest of SPEC.md before deploying. Build or
 
 - Local web http://localhost:3300, API http://localhost:8000/docs. No staging or production URL exists yet.
 - External accounts: GitHub repo `Abhinavsuri90/opspilot` with Actions CI. Oracle Cloud account not yet created (guide in `docs/deployment.md`, Part 1 steps given to the owner). Render account exists but is not to be used (paid plans).
-- Env var names: see `.env.example` (DATABASE_URL, DATABASE_OWNER_URL, APP_DB_PASSWORD, JWT_SECRET, COOKIE_SECURE, WEB_ORIGIN, ENVIRONMENT, S3_*, LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL, MAX_DOCUMENTS_PER_ORG, plus the new EXTRACTION_TIMEOUT_SECONDS and UPLOAD_PARSE_TIMEOUT_SECONDS). Never store values here.
+- Env var names: see `.env.example` (DATABASE_URL, DATABASE_OWNER_URL, APP_DB_PASSWORD, JWT_SECRET, COOKIE_SECURE, WEB_ORIGIN, ENVIRONMENT, S3_*, LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL, MAX_DOCUMENTS_PER_ORG, plus EXTRACTION_TIMEOUT_SECONDS, UPLOAD_PARSE_TIMEOUT_SECONDS, MAX_CONCURRENT_PARSES and TRUSTED_PROXY_CIDRS). Never store values here.
 - Demo logins exist only after `make demo` locally (Northwind and Contoso admins; password from DEMO_PASSWORD in the ignored `.env`).
 
 ## 7. How to run and test

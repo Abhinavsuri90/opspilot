@@ -36,12 +36,24 @@ from app.models import (
 from app.repositories import get_workflow_config_version
 from app.review_service import open_review_task
 from app.storage import ObjectStore, StorageError, StoredDocumentTooLarge, get_store
-from app.timeouts import OperationTimeout, run_with_timeout
-from app.workflow_config import InvalidWorkflowConfig, WorkflowConfigModel, load_config
+from app.timeouts import OperationTimeout, ParserBusy, run_with_timeout
+from app.workflow_config import (
+    DocumentTypeSpec,
+    InvalidWorkflowConfig,
+    WorkflowConfigModel,
+    load_config,
+)
 
 logger = logging.getLogger(__name__)
 MAX_EXTRACTION_ATTEMPTS = 3
+# A claim older than this can be taken over by another worker. It must exceed the
+# extraction timeout, or a slow-but-alive worker could be reclaimed mid-flight.
+STALE_LEASE_FLOOR_SECONDS = 300
 _last_org_id: uuid.UUID | None = None
+
+
+def stale_lease_seconds() -> int:
+    return max(STALE_LEASE_FLOOR_SECONDS, int(get_settings().extraction_timeout_seconds) + 60)
 
 
 @dataclass(frozen=True)
@@ -69,7 +81,7 @@ def audit(
 
 def claim_next(org_id: uuid.UUID, document_id: uuid.UUID | None = None) -> Claim | None:
     now = datetime.now(UTC)
-    stale_before = now - timedelta(minutes=5)
+    stale_before = now - timedelta(seconds=stale_lease_seconds())
     with SessionLocal() as session, session.begin():
         set_org_context(session, org_id)
         statement = (
@@ -153,7 +165,11 @@ def _current_lease(session: Session, claim: Claim) -> tuple[OutboxEvent, Documen
 
 
 def _store_run(
-    claim: Claim, result: ExtractionResult, provider: ExtractionProvider, evaluation: Evaluation
+    claim: Claim,
+    result: ExtractionResult,
+    provider: ExtractionProvider,
+    evaluation: Evaluation,
+    created_at: datetime,
 ) -> tuple[ExtractionRun, list[ExtractedField]]:
     run = ExtractionRun(
         id=uuid.uuid4(),
@@ -162,6 +178,7 @@ def _store_run(
         provider=provider.name,
         model=result.model,
         prompt_version=result.prompt_version,
+        created_at=created_at,
         raw_json=json.dumps(
             {
                 "fields": [asdict(value) for value in result.fields],
@@ -201,9 +218,20 @@ def _decimal4(value: float) -> Decimal:
     return Decimal(str(round(value, 4)))
 
 
+def assess(
+    provider: ExtractionProvider, data: bytes, config: WorkflowConfigModel
+) -> tuple[ExtractionResult, DocumentTypeSpec, Evaluation]:
+    """Extraction plus confidence scoring; runs under the worker's hard timeout."""
+    result = provider.extract(data, config)
+    type_spec = config.document_type(result.document_type) or config.document_types[0]
+    return result, type_spec, evaluate(result.fields, result.pages, type_spec)
+
+
 def complete(
     claim: Claim,
     result: ExtractionResult,
+    evaluation: Evaluation,
+    type_spec: DocumentTypeSpec,
     provider: ExtractionProvider,
     config: WorkflowConfigModel,
 ) -> None:
@@ -216,16 +244,15 @@ def complete(
         if lease is None:
             return
         event, document = lease
-        # Validation runs inside the completion transaction: a crash here rolls
-        # back to the leased "extracting" state, so the document stays reclaimable.
+        # Scoring already ran outside this transaction (under the timeout), so no
+        # slow check holds these row locks. The validating step is still recorded,
+        # and a crash here rolls back to the leased "extracting" state.
         document.status = "validating"
         document.updated_at = now
         session.add(audit(claim.org_id, claim.document_id, "document.validating", None, now))
         session.flush()
 
-        type_spec = config.document_type(result.document_type) or config.document_types[0]
-        evaluation = evaluate(result.fields, result.pages, type_spec)
-        run, fields = _store_run(claim, result, provider, evaluation)
+        run, fields = _store_run(claim, result, provider, evaluation, now)
         session.add(run)
         session.flush()
         session.add_all(fields)
@@ -322,16 +349,18 @@ def process_one(
             ):
                 fail(claim, "Stored document failed integrity check", retryable=False)
                 return True
-            # Parsing and extraction run under a hard wall-clock limit so one
-            # hostile PDF or hung provider cannot hold the worker forever.
-            result = run_with_timeout(
-                partial(provider.extract, data, config),
+            # Parsing, extraction and scoring run under a hard wall-clock limit so
+            # one hostile PDF or hung provider cannot hold the worker forever.
+            result, type_spec, evaluation = run_with_timeout(
+                partial(assess, provider, data, config),
                 get_settings().extraction_timeout_seconds,
             )
         except ExtractionError as exc:
             fail(claim, str(exc), retryable=False)
         except OperationTimeout:
             fail(claim, "Extraction timed out", retryable=False)
+        except ParserBusy:
+            fail(claim, "Worker is at its parsing limit", retryable=True)
         except StoredDocumentTooLarge:
             fail(claim, "Stored document exceeds upload size limit", retryable=False)
         except (StorageError, ProviderUnavailable):
@@ -340,7 +369,7 @@ def process_one(
             logger.exception("Unexpected extraction error for document %s", claim.document_id)
             fail(claim, "Extraction failed after retries", retryable=True)
         else:
-            complete(claim, result, provider, config)
+            complete(claim, result, evaluation, type_spec, provider, config)
         return True
     return False
 

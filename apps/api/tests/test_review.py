@@ -264,6 +264,8 @@ def review() -> Iterator[Review]:
                 {"name": "vendor", "value": "Maple Office"},
                 {"name": "invoice_number", "value": "MO-2002", "field_type": "identifier"},
                 {"name": "invoice_date", "value": "2026-09-10", "field_type": "date"},
+                {"name": "subtotal", "value": "$30.00", "field_type": "money"},
+                {"name": "tax", "value": "$10.00", "field_type": "money"},
                 {"name": "total", "value": "$40.00", "field_type": "money"},
                 {"name": "currency", "value": "EUR", "field_type": "currency"},
             ],
@@ -458,6 +460,8 @@ def test_correction_permissions_conflicts_and_lookups(review: Review) -> None:
     for actor in ("member", "viewer"):
         review.actor = actor
         assert review.correct("total", "accept").status_code == 403
+        # Authorization is checked before optimistic concurrency.
+        assert review.correct("total", "accept", version=7).status_code == 403
     review.actor = "reviewer2"
     # reviewer2 is not the assigned reviewer of the clean document.
     assert review.correct("total", "accept", document_id=review.clean_id).status_code == 403
@@ -726,3 +730,114 @@ def test_file_download_reports_storage_and_integrity_failures(review: Review) ->
     assert corrupted.json()["error"]["message"] == "Stored document failed integrity check"
     review.actor = "external"
     assert review.client.get(f"/v1/documents/{review.flagged_id}/file").status_code == 404
+
+
+def test_edits_and_approval_reject_amounts_the_ledger_cannot_store(review: Review) -> None:
+    huge = review.correct("total", "edit", "1" * 30)
+    assert huge.status_code == 422
+    assert huge.json()["error"]["message"] == "Value is too large to store"
+    precise = review.correct("total", "edit", "$1.23456")
+    assert precise.status_code == 422
+    assert precise.json()["error"]["message"] == "Value has more than 4 decimal places"
+    assert review.correct("total", "edit", "999999999999999.9999").status_code == 200
+    # An extracted total beyond the column bound cannot be derived into verified money.
+    with Session(review.engine) as session, session.begin():
+        session.execute(
+            update(ExtractedField)
+            .where(ExtractedField.document_id == review.clean_id, ExtractedField.name == "total")
+            .values(value="$" + "9" * 20)
+        )
+    failed = review.review("approve", document_id=review.clean_id)
+    assert failed.status_code == 422
+    assert failed.json()["error"]["message"] == (
+        "Verify the invoice amount and currency before approval"
+    )
+
+
+def test_reopen_clears_derived_money_and_reapproval_derives_again(review: Review) -> None:
+    assert review.correct("invoice_date", "edit", "2026-09-05").status_code == 200
+    assert review.correct("total", "accept").status_code == 200
+    approved = review.review("approve")
+    assert approved.status_code == 200, approved.text
+    assert Decimal(str(approved.json()["verified_amount"])) == Decimal("19.25")
+    assert approved.json()["verified_source"] == "derived"
+    reopened = review.review("reopen")
+    assert reopened.status_code == 200, reopened.text
+    assert reopened.json()["verified_amount"] is None
+    assert reopened.json()["currency"] is None
+    assert reopened.json()["verified_source"] is None
+    assert review.correct("total", "edit", "$30.00").status_code == 200
+    again = review.review("approve")
+    assert again.status_code == 200, again.text
+    assert Decimal(str(again.json()["verified_amount"])) == Decimal("30.00")
+    assert again.json()["verified_source"] == "derived"
+    with Session(review.engine) as session:
+        approvals = session.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.document_id == review.flagged_id,
+                AuditEvent.event_type == "invoice.approve",
+            )
+            .order_by(AuditEvent.created_at, AuditEvent.id)
+        ).all()
+        details = [json.loads(row.detail_json) for row in approvals]
+        assert [item["derived_money"] for item in details] == [True, True]
+        assert [item["failed_rules"] for item in details] == [[], []]
+        assert details[-1]["verified_amount"] == "30.0000"
+
+
+def test_reviewer_entered_money_survives_reopen_and_failed_rules_are_recorded(
+    review: Review,
+) -> None:
+    entered = review.client.post(
+        f"/v1/documents/{review.clean_id}/metadata",
+        json={"version": 0, "verified_amount": "5.00", "currency": "INR"},
+    )
+    assert entered.status_code == 200, entered.text
+    assert entered.json()["verified_source"] == "reviewer"
+    # A corrected total that no longer adds up is recorded, not blocking.
+    assert review.correct("total", "edit", "$50.00", document_id=review.clean_id).status_code == 200
+    approved = review.review("approve", document_id=review.clean_id)
+    assert approved.status_code == 200, approved.text
+    assert Decimal(str(approved.json()["verified_amount"])) == Decimal("5.00")
+    assert approved.json()["currency"] == "INR"
+    assert approved.json()["verified_source"] == "reviewer"
+    reopened = review.review("reopen", document_id=review.clean_id)
+    assert reopened.status_code == 200
+    assert Decimal(str(reopened.json()["verified_amount"])) == Decimal("5.00")
+    assert reopened.json()["verified_source"] == "reviewer"
+    again = review.review("approve", document_id=review.clean_id)
+    assert again.status_code == 200
+    assert again.json()["currency"] == "INR"
+    with Session(review.engine) as session:
+        approvals = session.scalars(
+            select(AuditEvent).where(
+                AuditEvent.document_id == review.clean_id,
+                AuditEvent.event_type == "invoice.approve",
+            )
+        ).all()
+        for row in approvals:
+            detail = json.loads(row.detail_json)
+            assert detail["derived_money"] is False
+            assert detail["failed_rules"] == ["totals_add_up"]
+    rules = {rule["name"]: rule for rule in review.detail(review.clean_id)["rule_results"]}
+    assert rules["totals_add_up"]["passed"] is False
+
+
+def test_upload_returns_503_when_parse_slots_are_exhausted(
+    review: Review, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    slots = threading.BoundedSemaphore(1)
+    assert slots.acquire(blocking=False)
+    monkeypatch.setattr("app.timeouts._slots", slots)
+    response = review.client.post(
+        "/v1/documents",
+        files={"file": ("busy.pdf", b"%PDF-1.4 " + uuid.uuid4().bytes, "application/pdf")},
+    )
+    slots.release()
+    assert response.status_code == 503
+    assert response.json()["error"]["message"] == (
+        "Too many documents are being parsed right now; retry shortly"
+    )

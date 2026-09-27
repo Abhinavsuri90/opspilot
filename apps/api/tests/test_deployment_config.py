@@ -167,3 +167,17 @@ def test_iam_credentials_can_use_default_chain(monkeypatch: pytest.MonkeyPatch) 
     S3ObjectStore()
     assert "aws_access_key_id" not in captured
     assert "aws_secret_access_key" not in captured
+
+
+def test_settings_bound_timeouts_parse_cap_and_proxy_cidrs() -> None:
+    bounded = Settings(_env_file=None, extraction_timeout_seconds=240)
+    assert bounded.extraction_timeout_seconds == 240
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, extraction_timeout_seconds=241)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, max_concurrent_parses=0)
+    with pytest.raises(ValidationError, match="not a CIDR"):
+        Settings(_env_file=None, trusted_proxy_cidrs="10.0.0.0/8,nope")
+    normalized = Settings(_env_file=None, trusted_proxy_cidrs=" 10.1.2.3/8 , ::1 ,")
+    assert normalized.trusted_proxy_cidrs == "10.0.0.0/8,::1/128"
+    assert Settings(_env_file=None, trusted_proxy_cidrs="").trusted_proxy_cidrs == ""

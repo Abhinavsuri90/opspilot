@@ -154,7 +154,8 @@ def upgrade() -> None:
     # Corrections are append only; review tasks are refreshed on reopen.
     op.execute("GRANT SELECT, INSERT ON field_corrections TO opspilot_app")
     op.execute("GRANT SELECT, INSERT, UPDATE ON review_tasks TO opspilot_app")
-    # Config versions are append-only rows; the editor inserts a new version.
+    # Already granted by 0004; re-asserted because GRANT is idempotent and the
+    # upcoming config editor (append-only version rows) depends on it.
     op.execute("GRANT INSERT ON workflow_configs TO opspilot_app")
 
 

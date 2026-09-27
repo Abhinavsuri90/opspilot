@@ -28,7 +28,7 @@ from app.llm.provider import (
 from app.main import app
 from app.models import AuditEvent, Document, ExtractionRun, Organization, OutboxEvent
 from app.storage import get_store
-from app.worker import Claim, claim_next, complete, fail, process_one
+from app.worker import Claim, assess, claim_next, complete, fail, process_one, stale_lease_seconds
 from app.worker import main as worker_main
 from app.workflow_config import (
     DocumentTypeSpec,
@@ -36,6 +36,7 @@ from app.workflow_config import (
     WorkflowConfigModel,
     default_invoice_config,
 )
+from app.workflow_models import FieldCorrection, ReviewTask
 from tests.conftest import Tenant, TenantFactory, postgres
 
 SAMPLE = Path(__file__).parents[3] / "examples" / "northwind-invoice.pdf"
@@ -379,7 +380,10 @@ def test_worker_rotates_tenants_even_when_one_has_a_backlog(
         )
 
     monkeypatch.setattr("app.worker.claim_next", claim_with_backlog)
-    monkeypatch.setattr("app.worker.complete", lambda claim, result, provider, config: None)
+    monkeypatch.setattr(
+        "app.worker.complete",
+        lambda claim, result, evaluation, type_spec, provider, config: None,
+    )
     assert process_one(store)
     assert process_one(store)
     assert claimed_orgs == org_ids[:2]
@@ -429,7 +433,8 @@ def test_worker_lease_lock_prevents_reclaim_during_completion(
             def finish() -> None:
                 try:
                     provider = MockInvoiceProvider()
-                    complete(stale_claim, provider.extract(data, CONFIG), provider, CONFIG)
+                    result, type_spec, evaluation = assess(provider, data, CONFIG)
+                    complete(stale_claim, result, evaluation, type_spec, provider, CONFIG)
                 except Exception as exc:
                     errors.append(exc)
 
@@ -716,5 +721,136 @@ def test_concurrent_identical_uploads_create_one_document(make_tenant: TenantFac
             )
             assert count == 1
         assert len(store.objects) == 1
+    finally:
+        del app.dependency_overrides[get_store]
+
+
+def test_stale_lease_always_exceeds_the_extraction_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    for timeout, expected in ((60, 300), (240, 300), (600, 660)):
+        settings = SimpleNamespace(extraction_timeout_seconds=timeout)
+        monkeypatch.setattr("app.worker.get_settings", lambda settings=settings: settings)
+        assert stale_lease_seconds() == expected
+
+
+@postgres
+def test_worker_retries_when_parse_slots_are_exhausted(
+    monkeypatch: pytest.MonkeyPatch, make_tenant: TenantFactory
+) -> None:
+    monkeypatch.setattr("app.worker.get_provider", MockInvoiceProvider)
+    tenant = make_tenant()
+    store = MemoryStore()
+    app.dependency_overrides[get_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            tenant_login(client, tenant, "member")
+            document_id = uuid.UUID(upload(client, "busy.pdf", invoice_pdf())["id"])
+            exhausted = threading.BoundedSemaphore(1)
+            assert exhausted.acquire(blocking=False)
+            monkeypatch.setattr("app.timeouts._slots", exhausted)
+            assert process_one(store, document_id) is True
+            body = client.get(f"/v1/documents/{document_id}").json()
+            assert body["status"] == "queued" and body["failure_reason"] is None
+            events = [event for event, _ in audit_events(tenant.org_id, document_id)]
+            assert events[-1] == "document.retry_scheduled"
+            exhausted.release()
+            # The retry backs off by two seconds before it can be claimed again.
+            deadline = time.monotonic() + 8
+            while not process_one(store, document_id):
+                assert time.monotonic() < deadline, "retry never became claimable"
+                time.sleep(0.25)
+            assert client.get(f"/v1/documents/{document_id}").json()["status"] == "needs_review"
+    finally:
+        del app.dependency_overrides[get_store]
+
+
+@postgres
+def test_review_flow_end_to_end_with_corrections(
+    monkeypatch: pytest.MonkeyPatch, make_tenant: TenantFactory
+) -> None:
+    monkeypatch.setattr("app.worker.get_provider", MockInvoiceProvider)
+    tenant, bystander = make_tenant(), make_tenant()
+    store = MemoryStore()
+    app.dependency_overrides[get_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            tenant_login(client, tenant, "member")
+            document_id = uuid.UUID(
+                upload(
+                    client,
+                    "flow.pdf",
+                    invoice_pdf(
+                        invoice_number="FLOW-0001",
+                        total="$110.00",
+                        extra_lines={"Subtotal": "$100.00", "Tax": "$10.00"},
+                    ),
+                )["id"]
+            )
+            assert process_one(store, document_id) is True
+            tenant_login(client, tenant, "reviewer")
+            path = f"/v1/documents/{document_id}"
+            detail = client.get(path).json()
+            assert detail["status"] == "needs_review" and detail["version"] == 0
+            fields = {field["name"]: field for field in detail["fields"]}
+            edited = client.post(
+                f"{path}/fields/{fields['vendor']['id']}",
+                json={"version": 0, "action": "edit", "value": "Northwind Traders Ltd"},
+            )
+            assert edited.status_code == 200, edited.text
+            accepted = client.post(
+                f"{path}/fields/{fields['total']['id']}", json={"version": 1, "action": "accept"}
+            )
+            assert accepted.status_code == 200, accepted.text
+            assert accepted.json()["version"] == 2
+            approved = client.post(f"{path}/review", json={"version": 2, "decision": "approve"})
+            assert approved.status_code == 200, approved.text
+            workspace = approved.json()
+            assert workspace["verified_amount"] == "110.0000"
+            assert workspace["currency"] == "USD"
+            assert workspace["verified_source"] == "derived"
+
+            # The application role sees the corrections only inside the owning tenant.
+            with SessionLocal() as session:
+                set_org_context(session, tenant.org_id)
+                rows = session.scalars(
+                    select(FieldCorrection)
+                    .where(FieldCorrection.document_id == document_id)
+                    .order_by(FieldCorrection.created_at, FieldCorrection.id)
+                ).all()
+                assert [(row.kind, row.field_name, row.after_value) for row in rows] == [
+                    ("edit", "vendor", "Northwind Traders Ltd"),
+                    ("accept", "total", "$110.00"),
+                ]
+                assert all(row.reviewer_user_id == tenant.users["reviewer"] for row in rows)
+                task = session.get(ReviewTask, document_id)
+                assert task is not None and task.outcome == "approved"
+                assert task.completed_at is not None
+            with SessionLocal() as session:
+                set_org_context(session, bystander.org_id)
+                assert (
+                    session.scalars(
+                        select(FieldCorrection).where(FieldCorrection.document_id == document_id)
+                    ).all()
+                    == []
+                )
+                assert session.get(ReviewTask, document_id) is None
+
+            timeline = client.get(f"{path}/timeline").json()
+            assert [entry["event_type"] for entry in timeline] == [
+                "document.received",
+                "document.queued",
+                "document.extracting",
+                "document.validating",
+                "extraction.completed",
+                "document.needs_review",
+                "field.edit",
+                "field.accept",
+                "review.approve",
+            ]
+            stamps = [entry["at"] for entry in timeline]
+            assert stamps == sorted(stamps)
+            assert timeline[4]["detail"]["rule_results"][0]["passed"] is True
+            approve_audit = dict(audit_events(tenant.org_id, document_id))["invoice.approve"]
+            assert approve_audit["derived_money"] is True
+            assert approve_audit["failed_rules"] == []
     finally:
         del app.dependency_overrides[get_store]

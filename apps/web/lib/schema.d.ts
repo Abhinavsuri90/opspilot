@@ -1120,6 +1120,8 @@ export interface components {
             verified_amount: string | null;
             /** Currency */
             currency: string | null;
+            /** Verified Source */
+            verified_source: ("reviewer" | "derived") | null;
             /** Visibility */
             visibility: string;
             /** Comments */

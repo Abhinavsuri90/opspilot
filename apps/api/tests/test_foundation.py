@@ -343,13 +343,21 @@ def test_readyz_reports_ready_with_migrated_schema() -> None:
 
 
 @postgres
-def test_login_throttle_limits_attempts_per_client_address(
+def test_login_throttle_charges_client_address_only_for_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("app.login_throttle.MAX_IP_ATTEMPTS_PER_WINDOW", 3)
+    good = {
+        "org_slug": "northwind",
+        "email": "northwind@example.com",
+        "password": os.environ["DEMO_PASSWORD"],
+    }
+    address_key = client_ip_hash(TEST_CLIENT_HOST)
+    account_key = identity_hash("northwind", "northwind@example.com")
     with TestClient(app) as client:
-        for _ in range(3):
-            guess = client.post(
+
+        def guess() -> int:
+            response = client.post(
                 "/v1/auth/login",
                 json={
                     "org_slug": "northwind",
@@ -357,51 +365,37 @@ def test_login_throttle_limits_attempts_per_client_address(
                     "password": "wrong-password",
                 },
             )
-            assert guess.status_code == 401
-        blocked = client.post(
-            "/v1/auth/login",
-            json={
-                "org_slug": "northwind",
-                "email": f"absent-{uuid.uuid4().hex}@example.com",
-                "password": "wrong-password",
-            },
-        )
-        assert blocked.status_code == 429
-        # Even correct credentials stay blocked until the address window resets.
-        assert (
-            client.post(
-                "/v1/auth/login",
-                json={
-                    "org_slug": "northwind",
-                    "email": "northwind@example.com",
-                    "password": os.environ["DEMO_PASSWORD"],
-                },
-            ).status_code
-            == 429
-        )
+            return int(response.status_code)
+
+        # Correct logins from one shared address never consume the failure budget.
+        for _ in range(4):
+            assert client.post("/v1/auth/login", json=good).status_code == 200
         with SessionLocal() as session:
-            row = session.get(LoginAttempt, client_ip_hash(TEST_CLIENT_HOST))
-            assert row is not None and row.attempts == 5
-            # The per-account counter for the demo user is unaffected by the address block.
-            account = session.get(LoginAttempt, identity_hash("northwind", "northwind@example.com"))
-            assert account is not None and account.attempts == 1
+            assert session.get(LoginAttempt, address_key) is None
+        assert [guess() for _ in range(3)] == [401, 401, 401]
+        with SessionLocal() as session:
+            row = session.get(LoginAttempt, address_key)
+            assert row is not None and row.attempts == 3
+        assert guess() == 429
+        # A blocked address is refused before password work, even with correct credentials.
+        assert client.post("/v1/auth/login", json=good).status_code == 429
+        with SessionLocal() as session:
+            row = session.get(LoginAttempt, address_key)
+            assert row is not None and row.attempts == 3
+            # The address check runs first, so a blocked address cannot burn account budgets.
+            assert session.get(LoginAttempt, account_key) is None
         with SessionLocal() as session, session.begin():
-            row = session.get(LoginAttempt, client_ip_hash(TEST_CLIENT_HOST))
+            row = session.get(LoginAttempt, address_key)
             assert row is not None
             row.window_started_at = datetime.now(UTC) - timedelta(minutes=16)
-        success = client.post(
-            "/v1/auth/login",
-            json={
-                "org_slug": "northwind",
-                "email": "northwind@example.com",
-                "password": os.environ["DEMO_PASSWORD"],
-            },
-        )
-        assert success.status_code == 200
+        assert client.post("/v1/auth/login", json=good).status_code == 200
         with SessionLocal() as session:
-            account_key = identity_hash("northwind", "northwind@example.com")
             assert session.get(LoginAttempt, account_key) is None
-            row = session.get(LoginAttempt, client_ip_hash(TEST_CLIENT_HOST))
+            row = session.get(LoginAttempt, address_key)
+            assert row is not None and row.attempts == 3
+        assert guess() == 401
+        with SessionLocal() as session:
+            row = session.get(LoginAttempt, address_key)
             assert row is not None and row.attempts == 1
 
 
@@ -451,6 +445,20 @@ def test_client_ip_trusts_only_the_edge_appended_forwarded_entry(
     assert client_ip(fake_request(peer, forwarded)) == expected
 
 
+def test_client_ip_honors_configured_trusted_proxy_cidrs(monkeypatch: pytest.MonkeyPatch) -> None:
+    def configured(cidrs: str) -> None:
+        monkeypatch.setattr(
+            "app.client_ip.get_settings", lambda: SimpleNamespace(trusted_proxy_cidrs=cidrs)
+        )
+
+    configured("203.0.113.0/24")
+    assert client_ip(fake_request("203.0.113.7", "9.9.9.9, 1.2.3.4")) == "1.2.3.4"
+    assert client_ip(fake_request("10.0.0.5", "1.2.3.4")) == "10.0.0.5"
+    assert is_trusted_peer("203.0.113.9") and not is_trusted_peer("127.0.0.1")
+    configured("")
+    assert client_ip(fake_request("127.0.0.1", "1.2.3.4")) == "127.0.0.1"
+
+
 def test_trusted_peer_recognizes_loopback_and_private_ranges_only() -> None:
     assert all(is_trusted_peer(host) for host in ("127.0.0.1", "10.1.2.3", "172.31.0.9", "::1"))
     assert all(is_trusted_peer(host) for host in ("192.168.0.1", "fc00::1", "fdff::2"))
@@ -463,11 +471,11 @@ def test_trusted_peer_recognizes_loopback_and_private_ranges_only() -> None:
 def test_login_throttle_keys_on_trusted_forwarded_address(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: list[str] = []
 
-    def record(session: object, org_slug: str, email: str, address: str) -> bool:
+    def record(session: object, address: str) -> bool:
         seen.append(address)
-        return False
+        return True
 
-    monkeypatch.setattr("app.main.reserve_login", record)
+    monkeypatch.setattr("app.main.client_blocked", record)
     app.dependency_overrides[get_session] = lambda: object()
     try:
         with TestClient(app) as client:

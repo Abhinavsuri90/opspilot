@@ -2,7 +2,8 @@ import hashlib
 import logging
 import re
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from time import perf_counter
 from typing import Annotated
 from urllib.parse import quote
@@ -39,7 +40,7 @@ from app.auth import (
 from app.auth import (
     current_session as current_session,
 )
-from app.client_ip import client_ip
+from app.client_ip import client_ip, describe_strategy
 from app.config import get_settings
 from app.db import get_session, set_org_context
 from app.document_service import (
@@ -54,7 +55,12 @@ from app.document_service import (
 )
 from app.invoice_workflows import router as invoice_router
 from app.limits import MAX_UPLOAD_BYTES, MAX_UPLOAD_REQUEST_BYTES
-from app.login_throttle import clear_attempts, reserve_login
+from app.login_throttle import (
+    clear_attempts,
+    client_blocked,
+    record_client_failure,
+    reserve_attempt,
+)
 from app.onboarding import router as onboarding_router
 from app.repositories import (
     get_document_by_id,
@@ -68,10 +74,19 @@ from app.security import (
     verify_password,
 )
 from app.storage import ObjectStore, StorageError, get_store
+from app.timeouts import ParserBusy
 
 settings = get_settings()
 logger = logging.getLogger("uvicorn.error.opspilot")
-app = FastAPI(title="OpsPilot API", version="0.1.0")
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    logger.info("client_ip_strategy %s", describe_strategy())
+    yield
+
+
+app = FastAPI(title="OpsPilot API", version="0.1.0", lifespan=lifespan)
 app.include_router(onboarding_router)
 app.include_router(invoice_router)
 app.add_middleware(
@@ -269,7 +284,11 @@ def login(
     response: Response,
     session: Annotated[Session, Depends(get_session)],
 ) -> SessionResponse:
-    if not reserve_login(session, body.org_slug, body.email, client_ip(request)):
+    address = client_ip(request)
+    # The address budget is checked first and only charged on failure, so shared
+    # addresses with many correct logins are never blocked and cannot burn an
+    # account's budget once the address itself is blocked.
+    if client_blocked(session, address) or not reserve_attempt(session, body.org_slug, body.email):
         raise HTTPException(
             status_code=429, detail="Too many login attempts; try again in 15 minutes"
         )
@@ -279,14 +298,16 @@ def login(
     password_hash = user.password_hash if user is not None else DUMMY_PASSWORD_HASH
     password_valid = verify_password(password_hash, body.password)
     if org is None or user is None or not password_valid:
+        record_client_failure(session, address)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     set_org_context(session, org.id)
     membership = get_membership(session, org.id, user.id)
     if membership is None:
+        record_client_failure(session, address)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if membership.status != "active":
         # The credentials were right, so this pending or suspended account only
-        # spends the single reservation made above and is never cleared here.
+        # spends the single account reservation made above and is never cleared here.
         raise HTTPException(status_code=403, detail=membership_denial(membership))
     clear_attempts(session, body.org_slug, body.email)
     set_session_cookie(response, user.id, org.id)
@@ -328,6 +349,8 @@ def upload_document(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except DocumentLimitReached as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ParserBusy as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except StorageError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 

@@ -132,3 +132,35 @@ def test_workflow_config_requires_unique_document_types() -> None:
     )
     assert config.document_type("invoice") is invoice
     assert config.document_type("receipt") is None
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    ["(a+)+", r"(\d*)*", "(a|aa)+", "((ab)*)+", "(?:x+)*", "(a?){2,}", r"^(\w+\s?)*$"],
+)
+def test_rejects_regexes_that_repeat_a_repeating_group(pattern: str) -> None:
+    with pytest.raises(ValidationError, match="repeats a group"):
+        FieldSpec(name="x", regex=pattern)
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        r"^[A-Za-z0-9-/]{3,40}$",
+        "(?:ab)+",
+        r"^(\d{3})-(\d{4})$",
+        "net(30|60)",
+        r"[+*?]+",
+        r"\(a+\)+",
+        "(a)(b)+",
+        r"(?P<code>[A-Z]{2})-\d+",
+    ],
+)
+def test_accepts_linear_regexes(pattern: str) -> None:
+    assert FieldSpec(name="x", regex=pattern).regex == pattern
+
+
+def test_regex_length_is_capped() -> None:
+    with pytest.raises(ValidationError, match="longer than 200"):
+        FieldSpec(name="x", regex="a" * 201)
+    assert FieldSpec(name="x", regex="a" * 200).regex == "a" * 200

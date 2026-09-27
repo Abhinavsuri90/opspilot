@@ -33,6 +33,9 @@ DATE_FORMATS = (
     "%Y/%m/%d",
 )
 _MONEY_NOISE = re.compile(r"[A-Za-z$€£¥₹\s,]")
+# Stored as NUMERIC(20, 4); keep a margin below 10**16 so quantizing cannot overflow.
+MAX_AMOUNT_MAGNITUDE = Decimal(10) ** 15
+MAX_DECIMAL_PLACES = 4
 _WHITESPACE = re.compile(r"\s+")
 FieldStatus = Literal["auto", "needs_review"]
 
@@ -105,6 +108,16 @@ def typed_value(spec: FieldSpec, value: str) -> rules.Value:
     return value.strip()
 
 
+def magnitude_problem(amount: Decimal) -> str | None:
+    """Reject numbers the database column or a downstream ledger could not hold."""
+    if abs(amount) >= MAX_AMOUNT_MAGNITUDE:
+        return "Value is too large to store"
+    exponent = amount.as_tuple().exponent
+    if isinstance(exponent, int) and exponent < -MAX_DECIMAL_PLACES:
+        return f"Value has more than {MAX_DECIMAL_PLACES} decimal places"
+    return None
+
+
 def format_problem(spec: FieldSpec, value: str) -> str | None:
     """Return a human readable reason when the value fails the field's format checks."""
     text = value.strip()
@@ -112,10 +125,18 @@ def format_problem(spec: FieldSpec, value: str) -> str | None:
         return "Value is empty"
     if spec.type == "date" and parse_date(text) is None:
         return "Value is not a valid date"
-    if spec.type == "money" and parse_money(text) is None:
-        return "Value is not a valid amount"
-    if spec.type == "integer" and parse_integer(text) is None:
-        return "Value is not a whole number"
+    if spec.type == "money":
+        amount = parse_money(text)
+        if amount is None:
+            return "Value is not a valid amount"
+        if (problem := magnitude_problem(amount)) is not None:
+            return problem
+    if spec.type == "integer":
+        number = parse_integer(text)
+        if number is None:
+            return "Value is not a whole number"
+        if (problem := magnitude_problem(number)) is not None:
+            return problem
     if spec.type == "currency" and not re.fullmatch(r"[A-Z]{3}", text):
         return "Value is not a three-letter ISO currency code"
     if spec.regex is not None and re.fullmatch(spec.regex, text) is None:

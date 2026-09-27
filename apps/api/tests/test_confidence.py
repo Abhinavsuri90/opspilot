@@ -210,3 +210,14 @@ def test_threshold_is_per_field_and_self_report_is_clamped() -> None:
     assert by_name["amount"].signals["self_report"] == 0.0
     assert by_name["amount"].signals["cross_field"] == 1.0
     assert by_name["amount"].status == "auto"
+
+
+def test_money_and_integer_magnitude_are_bounded_for_storage() -> None:
+    money = FieldSpec(name="m", type="money")
+    assert format_problem(money, "1" * 30) == "Value is too large to store"
+    assert format_problem(money, "999999999999999.9999") is None
+    assert format_problem(money, "$1.23456") == "Value has more than 4 decimal places"
+    assert format_problem(money, "-1000000000000000") == "Value is too large to store"
+    integer = FieldSpec(name="i", type="integer")
+    assert format_problem(integer, "1" * 16) == "Value is too large to store"
+    assert format_problem(integer, "42") is None
