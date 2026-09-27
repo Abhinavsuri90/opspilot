@@ -516,6 +516,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/evals/latest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Latest Eval Report
+         * @description Latest operator-run synthetic evaluation; available to organization admins only.
+         */
+        get: operations["latest_eval_report_v1_evals_latest_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/settings/api-keys": {
         parameters: {
             query?: never;
@@ -598,9 +618,32 @@ export interface paths {
          * @description KPIs over the documents the caller may see.
          *
          *     ``days`` counts back from today's UTC date and every ``series`` point is a UTC calendar
-         *     day; ``cost_per_document`` is null until LLM calls are metered.
+         *     day; ``cost_per_document`` (cents) is null until the range has a recorded model call.
          */
         get: operations["metrics_overview_v1_metrics_overview_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/metrics/accuracy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Metrics Accuracy
+         * @description Field accuracy per ISO week (Monday start, UTC), oldest week first.
+         *
+         *     ``fields_assessed`` counts the fields of each document's latest extraction run and
+         *     ``fields_corrected`` those a reviewer edited; ``accuracy`` is null for an empty week.
+         */
+        get: operations["metrics_accuracy_v1_metrics_accuracy_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -767,6 +810,20 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AccuracyPoint */
+        AccuracyPoint: {
+            /**
+             * Week Start
+             * Format: date
+             */
+            week_start: string;
+            /** Fields Assessed */
+            fields_assessed: number;
+            /** Fields Corrected */
+            fields_corrected: number;
+            /** Accuracy */
+            accuracy: number | null;
+        };
         /** ActionDecisionRequest */
         ActionDecisionRequest: {
             /** Version */
@@ -1382,6 +1439,41 @@ export interface components {
              */
             active: boolean;
         };
+        /** EvalReportResponse */
+        EvalReportResponse: {
+            /** Generated At */
+            generated_at: string;
+            /** Provider */
+            provider: string;
+            /** Model */
+            model: string;
+            /** Tier2 Model */
+            tier2_model: string | null;
+            /** Dataset */
+            dataset: string;
+            /** Exact Match */
+            exact_match: number;
+            /** Grounded Fraction */
+            grounded_fraction: number;
+            /** Flag Precision */
+            flag_precision: number;
+            /** Flag Recall */
+            flag_recall: number;
+            /** Type Detection */
+            type_detection: number;
+            /** Escalation Rate */
+            escalation_rate: number;
+            /** Cost */
+            cost: {
+                [key: string]: unknown;
+            };
+            /** Learning */
+            learning: {
+                [key: string]: unknown;
+            };
+            /** Limitations */
+            limitations: string;
+        };
         /** ExportMonth */
         ExportMonth: {
             /**
@@ -1591,6 +1683,20 @@ export interface components {
             review_queue_depth: number;
             /** Cost Per Document */
             cost_per_document: number | null;
+            /** Cost Total Cents */
+            cost_total_cents: number;
+            /** Cost Unpriced Calls */
+            cost_unpriced_calls: number;
+            /** Llm Calls */
+            llm_calls: number;
+            /** Tokens In */
+            tokens_in: number;
+            /** Tokens Out */
+            tokens_out: number;
+            /** Escalation Rate */
+            escalation_rate: number | null;
+            /** Escalated Documents */
+            escalated_documents: number;
             /** Hours Saved */
             hours_saved: number;
             /** Baseline Minutes */
@@ -1654,6 +1760,8 @@ export interface components {
             kill_switch: boolean;
             /** Shadow Mode */
             shadow_mode: boolean;
+            /** Daily Llm Spend Cap Cents */
+            daily_llm_spend_cap_cents: number | null;
             /** Policies */
             policies: {
                 [key: string]: string;
@@ -1684,6 +1792,8 @@ export interface components {
             policies?: {
                 [key: string]: "auto" | "needs_approval" | "forbidden";
             } | null;
+            /** Daily Llm Spend Cap Cents */
+            daily_llm_spend_cap_cents?: number | null;
         };
         /** QuestionRequest */
         QuestionRequest: {
@@ -1908,7 +2018,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "audit" | "extraction" | "correction" | "review" | "comment" | "action";
+            kind: "audit" | "llm" | "extraction" | "correction" | "review" | "comment" | "action";
             /** Event Type */
             event_type: string;
             /** Actor Email */
@@ -3276,6 +3386,39 @@ export interface operations {
             };
         };
     };
+    latest_eval_report_v1_evals_latest_get: {
+        parameters: {
+            query?: never;
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalReportResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_api_keys_v1_settings_api_keys_get: {
         parameters: {
             query?: never;
@@ -3507,6 +3650,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["MetricsOverview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    metrics_accuracy_v1_metrics_accuracy_get: {
+        parameters: {
+            query?: {
+                weeks?: number;
+                document_type?: string | null;
+            };
+            header?: {
+                authorization?: string | null;
+            };
+            path?: never;
+            cookie?: {
+                opspilot_session?: string | null;
+            };
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccuracyPoint"][];
                 };
             };
             /** @description Validation Error */

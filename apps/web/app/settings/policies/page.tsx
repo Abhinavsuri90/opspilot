@@ -31,6 +31,7 @@ export default function PoliciesSettingsPage() {
   const [dialog, setDialog] = useState<{ engaging: boolean } | null>(null);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [capDraft, setCapDraft] = useState<string | undefined>();
 
   // A refresh (poll, or another administrator's save) drops draft choices it already reflects.
   useEffect(() => {
@@ -60,8 +61,10 @@ export default function PoliciesSettingsPage() {
       setError(null);
       setDialog(null);
       if (changes.policies) setDraft({});
+      if (changes.dailySpendCapCents !== undefined) setCapDraft(undefined);
       setNotice(changes.killSwitch !== undefined ? (changes.killSwitch ? "Agent paused. Nothing executes until you resume it." : "Agent resumed. Waiting actions execute within about a minute.")
         : changes.shadowMode !== undefined ? (changes.shadowMode ? "Shadow mode on: approved actions are recorded, not executed." : "Shadow mode off: approved actions execute again.")
+        : changes.dailySpendCapCents !== undefined ? "Daily model spend cap saved."
         : `Policies saved as version ${saved.version}.`);
       void client.invalidateQueries({ queryKey: ["actions"] });
     },
@@ -113,6 +116,26 @@ export default function PoliciesSettingsPage() {
         />
       </section>
     </div>}
+
+    {server && <section aria-labelledby="model-budget-heading" className="card mt-5 p-5">
+      <h2 id="model-budget-heading" className="text-lg font-bold text-[#12233d]">Model spend guardrail</h2>
+      <p className="mt-1 text-xs leading-5 text-slate-600">Limit estimated model-call spend for this organization each UTC day. Rules-based extraction has no model-call charge. This guardrail checks recorded spend before a call; provider billing may differ and simultaneous calls can exceed the limit slightly.</p>
+      <form className="mt-4 flex flex-wrap items-end gap-3" onSubmit={event => {
+        event.preventDefault();
+        const raw = capDraft ?? (server.daily_llm_spend_cap_cents?.toString() ?? "");
+        const cap = raw.trim() === "" ? null : Number(raw);
+        if (cap !== null && (!Number.isInteger(cap) || cap < 0 || cap > 100_000_000)) { setError("Enter a whole number of US cents between 0 and 100,000,000, or leave blank for no cap."); return; }
+        setError(null);
+        save.mutate({ dailySpendCapCents: cap });
+      }}>
+        <label className="max-w-[230px] flex-1 text-xs font-semibold text-slate-700">Daily cap (US cents)
+          <input type="number" min="0" max="100000000" step="1" inputMode="numeric" className="field mt-1" placeholder="No cap" value={capDraft ?? (server.daily_llm_spend_cap_cents?.toString() ?? "")} disabled={save.isPending} onChange={event => setCapDraft(event.target.value)} />
+        </label>
+        <button type="submit" className="primary !min-h-11 text-sm" disabled={save.isPending || capDraft === undefined}>{save.isPending && save.variables?.dailySpendCapCents !== undefined ? "Saving…" : "Save cap"}</button>
+        {capDraft !== undefined && <button type="button" className="secondary !min-h-11 text-sm" onClick={() => setCapDraft(undefined)}>Discard</button>}
+      </form>
+      <p className="mt-2 text-xs text-slate-500">A blank value removes the cap. Zero blocks paid model calls. The active model, if configured, must have a supported price to be charged against this estimate.</p>
+    </section>}
 
     {server && <section aria-labelledby="policies-heading" className="card mt-5 overflow-hidden">
       <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 px-5 py-5">

@@ -33,8 +33,9 @@ const pages = [
   ["01", "Dashboard", "Your organization at a glance. See invoice counts and recent activity."],
   ["02", "Inbox", "Upload PDFs, find invoices, read source evidence, and collaborate."],
   ["03", "Review", "A focused queue for invoices that still need a decision."],
-  ["04", "Insights", "Explore verified totals by currency and ask invoice questions."],
-  ["05", "Admin", "Approve teammates, manage roles, and organize invoice categories."],
+  ["04", "Actions", "Inspect and approve follow-up work before a connector runs."],
+  ["05", "Insights", "Explore verified totals by currency and ask invoice questions."],
+  ["06", "Admin", "Approve teammates, manage roles, and organize invoice categories."],
 ];
 
 const faqs = [
@@ -110,7 +111,7 @@ export default function Home() {
           <article className={styles.documentFeature}><div><span className={styles.featureIcon}><Icon name="document" /></span><h3>The full picture.<br />Right beside the details.</h3><p>Read every PDF page, zoom in, and compare extracted fields with their source. Add a comment without losing the context.</p></div><div className={styles.paperScene} aria-hidden="true"><div className={styles.paperBack} /><div className={styles.paper}><span>INVOICE</span><span className={styles.paperStamp}>SOURCE PDF</span><i /><i /><div className={styles.paperHighlight}><span>Invoice total</span><b>Verified by a person</b></div><i /><i /></div><span className={styles.paperAnnotation}><Icon name="check" /> Evidence in view</span></div></article>
           <article className={styles.insightsFeature}><span className={styles.featureIcon}><Icon name="chart" /></span><h3>Ask a clearer question.<br />Get a grounded answer.</h3><p>Explore invoice counts, categories, and verified amounts from records you have permission to see.</p><div className={styles.questionBubble}>How many invoices need review?<span aria-hidden="true">↗</span></div><div className={styles.insightTags}><span>Counts &amp; status</span><span>Totals by currency</span><span>Source citations</span></div></article>
         </div>
-        <div className={styles.pageIntro}><h3>Five connected views. One place to sign in.</h3><p>Available actions follow your approved role and invoice access.</p></div>
+        <div className={styles.pageIntro}><h3>Six connected spaces. One place to sign in.</h3><p>Available actions follow your approved role and invoice access. A guide inside the workspace explains every page.</p></div>
         <div className={styles.pageGrid}>{pages.map(([number, title, description]) => <div key={title}><span>{number}</span><h4>{title}{title === "Admin" && <small>ADMIN ONLY</small>}</h4><p>{description}</p></div>)}</div>
       </section>
 

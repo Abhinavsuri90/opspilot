@@ -11,16 +11,23 @@ const overview: MetricsOverview = {
   median_time_to_complete_minutes: null,
   review_queue_depth: 2,
   cost_per_document: null,
+  cost_total_cents: 0,
+  cost_unpriced_calls: 0,
+  llm_calls: 0,
+  tokens_in: 0,
+  tokens_out: 0,
+  escalation_rate: null,
+  escalated_documents: 0,
   hours_saved: 0,
   baseline_minutes: 12,
   series: [],
 };
 
 describe("KpiTiles", () => {
-  it("renders seven tiles and reads null metrics as unmeasured instead of zero", () => {
+  it("renders eight tiles and reads null metrics as unmeasured instead of zero", () => {
     render(<KpiTiles tiles={kpiTiles(overview)} />);
     const tiles = screen.getAllByRole("group");
-    expect(tiles).toHaveLength(7);
+    expect(tiles).toHaveLength(8);
 
     const rate = screen.getByRole("group", { name: "Auto-approve rate" });
     expect(within(rate).getByTestId("kpi-value")).toHaveTextContent("—");
@@ -29,7 +36,7 @@ describe("KpiTiles", () => {
 
     const cost = screen.getByRole("group", { name: "Cost per document" });
     expect(within(cost).getByTestId("kpi-value")).toHaveTextContent(COST_NOT_TRACKED);
-    expect(within(cost).getByText("Model calls are not metered yet")).toBeInTheDocument();
+    expect(within(cost).getByText("No priced model calls in this range")).toBeInTheDocument();
 
     const queue = screen.getByRole("group", { name: "Review queue depth" });
     expect(within(queue).getByTestId("kpi-value")).toHaveTextContent("2");

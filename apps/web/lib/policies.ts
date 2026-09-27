@@ -92,7 +92,7 @@ export function policyDraftReducer(draft: PolicyDraft, action: PolicyDraftAction
   }
 }
 
-export type PolicyChanges = { killSwitch?: boolean; shadowMode?: boolean; policies?: PolicyDraft };
+export type PolicyChanges = { killSwitch?: boolean; shadowMode?: boolean; dailySpendCapCents?: number | null; policies?: PolicyDraft };
 
 /**
  * The compare-and-set body for one save: the version the screen was rendered
@@ -104,6 +104,7 @@ export function buildPoliciesUpdate(server: PoliciesResponse, changes: PolicyCha
   let changed = false;
   if (changes.killSwitch !== undefined && changes.killSwitch !== server.kill_switch) { body.kill_switch = changes.killSwitch; changed = true; }
   if (changes.shadowMode !== undefined && changes.shadowMode !== server.shadow_mode) { body.shadow_mode = changes.shadowMode; changed = true; }
+  if (changes.dailySpendCapCents !== undefined && changes.dailySpendCapCents !== server.daily_llm_spend_cap_cents) { body.daily_llm_spend_cap_cents = changes.dailySpendCapCents; changed = true; }
   if (changes.policies) {
     const policies: Record<string, PolicyMode> = {};
     for (const [actionType, mode] of Object.entries(changes.policies)) {

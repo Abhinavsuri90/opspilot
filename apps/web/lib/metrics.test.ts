@@ -9,6 +9,13 @@ const overview: MetricsOverview = {
   median_time_to_complete_minutes: 65.4,
   review_queue_depth: 7,
   cost_per_document: null,
+  cost_total_cents: 0,
+  cost_unpriced_calls: 0,
+  llm_calls: 0,
+  tokens_in: 0,
+  tokens_out: 0,
+  escalation_rate: 0.125,
+  escalated_documents: 2,
   hours_saved: 240.75,
   baseline_minutes: 12,
   series: [
@@ -51,8 +58,8 @@ describe("KPI formatting", () => {
   it("says cost is not tracked until the API reports a number", () => {
     expect(formatCost(null)).toBe(COST_NOT_TRACKED);
     expect(formatCost(undefined)).toBe(COST_NOT_TRACKED);
-    expect(formatCost(0.0123)).toBe("0.012");
-    expect(formatCost(2.5)).toBe("2.50");
+    expect(formatCost(0.0123)).toBe("0.012¢");
+    expect(formatCost(2.5)).toBe("2.50¢");
   });
 
   it("only accepts the three supported ranges", () => {
@@ -64,12 +71,12 @@ describe("KPI formatting", () => {
 });
 
 describe("KPI tiles", () => {
-  it("builds the seven tiles from an overview", () => {
+  it("builds the eight tiles from an overview", () => {
     const tiles = kpiTiles(overview);
-    expect(tiles.map(tile => tile.id)).toEqual(["documents_processed", "auto_approve_rate", "field_accuracy", "median_time_to_complete", "review_queue_depth", "cost_per_document", "hours_saved"]);
-    expect(tiles.map(tile => tile.value)).toEqual(["1,284", "82.5%", "90%", "1 h 5 min", "7", COST_NOT_TRACKED, "241 h"]);
+    expect(tiles.map(tile => tile.id)).toEqual(["documents_processed", "auto_approve_rate", "field_accuracy", "median_time_to_complete", "review_queue_depth", "cost_per_document", "escalation_rate", "hours_saved"]);
+    expect(tiles.map(tile => tile.value)).toEqual(["1,284", "82.5%", "90%", "1 h 5 min", "7", COST_NOT_TRACKED, "12.5%", "241 h"]);
     expect(tiles[0].detail).toBe("Reached a decision path in the last 30 days");
-    expect(tiles[6].detail).toBe("Against a 12-minute manual baseline per document");
+    expect(tiles[7].detail).toBe("Against a 12-minute manual baseline per document");
     expect(tiles[5].empty).toBe(true);
     expect(tiles[1].empty).toBe(false);
     expect(kpiDefinitions().map(item => item.id)).toEqual(tiles.map(tile => tile.id));
@@ -77,7 +84,7 @@ describe("KPI tiles", () => {
 
   it("shows dashes and quiet details while nothing is measured", () => {
     const tiles = kpiTiles({ ...overview, documents_processed: 0, auto_approve_rate: null, field_accuracy: null, median_time_to_complete_minutes: null, hours_saved: 0 });
-    expect(tiles.map(tile => tile.value)).toEqual(["0", EMPTY_VALUE, EMPTY_VALUE, EMPTY_VALUE, "7", COST_NOT_TRACKED, "0 h"]);
+    expect(tiles.map(tile => tile.value)).toEqual(["0", EMPTY_VALUE, EMPTY_VALUE, EMPTY_VALUE, "7", COST_NOT_TRACKED, "12.5%", "0 h"]);
     expect(tiles[1].detail).toBe("No processed documents yet");
     expect(tiles[2].detail).toBe("No fields assessed yet");
     expect(tiles[3].detail).toBe("No completed reviews yet");
@@ -86,7 +93,7 @@ describe("KPI tiles", () => {
 
   it("renders every value as a dash before the overview loads", () => {
     const tiles = kpiTiles(undefined);
-    expect(tiles).toHaveLength(7);
+    expect(tiles).toHaveLength(8);
     expect(tiles.every(tile => tile.value === EMPTY_VALUE && tile.empty)).toBe(true);
     expect(tiles[0].detail).toBe("Reached a decision path in the selected range");
   });

@@ -60,7 +60,7 @@ export const COST_NOT_TRACKED = "Not tracked yet";
 export function formatCost(value: number | null | undefined): string {
   if (value === null || value === undefined || !Number.isFinite(value)) return COST_NOT_TRACKED;
   const amount = Math.max(0, value);
-  return amount < 1 ? amount.toFixed(3) : amount.toFixed(2);
+  return `${amount < 1 ? amount.toFixed(3) : amount.toFixed(2)}¢`;
 }
 
 export type KpiTone = "primary" | "review" | "completed" | "neutral";
@@ -83,7 +83,8 @@ const definitions = {
   field_accuracy: "1 minus (fields a reviewer edited ÷ fields assessed) across the latest extraction run of each processed document. Accepting a field as-is counts as accurate.",
   median_time_to_complete: "Median of review task completion minus its opening, in minutes. Auto-approved documents count as zero minutes.",
   review_queue_depth: "Documents waiting for a human decision right now, regardless of the range.",
-  cost_per_document: "Model and parsing cost divided by processed documents. Reported once model calls are metered per document.",
+  cost_per_document: "Priced model-call spend in US cents divided by processed documents. Unpriced calls are excluded. This is an estimate from the local pricing table, not a provider bill.",
+  escalation_rate: "Latest extraction runs that called a second model divided by latest runs for processed documents. Empty until there are extraction runs.",
   hours_saved: "Processed documents × the baseline minutes a manual entry takes, minus the minutes reviewers actually spent, floored at zero and expressed in hours.",
 } as const;
 
@@ -95,13 +96,14 @@ export function kpiDefinitions(): { id: string; label: string; definition: strin
     { id: "median_time_to_complete", label: "Median time to complete", definition: definitions.median_time_to_complete },
     { id: "review_queue_depth", label: "Review queue depth", definition: definitions.review_queue_depth },
     { id: "cost_per_document", label: "Cost per document", definition: definitions.cost_per_document },
+    { id: "escalation_rate", label: "Model escalation", definition: definitions.escalation_rate },
     { id: "hours_saved", label: "Hours saved", definition: definitions.hours_saved },
   ];
 }
 
 const isMissing = (value: number | null | undefined) => value === null || value === undefined || !Number.isFinite(value);
 
-/** The seven tiles, in reading order. Without data every value is a dash so the layout never jumps. */
+/** The eight tiles, in reading order. Without data every value is a dash so the layout never jumps. */
 export function kpiTiles(overview: MetricsOverview | undefined): KpiTileModel[] {
   const days = overview?.range.days;
   const rangeLabel = days ? `last ${days} days` : "selected range";
@@ -112,7 +114,8 @@ export function kpiTiles(overview: MetricsOverview | undefined): KpiTileModel[] 
     { id: "field_accuracy", label: "Field accuracy", value: overview ? formatRate(overview.field_accuracy) : EMPTY_VALUE, detail: !overview || isMissing(overview.field_accuracy) ? "No fields assessed yet" : "Fields that needed no correction", definition: definitions.field_accuracy, tone: "primary", empty: !overview || isMissing(overview.field_accuracy) },
     { id: "median_time_to_complete", label: "Median time to complete", value: overview ? formatMinutes(overview.median_time_to_complete_minutes) : EMPTY_VALUE, detail: !overview || isMissing(overview.median_time_to_complete_minutes) ? "No completed reviews yet" : "From review opened to decision", definition: definitions.median_time_to_complete, tone: "neutral", empty: !overview || isMissing(overview.median_time_to_complete_minutes) },
     { id: "review_queue_depth", label: "Review queue depth", value: overview ? formatCount(overview.review_queue_depth) : EMPTY_VALUE, detail: "Waiting for a human decision now", definition: definitions.review_queue_depth, tone: "review", empty: !overview },
-    { id: "cost_per_document", label: "Cost per document", value: overview ? formatCost(overview.cost_per_document) : EMPTY_VALUE, detail: !overview || isMissing(overview.cost_per_document) ? "Model calls are not metered yet" : "Model and parsing spend per document", definition: definitions.cost_per_document, tone: "neutral", empty: !overview || isMissing(overview.cost_per_document) },
+    { id: "cost_per_document", label: "Cost per document", value: overview ? formatCost(overview.cost_per_document) : EMPTY_VALUE, detail: !overview || isMissing(overview.cost_per_document) ? "No priced model calls in this range" : "Estimated model spend per document · US cents", definition: definitions.cost_per_document, tone: "neutral", empty: !overview || isMissing(overview.cost_per_document) },
+    { id: "escalation_rate", label: "Model escalation", value: overview ? formatRate(overview.escalation_rate) : EMPTY_VALUE, detail: !overview || isMissing(overview.escalation_rate) ? "No extraction runs in this range" : `${formatCount(overview.escalated_documents)} documents used a second model`, definition: definitions.escalation_rate, tone: "review", empty: !overview || isMissing(overview.escalation_rate) },
     { id: "hours_saved", label: "Hours saved", value: overview ? formatHours(overview.hours_saved) : EMPTY_VALUE, detail: baseline === undefined ? "Against a manual-entry baseline" : `Against a ${baseline}-minute manual baseline per document`, definition: definitions.hours_saved, tone: "completed", empty: !overview },
   ];
 }

@@ -140,7 +140,7 @@
 .pageIntro { margin-top: 52px; }
 .pageIntro h3 { font-size: 17px; font-weight: 600; letter-spacing: -.4px; }
 .pageIntro p { font-size: 12px; color: var(--muted); margin-top: 7px; }
-.pageGrid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 23px; margin-top: 28px; }
+.pageGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 23px; margin-top: 28px; }
 .pageGrid > div { border-top: 1px solid #cfdbcc; padding-top: 20px; }
 .pageGrid > div > span { font-size: 10px; color: #526b5c; }
 .pageGrid h4 { font-size: 15px; font-weight: 650; margin-top: 10px; }

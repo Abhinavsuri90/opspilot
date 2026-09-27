@@ -7,6 +7,7 @@ import { useEffect, useState } from "react";
 import { AppShell } from "@/components/AppShell";
 import { DocumentSourceBadge } from "@/components/DocumentSourceBadge";
 import { SessionFallback } from "@/components/SessionFallback";
+import { AccuracyChart } from "@/components/charts/AccuracyChart";
 import { KpiTiles } from "@/components/charts/KpiTile";
 import { TimeSeriesChart } from "@/components/charts/TimeSeriesChart";
 import { ACTIONS_POLL_MS } from "@/lib/actions";
@@ -79,12 +80,24 @@ export default function DashboardPage() {
     refetchInterval: ACTIONS_POLL_MS,
   });
 
+  const accuracy = useQuery({
+    queryKey: ["accuracy", orgId, userId, documentType],
+    enabled: ready,
+    queryFn: async () => {
+      const result = await api.GET("/v1/metrics/accuracy", { params: { query: { weeks: 12, document_type: documentType || undefined } } });
+      if (isUnauthorizedStatus(result.response.status)) throw unauthorizedError();
+      if (result.error || !result.data) throw new Error("Could not load weekly accuracy");
+      return result.data;
+    },
+    refetchInterval: METRICS_POLL_MS,
+  });
+
   useEffect(() => {
-    if (isUnauthorizedError(documents.error) || isUnauthorizedError(metrics.error) || isUnauthorizedError(actions.error)) {
+    if (isUnauthorizedError(documents.error) || isUnauthorizedError(metrics.error) || isUnauthorizedError(actions.error) || isUnauthorizedError(accuracy.error)) {
       queryClient.clear();
       router.replace("/login");
     }
-  }, [documents.error, metrics.error, actions.error, queryClient, router]);
+  }, [documents.error, metrics.error, actions.error, accuracy.error, queryClient, router]);
 
   if (session.isError || !session.data || isUnauthorizedError(documents.error) || isUnauthorizedError(metrics.error)) return <SessionFallback session={session} />;
 
@@ -101,7 +114,7 @@ export default function DashboardPage() {
       <div>
         <p className="text-[11px] font-bold uppercase tracking-[.18em] text-cyan-700">Operations overview</p>
         <h1 className="mt-2 text-3xl font-bold tracking-[-.04em] text-[#12233d] sm:text-[38px]">Dashboard</h1>
-        <p className="mt-2 text-sm leading-6 text-slate-600">How the workspace is performing, and the records that need attention.</p>
+        <p className="mt-2 text-sm leading-6 text-slate-600">How the workspace is performing, and the records that need attention. <Link href="/guide" className="font-semibold text-[#11627a] underline-offset-2 hover:underline">New here? Follow the guide →</Link></p>
       </div>
       <Link href="/inbox" className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-[#15395e] px-5 text-sm font-semibold text-white shadow-[0_8px_18px_rgba(21,57,94,.15)] transition-colors hover:bg-[#0d2c4d]">
         Open inbox <span aria-hidden="true">↗</span>
@@ -133,6 +146,13 @@ export default function DashboardPage() {
       </details>
     </section>
 
+    {overview && <section aria-label="Model usage" className="mt-4 flex flex-wrap gap-x-6 gap-y-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
+      <span><strong className="text-slate-800">{overview.llm_calls.toLocaleString("en-US")}</strong> model calls</span>
+      <span><strong className="text-slate-800">{overview.cost_total_cents.toFixed(3)}¢</strong> estimated priced spend</span>
+      <span><strong className="text-slate-800">{overview.tokens_in.toLocaleString("en-US")} / {overview.tokens_out.toLocaleString("en-US")}</strong> input / output tokens</span>
+      {overview.cost_unpriced_calls > 0 && <span className="font-semibold text-amber-800">{overview.cost_unpriced_calls} calls have no price estimate</span>}
+    </section>}
+
     <section aria-labelledby="activity-heading" className="card mt-6 p-5 sm:p-6">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div><h2 id="activity-heading" className="text-lg font-bold tracking-[-.02em] text-[#12233d]">Activity over time</h2><p className="mt-1 text-xs text-slate-500">Documents per day for the selected range and type. Toggle a series to compare fewer lines.</p></div>
@@ -141,6 +161,9 @@ export default function DashboardPage() {
         <TimeSeriesChart rows={rows} active={activeSeries} onToggle={key => setActiveSeries(current => toggleSeries(current, key))} title={rangeTitle} loading={metrics.isPending} />
       </div>
     </section>
+
+    {accuracy.isError && !isUnauthorizedError(accuracy.error) && <p role="alert" className="mt-4 text-sm text-rose-700">Could not load weekly accuracy. <button type="button" onClick={() => accuracy.refetch()} className="font-semibold underline">Try again</button></p>}
+    <AccuracyChart points={accuracy.data ?? []} loading={accuracy.isPending} />
 
     <section aria-label="Agent actions" className="mt-6 grid gap-3 sm:grid-cols-2">
       <Link href="/actions?tab=pending" className="group rounded-2xl border border-amber-200/80 bg-amber-50/60 p-5 shadow-[0_6px_20px_rgba(15,23,42,.035)] transition-colors hover:bg-amber-50" data-testid="tile-pending-approvals">

@@ -7,6 +7,7 @@ export type TimelineEntry = components["schemas"]["TimelineEntry"];
 const kinds: Record<TimelineEntry["kind"], { label: string; glyph: string; className: string }> = {
   audit: { label: "Audit", glyph: "◦", className: "bg-slate-100 text-slate-600" },
   extraction: { label: "Extraction", glyph: "▤", className: "bg-sky-100 text-sky-800" },
+  llm: { label: "Model call", glyph: "✦", className: "bg-cyan-100 text-cyan-900" },
   correction: { label: "Correction", glyph: "✎", className: "bg-violet-100 text-violet-800" },
   review: { label: "Review", glyph: "✓", className: "bg-emerald-100 text-emerald-800" },
   comment: { label: "Comment", glyph: "❝", className: "bg-amber-100 text-amber-800" },

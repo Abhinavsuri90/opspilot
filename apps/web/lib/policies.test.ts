@@ -5,6 +5,7 @@ const server: PoliciesResponse = {
   version: 4,
   kill_switch: false,
   shadow_mode: false,
+  daily_llm_spend_cap_cents: 100,
   policies: { post_webhook: "needs_approval" },
   defaults_from_config: { post_webhook: "auto", export_csv: "auto" },
   known_action_types: ["append_row", "create_record", "post_webhook", "export_csv"],
@@ -62,5 +63,7 @@ describe("compare-and-set payload", () => {
       policies: { export_csv: "forbidden", append_row: "needs_approval" },
     });
     expect(buildPoliciesUpdate(server, { policies: {} })).toBeNull();
+    expect(buildPoliciesUpdate(server, { dailySpendCapCents: 250 })).toEqual({ version: 4, daily_llm_spend_cap_cents: 250 });
+    expect(buildPoliciesUpdate(server, { dailySpendCapCents: null })).toEqual({ version: 4, daily_llm_spend_cap_cents: null });
   });
 });
