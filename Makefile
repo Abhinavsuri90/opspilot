@@ -1,4 +1,4 @@
-.PHONY: setup web-deps up demo down logs migrate seed test lint typecheck eval gen-dataset send-test-email gen-client smoke smoke-ui smoke-tenants smoke-workspace smoke-review lock-api
+.PHONY: setup web-deps up demo down logs migrate seed test lint typecheck eval eval-live gen-dataset send-test-email gen-client smoke smoke-ui smoke-tenants smoke-workspace smoke-review lock-api
 
 setup:
 	@test -f .env || cp .env.example .env
@@ -15,8 +15,10 @@ up: setup
 	$(MAKE) migrate
 	docker compose up -d --wait --wait-timeout 90 api worker web
 
-demo: up
+demo:
+	LLM_PROVIDER=rules OPENROUTER_API_KEY= $(MAKE) up
 	$(MAKE) seed
+	docker compose run --rm admin python /workspace/scripts/seed_demo_activity.py http://api:8000
 
 down:
 	docker compose down
@@ -49,6 +51,11 @@ typecheck: setup web-deps
 eval:
 	@mkdir -p evals/reports
 	docker compose run --rm -v "$(CURDIR)/evals/reports:/workspace/evals/reports" worker python -m evals.run
+
+# Live-model subset (20 documents) against the tier-1 model; needs OPENROUTER_API_KEY in .env.
+eval-live: setup
+	@mkdir -p evals/reports
+	docker compose run --rm -v "$(CURDIR)/evals/reports:/workspace/evals/reports" worker python -m evals.run --provider openrouter --limit $(or $(LIMIT),20)
 
 gen-dataset: setup
 	docker compose run --rm -v "$(CURDIR)/evals/datasets:/workspace/evals/datasets" -v "$(CURDIR)/examples:/workspace/examples" worker python /workspace/scripts/generate_synthetic.py --output /workspace/evals/datasets/generated --sample /workspace/evals/datasets/sample --examples /workspace/examples

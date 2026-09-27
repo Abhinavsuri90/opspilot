@@ -14,7 +14,7 @@ Built with Next.js, React, TanStack Query, FastAPI, Postgres row-level security 
 - Organization registration and company selection at login/join; admin approval for joining members/reviewers.
 - Admin-managed invoice categories and membership approval, role selection, rejection and suspension.
 - PDF upload, tenant-specific deduplication, background extraction, source evidence and retry.
-- Per-field confidence from six signals (grounding, format, cross-field rules, self-report, with router and memory slots reserved), configurable thresholds, and plain-language reasons for every flagged field.
+- Per-field confidence from six signals (grounding, format, cross-field rules, optional model agreement, optional vendor memory prior and self-report), configurable thresholds, and plain-language reasons for every flagged field.
 - Versioned per-organization workflow configuration: document types, typed fields and cross-field rules in a safe rule grammar; new organizations default to reviewing every document.
 - Field-level accept and edit as append-only corrections, review tasks with an SLA, a filterable review queue and a per-document timeline.
 - Governed actions after approval: one proposal per configured destination with a preview of exactly what will be sent, a per-type policy (auto, needs approval, forbidden), an organization kill switch and shadow mode re-checked immediately before every external call, idempotency keys, retries with backoff and a dead-letter queue with manual retry.
@@ -23,10 +23,13 @@ Built with Next.js, React, TanStack Query, FastAPI, Postgres row-level security 
 - Multi-customer templates: invoices, or logistics with purchase orders and delivery notes, detected from configured keywords with their own fields and rules.
 - Three intake channels with identical deduplication and audit: browser upload, an organization API key for programmatic submission, and a polled mailbox (IMAP, or Mailpit locally) that keeps the email body as context.
 - Near-duplicate detection on party, identifier and total that links both documents and forces review.
-- KPIs: documents processed, auto-approve rate, field accuracy, median time to complete, queue depth and hours saved against a configurable baseline.
+- Optional two-tier model extraction: route only uncertain fields to a second configured model; keep the first result available for review if escalation fails.
+- Tenant-scoped vendor profiles and correction examples, retrieved with a local embedding and pgvector; reviewed examples can enter a versioned model prompt.
+- A model-call ledger with estimated cost, token and latency accounting; admin-set daily spend guardrail; weekly field-accuracy chart and an admin synthetic-evaluation page.
+- KPIs: documents processed, auto-approve rate, field accuracy, model escalation, estimated cost per document, median time to complete, queue depth and hours saved against a configurable baseline.
 - Full PDF viewing with page navigation, zoom, selectable page text and download; reviewer assignment, verified amount/currency and approve/reject/reopen.
 - Invoice comments, decision history and authenticated sharing with restricted visibility.
-- Dashboard, review queue, category filters, paginated inbox and Insights.
+- Dashboard, review queue, category filters, paginated inbox, Insights and a role-aware in-app Guide.
 - SQL-backed questions about counts, totals, categories and extracted invoice fields with citations.
 - Restricted runtime database role, tenant RLS, optimistic versions and append-only history.
 
@@ -53,6 +56,27 @@ This builds the services, starts Postgres/storage, applies migrations and waits 
 
 Local web: `http://localhost:3300`. API/OpenAPI: `http://localhost:8000/docs`.
 
+### A populated local example
+
+To explore the whole flow with fictional companies and existing decisions, run this from the project directory after Docker Desktop is running:
+
+```sh
+make demo
+```
+
+`make demo` starts the stack with the **rules parser** (no model API key), creates Northwind Traders and Contoso Logistics, then uses the actual HTTP API to upload four fictional PDFs. Each organization gets an admin, reviewer and member, two categories, one approved invoice and one awaiting review with a team comment. Repeating the command preserves existing records and manual edits. `make up` remains the path for creating your own organization without sample accounts.
+
+| Organization at sign-in | Role | Email |
+| --- | --- | --- |
+| `northwind` | Admin | `northwind@example.com` |
+| `northwind` | Reviewer | `northwind.reviewer@example.com` |
+| `northwind` | Member | `northwind.member@example.com` |
+| `contoso` | Admin | `contoso.admin@example.com` |
+| `contoso` | Reviewer | `contoso@example.com` |
+| `contoso` | Member | `contoso.member@example.com` |
+
+All six fictional accounts use `DEMO_PASSWORD` from your ignored `.env`. Set your own value there before running the seed. Existing demo account passwords are intentionally preserved; if you changed the value, run `RESET_DEMO_CREDENTIALS=1 make demo` to reset only those fictional accounts. On sign-in, enter the organization slug, email and that password. Open **Guide** for a role-specific tour, **Inbox** for the source documents and team comments, **Review** for the pending decision, and **Insights** for approved and pending totals. These accounts are local examples; public signup is the real organization flow.
+
 ```sh
 make logs   # follow service logs; Ctrl-C stops following
 make down   # stop services; retain database and original PDFs
@@ -60,24 +84,26 @@ make down   # stop services; retain database and original PDFs
 
 ## Pages
 
-There are **fifteen pages**: three public entry pages, seven workspace pages and five admin settings pages. They ship together in one web application.
+There are **seventeen screen routes**: three public entry pages, seven shared workspace routes and seven admin routes. They ship together in one web application.
 
 | Route | Access | Purpose |
 | --- | --- | --- |
 | `/` | Public | Product overview, workflow, features, role choices and frequently asked questions |
 | `/register` | Public | Create an organization or request to join one |
 | `/login` | Public | Select organization and sign in; pending accounts get an explanation |
-| `/dashboard` | Approved account | KPIs (documents processed, auto-approve rate, field accuracy, median time to complete, queue depth, cost per document, hours saved), an activity chart, approvals and dead letters, recent documents |
+| `/dashboard` | Approved account | KPIs, estimated model usage, daily activity and weekly reviewer-correction chart, approvals and dead letters, recent documents |
 | `/inbox` | Approved account | Upload several PDFs at once, filter by status, category, type and source, inspect PDF and evidence, see email context and near-duplicate warnings, review, comment and manage access |
 | `/review` | Approved account | Filterable queue of invoices awaiting a decision with SLA and flagged-field counts; `/review/[id]` is the keyboard-first split view for corrections and decisions |
+| `/guide` | Approved account | Role-aware introduction, invoice lifecycle, page map and plain-language terms |
 | `/insights` | Approved account | Verified currency totals, category distribution and bounded invoice questions |
 | `/actions` | Approved account | Pending approvals with a preview of exactly what will be sent, execution history and the dead-letter queue |
-| `/settings/policies` | Organization admin | Kill switch, shadow mode and per-action-type policy |
+| `/settings/policies` | Organization admin | Kill switch, shadow mode, daily model spend guardrail and per-action-type policy |
 | `/settings/connectors` | Organization admin | Webhook, CSV export, Postgres table and Google Sheets connectors with connection tests and export downloads |
 | `/settings/workflow` | Organization admin | YAML workflow configuration: document types, fields, thresholds, rules and destinations |
 | `/settings/api-keys` | Organization admin | Keys for programmatic document submission, shown once and revocable |
 | `/settings/email-inbox` | Organization admin | Polled mailbox setup, connection test and polling status |
 | `/admin` | Organization admin | Membership and category management |
+| `/evals` | Organization admin | Latest synthetic extraction evaluation, learning comparison and limitations |
 
 The homepage links to `/register?mode=create`, `/register?mode=join&role=member` and `/register?mode=join&role=reviewer`. These preselect the form; they do not grant permissions. Joining users remain pending until an admin approves their membership and role. Everyone uses the same `/login` page with their organization, email and password; the API checks their current membership and permissions.
 
@@ -85,7 +111,7 @@ Admins can manage the organization. Reviewers can verify and decide eligible inv
 
 ## Extraction providers
 
-`rules` is the default offline provider. It reads explicitly labeled lines for every field configured for the document type (for the default invoice: `Vendor:`, `Invoice Number:`, `Invoice Date:`, `Due Date:`, `Subtotal:`, `Tax:`, `Total:`, `Currency:`, `PO Number:`). It is a limited parser, not general AI or OCR.
+`rules` is the default offline provider. It reads explicitly labeled lines for every field configured for the document type (for the default invoice: `Vendor:`, `Invoice Number:`, `Invoice Date:`, `Due Date:`, `Subtotal:`, `Tax:`, `Total:`, `Currency:`, `PO Number:`). It is a limited parser, not general AI or OCR. No API key is required to use the complete review workflow locally.
 
 For varied text invoices, configure OpenRouter in your ignored `.env` or Render secrets:
 
@@ -103,7 +129,9 @@ docker compose up -d --force-recreate worker
 
 Only the worker receives the model key. PDF text is sent to the configured provider. The application validates exact source evidence before accepting extracted fields. Live accuracy, cost and latency depend on the selected model and require testing. Rotate any key previously disclosed in chat; keep keys out of commits and screenshots.
 
-Supported uploads: unencrypted text-layer PDF, up to 10 MB, 10 pages and 50,000 text characters. Scanned invoices require OCR, which is not implemented. Every extracted invoice requires human review. Verified totals use exact decimals and separate currencies; they do not represent payments or accounting balances.
+Supported uploads: unencrypted text-layer PDF, up to 10 MB, 10 pages and 50,000 text characters. Scanned invoices require OCR, which is not implemented. New organizations require human review by default; an admin can opt into threshold-based automatic approval. Verified totals use exact decimals and separate currencies; they do not represent payments or accounting balances.
+
+The spend cap is a **soft estimate**: it checks recorded model-call cost before another call, and concurrent calls can pass together. The local price table may differ from a provider bill. The 150-document synthetic evaluation is available with `make eval`; the deterministic mock presently shows no exact-match gain after memory examples are loaded. Neither its scores nor reviewer-correction percentages establish real customer-document accuracy.
 
 ## Verification
 
@@ -118,9 +146,11 @@ make smoke-tenants
 make smoke-workspace      # fresh organization -> membership -> category -> invoice decision
 (cd apps/web && npm run test:e2e:errors)
 (cd apps/web && npm run test:e2e:public) # homepage, role entry links, auth navigation and mobile layout
+make eval                  # produces the report shown in admin Quality lab
+(cd apps/web && node --env-file=../../.env scripts/e2e-learning.mjs) # dashboard, guide, cap and report
 ```
 
-`make demo` explicitly starts the stack and creates optional Northwind/Contoso sample accounts. Normal `make up` does not seed them. Existing seed passwords are preserved. Tests and sample PDFs are synthetic; automated success is not a measurement of extraction accuracy on customer invoices.
+`make demo` explicitly starts the stack and populates optional Northwind/Contoso examples. Normal `make up` does not seed them. Database integration and browser suites require Docker; local unit tests alone do not establish the whole stack is working.
 
 ```sh
 LLM_PROVIDER=mock OPENROUTER_API_KEY= make eval
@@ -147,6 +177,6 @@ flowchart LR
 - [Architecture decisions](docs/adr/): tenant isolation, local storage, outbox, shared throttling, free-VM deployment, confidence scoring and governed actions.
 - [Product roadmap](SPEC.md): original broader vision; not a claim that all roadmap features exist.
 
-All eight pages deploy as one Next.js service. On Oracle, `infra/oracle/compose.yaml` adds Caddy HTTPS, separate private API/worker containers and persistent PostgreSQL. The browser uses the web service's same-origin API proxy; the API has no public port. The [deployment guide](docs/deployment.md) covers signup, free resource limits, private storage, migrations, backups and hosted checks. Oracle availability and hosted behavior remain to be verified. The existing Render Blueprint uses paid plans.
+All seventeen screen routes run in one Next.js service. On Oracle, `infra/oracle/compose.yaml` adds Caddy HTTPS, separate private API/worker containers and persistent PostgreSQL. The browser uses the web service's same-origin API proxy; the API has no public port. The [deployment guide](docs/deployment.md) covers signup, free resource limits, private storage, migrations, backups and hosted checks. Oracle availability and hosted behavior remain to be verified. The existing Render Blueprint uses paid plans.
 
 Remaining work before an unrestricted public service includes account email verification/recovery, stronger public signup abuse controls, isolated hostile-PDF parsing, operational alerts, backup restore validation and a real deployed acceptance test. There is no SSO, payment execution, ERP connector or arbitrary conversational assistant in the current application.

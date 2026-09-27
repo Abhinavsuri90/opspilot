@@ -34,6 +34,8 @@ flowchart TB
     Connectors[Connectors: signed webhook, CSV export, Postgres table, Google Sheets]
     Rules[Local labeled-field parser]
     Router[Optional OpenRouter structured extraction]
+    Memory[(Organization vendor profiles and correction examples)]
+    Ledger[(Model-call ledger and daily spend)]
     Admin[Operator migration process: owner role]
     Browser -->|HTTPS and HttpOnly cookie| Web
     Web -->|Private network| API
@@ -43,6 +45,8 @@ flowchart TB
     Worker -->|Verify hash and fetch PDF| Store
     Worker --> Rules
     Worker -. configured alternative .-> Router
+    Worker <-->|Same-org examples and priors| Memory
+    Worker -->|Success or failure, tokens and estimated cost| Ledger
     Worker --> Confidence
     Worker -->|Leased action, re-checked immediately before the call| Gate
     Gate -->|Only when allowed| Connectors
@@ -58,12 +62,12 @@ flowchart TB
 | Next.js | Pages, typed API client, TanStack Query cache, same-origin proxy | Stateless web replicas |
 | FastAPI | Authentication, permissions, validation, invoice workflow, field corrections, review queue, timeline, PDF delivery | Stateless API replicas; Postgres connection budget applies |
 | Postgres | Accounts, tenancy, workflow state, durable jobs, immutable evidence, audit | Vertical scaling first; inspect actual query plans before adding replicas |
-| Worker | PDF text parsing, optional model call, evidence validation, confidence scoring, rule evaluation, review-task creation, action proposal and execution behind the governance gate, durable completion | One job at a time per process under hard timeouts; add workers within provider, connector and DB limits |
+| Worker | PDF text parsing, optional two-tier model routing, same-org memory retrieval, evidence validation, confidence scoring, rule evaluation, review-task creation, action proposal and execution behind the governance gate, durable completion | One job at a time per process under hard timeouts; add workers within provider, connector and DB limits |
 | Connectors | Typed configuration, encrypted credentials, connection tests, preview diffs, idempotent execution against customer systems | Each call bounded by a timeout; retries with backoff; dead-letter queue after five attempts |
 | Object store | Original PDF bytes | Managed private bucket; backup/versioning configured by operator |
 | Migration process | Schema and restricted-role grants | One serialized release step; owner credentials excluded from serving processes |
 
-There is no Redis dispatch, vector retrieval, event bus, or automatic model routing in this implementation. Local Compose contains optional infrastructure experiments, but the running workflow uses Postgres directly. This keeps the durable job and invoice transaction in one database. See [ADR 003](docs/adr/003-direct-outbox-polling.md).
+There is no Redis dispatch or event bus. The running workflow uses Postgres directly for jobs, tenant-scoped correction memory, pgvector similarity and call accounting. A second model is optional; the router sends it only fields that the first pass could not confidently resolve. The durable job and invoice transaction stay in one database. See [ADR 003](docs/adr/003-direct-outbox-polling.md) and [ADR 009](docs/adr/009-learning-loop-and-router.md).
 
 ### Page map and entry journey
 
@@ -75,12 +79,14 @@ All pages belong to one Next.js application. The public homepage explains the pr
 | `/register` | Public organization creation or membership request |
 | `/login` | Public organization selection and password authentication |
 | `/dashboard` | Approved members: KPIs over a chosen range and document type, activity chart, approvals and dead letters, recent documents |
+| `/guide` | Approved members: role-aware explanation of the invoice lifecycle and every workspace area |
+| `/evals` | Organization admins: latest operator-run synthetic evaluation, cost and learning comparison with explicit limitations |
 | `/inbox` | Approved members: multi-file intake, source and type filters, evidence, full PDF, message context, near-duplicate warnings, discussion and permitted review/access actions |
 | `/review` | Approved members: filterable queue of authorized pending invoices with SLA and flagged-field counts |
 | `/review/[id]` | Eligible reviewers and admins: keyboard-first split view with evidence highlighting, per-field confidence and reasons, accept/edit corrections, rules, decision, discussion, access and timeline |
 | `/insights` | Approved members: authorized totals, categories and bounded questions |
 | `/actions` | Approved members: pending approvals with preview diffs, execution history and the dead-letter queue; decisions and retries need a reviewer or admin |
-| `/settings/policies` | Organization admins: kill switch, shadow mode and per-action-type policy |
+| `/settings/policies` | Organization admins: kill switch, shadow mode, daily estimated model spend cap and per-action-type policy |
 | `/settings/connectors` | Organization admins: connector setup, connection tests and CSV export downloads |
 | `/settings/workflow` | Organization admins: YAML workflow configuration with inline validation, import and export |
 | `/settings/api-keys` | Organization admins: keys for programmatic submission, shown once, revocable |
@@ -195,6 +201,8 @@ erDiagram
     EMAIL_INBOX ||--o{ EMAIL_MESSAGE : processed
     DOCUMENT ||--o{ AUDIT_EVENT : links
     ORGANIZATION ||--o{ AUDIT_EVENT : records
+    DOCUMENT ||--o{ LLM_CALL : meters
+    ORGANIZATION ||--o{ MEMORY_ITEM : remembers
 ```
 
 | Record | Important invariants |
@@ -219,6 +227,8 @@ erDiagram
 | Category | Unique normalized name inside organization; archive instead of deleting referenced history |
 | Review | Decision, actor, timestamp and note preserved; rejection requires a reason |
 | Grant | Same-org membership; revocation affects later authenticated reads |
+| Model call | Organization-scoped provider, model, purpose, tokens, latency and estimated cost; successes and failures are recorded where possible, with null cost for an unpriced model |
+| Memory item | Tenant-scoped vendor profile or bounded correction example; a 256-dimensional embedding supports same-org retrieval |
 
 A currency symbol such as `$` is never silently converted into USD. Extracted money remains evidence until a reviewer verifies amount and currency. Summaries keep currencies separate, count unverified exclusions, and cover the entire accessible dataset. They do not sum the latest UI page. Currency conversion and settlement balances would need additional exchange-rate and accounting models.
 
@@ -269,9 +279,13 @@ sequenceDiagram
     API-->>Staff: 202 with document ID
     Worker->>DB: Claim eligible job with SKIP LOCKED
     Worker->>S3: Fetch and verify original hash/size
-    Worker->>Extractor: Parse fields or call configured model
+    Worker->>Extractor: Load same-org memory, run rules or tier-1 model
+    opt Tier-1 result has failing fields and tier 2 is configured
+        Worker->>Extractor: Ask tier 2 for only failing fields
+    end
     Extractor-->>Worker: Fields and page evidence
-    Worker->>Worker: Score each field (grounding, format, rules, self-report)
+    Worker->>Worker: Score grounding, format, rules, agreement, prior and self-report
+    Worker->>DB: Record model calls, tokens, latency and estimated price
     Worker->>DB: Check lease, commit evidence + scores + review task + needs_review or auto_approved
     Reviewer->>API: Read full PDF, evidence, confidence and reasons
     Reviewer->>API: Accept or edit flagged fields (append-only corrections)
@@ -283,7 +297,15 @@ sequenceDiagram
 
 ### Validation and confidence
 
-Confidence is not the model's opinion of itself. Each extracted field receives a score in [0, 1] from six signals, weighted and renormalized over the signals that apply: grounding 0.35 (evidence is an exact substring of the page text, 0.7 after whitespace normalization), format 0.25 (type, regex and enum checks from the field spec), cross-field rules 0.20 (every rule referencing the field passes), model agreement 0.10 and memory prior 0.05 (reserved for the tier-2 router and vendor memory), and self-report 0.05. A field below its configured threshold is `needs_review` with human-readable reasons. Missing required fields are stored as empty flagged fields so a reviewer can supply them. Rules such as `subtotal + tax == total` come from tenant configuration and are parsed into a fixed grammar; unsupported syntax is rejected when the configuration is saved. Weights and rationale: [ADR 006](docs/adr/006-confidence-scoring.md).
+Confidence is not the model's opinion of itself. Each extracted field receives a score in [0, 1] from six signals, weighted and renormalized over the signals that apply: grounding 0.35 (evidence is an exact substring of the page text, 0.7 after whitespace normalization), format 0.25 (type, regex and enum checks from the field spec), cross-field rules 0.20 (every rule referencing the field passes), model agreement 0.10, memory prior 0.05, and self-report 0.05. Agreement applies when a second model was used; a prior applies when the organization has learned something about that vendor. A field below its configured threshold is `needs_review` with human-readable reasons. Missing required fields are stored as empty flagged fields so a reviewer can supply them. Rules such as `subtotal + tax == total` come from tenant configuration and are parsed into a fixed grammar; unsupported syntax is rejected when the configuration is saved. Weights and rationale: [ADR 006](docs/adr/006-confidence-scoring.md).
+
+### Learning, routing and cost
+
+Reviewer edits append a correction and a tenant-scoped example. Approval updates the vendor profile. At extraction, the worker retrieves examples from the same organization using vendor match, a local 256-dimensional feature hash and pgvector similarity. Only a small bounded set enters the versioned prompt. Memory can adjust confidence and help a live model, but the deterministic parser does not change its extracted values in response to examples.
+
+An optional tier-1 model extracts configured fields. If a required field is missing, falls below threshold or breaks a configured rule, an optional tier-2 model receives only those fields. Its answer replaces the first answer only when grounded in the PDF; disagreement is visible to the reviewer. A tier-2 outage leaves the first result available for review. With the default `rules` provider there is no external model call or key requirement.
+
+The `llm_calls` ledger records model, purpose, success/failure, tokens, latency and estimated US-cent cost. The price table is local and can be overridden; unknown model prices stay null and are counted separately. Ledger writes are best effort, so this is an operational estimate, not an invoice from the provider. An admin can set a daily estimated-spend cap. The worker checks recorded spend before each paid call and then defers or uses rules according to configuration. Since spend is recorded after calls and concurrent workers can pass the check together, this is a soft guardrail; a strict financial limit would require an atomic reservation before provider calls.
 
 The organization's `review_policy` decides routing: `always` (the default for new organizations) sends every document to review; `threshold` auto-approves a document only when no field is flagged and no rule failed. Approval requires every flagged field to carry a correction; verified amount and currency are derived from the effective total and currency fields when the reviewer has not entered them.
 
@@ -372,8 +394,8 @@ This is at-least-once processing with guarded database completion. A crash after
 | Old worker completes after reclaim | Lease mismatch prevents stale completion |
 | Provider returns invented evidence | Grounding check drops that field and records the reason; nothing survives, the run fails; no automatic approval |
 | Extraction hangs on a pathological PDF | Hard timeout (60 s default) fails the job as non-retryable; upload-time parsing has its own 15 s bound |
-| Kill switch engaged after an action was approved | Gate re-reads settings after the lease; the call never happens; the action waits and is retried when the switch is released |
-| Worker crashes between starting and finishing an attempt | The attempt counts against the budget; the lease expires and the action is retried or dead-lettered, so a customer system sees at most one duplicate, which idempotency keys let it ignore |
+| Kill switch engaged after an action was approved | Gate re-reads settings after the lease and before the call; actions not yet past that check wait. A switch flipped after the final check cannot recall an in-flight call |
+| Worker crashes between starting and finishing an attempt | The attempt counts against the retry budget; the lease expires and the action is retried or dead-lettered. A customer system may see duplicate requests, so destinations must honor idempotency keys |
 | Connector destination down or rate limiting | Retryable failures back off 1, 2, 4, 8, 16 minutes with jitter, then dead-letter with a manual retry |
 | Destination connector deleted or inactive | Action fails with a visible reason; a retry re-resolves the connector by destination name |
 | Encryption key rotated without re-entering credentials | Terminal failure named in the action; credentials must be re-entered |

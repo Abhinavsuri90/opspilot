@@ -11,11 +11,7 @@ import os
 import uuid
 from datetime import UTC, datetime
 
-from pydantic import ValidationError
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
-
-from app.action_models import ConnectorInstance
+from app.action_models import ConnectorInstance, OrgSettings
 from app.db import normalize_database_url
 from app.models import Membership, Organization, User, WorkflowConfig
 from app.security import hash_password, verify_password
@@ -25,12 +21,21 @@ from app.workflow_config import (
     default_invoice_config,
     template_config,
 )
+from pydantic import ValidationError
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
 DEMO_ORGS = [
     ("northwind", "Northwind Traders", "northwind@example.com", "admin", "invoice"),
+    ("northwind", "Northwind Traders", "northwind.reviewer@example.com", "reviewer", "invoice"),
+    ("northwind", "Northwind Traders", "northwind.member@example.com", "member", "invoice"),
+    ("contoso", "Contoso Logistics", "contoso.admin@example.com", "admin", "logistics"),
     ("contoso", "Contoso Logistics", "contoso@example.com", "reviewer", "logistics"),
+    ("contoso", "Contoso Logistics", "contoso.member@example.com", "member", "logistics"),
 ]
 EXPORT_CONNECTOR = "archive"
+# Demo organizations get a strict daily model budget so a public demo cannot run up a bill.
+DEMO_DAILY_LLM_SPEND_CAP_CENTS = 100
 
 
 def earlier_demo_shapes(slug: str, template: str) -> list[dict[str, object]]:
@@ -124,6 +129,21 @@ def ensure_export_connector(session: Session, org_id: uuid.UUID) -> None:
         )
 
 
+def ensure_spend_cap(session: Session, org_id: uuid.UUID) -> None:
+    """Set the demo budget once; an administrator's explicit value is left alone."""
+    settings = session.scalar(select(OrgSettings).where(OrgSettings.org_id == org_id))
+    if settings is None:
+        session.add(
+            OrgSettings(
+                org_id=org_id,
+                daily_llm_spend_cap_cents=DEMO_DAILY_LLM_SPEND_CAP_CENTS,
+                updated_at=datetime.now(UTC),
+            )
+        )
+    elif settings.daily_llm_spend_cap_cents is None and settings.version == 0:
+        settings.daily_llm_spend_cap_cents = DEMO_DAILY_LLM_SPEND_CAP_CENTS
+
+
 def ensure_workflow(session: Session, org_id: uuid.UUID, slug: str, template: str) -> None:
     latest = session.scalar(
         select(WorkflowConfig)
@@ -153,6 +173,8 @@ def ensure_workflow(session: Session, org_id: uuid.UUID, slug: str, template: st
 
 
 def seed() -> None:
+    if os.environ.get("ENVIRONMENT", "development") != "development":
+        raise RuntimeError("Fictional demo accounts may only be seeded in development")
     password = os.environ["DEMO_PASSWORD"]
     reset_credentials = os.environ.get("RESET_DEMO_CREDENTIALS") == "1"
     engine = create_engine(normalize_database_url(os.environ["DATABASE_OWNER_URL"]))
@@ -162,6 +184,8 @@ def seed() -> None:
             if org is None:
                 org = Organization(id=uuid.uuid4(), slug=slug, name=name)
                 session.add(org)
+            elif org.name != name:
+                raise RuntimeError(f"Existing organization {slug!r} is not the fictional demo org")
             user = session.scalar(select(User).where(User.email == email))
             if user is None:
                 user = User(id=uuid.uuid4(), email=email, password_hash=hash_password(password))
@@ -176,9 +200,10 @@ def seed() -> None:
                 session.add(Membership(id=uuid.uuid4(), org_id=org.id, user_id=user.id, role=role))
             if slug == "northwind":
                 ensure_export_connector(session, org.id)
+            ensure_spend_cap(session, org.id)
             session.flush()
             ensure_workflow(session, org.id, slug, template)
-    print("Seeded fictional demo orgs: northwind (invoices) and contoso (logistics)")
+    print("Seeded fictional demo orgs and admin/reviewer/member accounts: northwind, contoso")
 
 
 if __name__ == "__main__":

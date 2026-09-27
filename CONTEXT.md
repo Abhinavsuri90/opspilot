@@ -1,67 +1,48 @@
-# Handoff
+# Current handoff
 
-## 1. Last updated
+Updated 2026-09-27. Branch `main`; the previous committed/pushed head was `7343bf6`. The working tree contains Phase 5 backend, frontend, local demo and documentation changes that must be committed and checked in CI. See `git status` for the exact list. Never commit `.env` or any real model key.
 
-2026-09-27, mid-session. Latest commits: `e01614f` web fixes, `52172bb` Phase 2 API, `e729ebc` CI retry, plus the review fix pass (migration 0007, 210 API tests). Phases 2 to 4 complete (migrations through 0011, 328 API tests, 150 web tests, eight browser suites). Phase 5 backend in progress: see sections 3 and 4.
+## What the app is
 
-## 2. Current status
+OpsPilot is an organization-scoped invoice operations workspace. A person creates an organization and becomes its admin; members and reviewers request to join, and the admin approves them. Approved teammates upload text-based PDFs, inspect source evidence, correct fields, set categories and verified amounts, discuss, decide and optionally approve connector actions. Dashboard and Insights show authorized counts and currency-separated totals. The default `rules` provider works without an API key; OpenRouter is optional.
 
-Full project evaluation completed on 2026-09-27 (score 5.5/10: engineering about 7, spec completeness about 3). All ten local check suites were green at commit `7ffb822`: Ruff, mypy, 80 API tests, ESLint, TypeScript, 16 web tests, API smoke, public browser suite, fresh-company browser workflow, extraction eval. GitHub CI green on the last three commits.
+## Implemented scope
 
-The owner then chose to implement the rest of SPEC.md before deploying. Build order: fixes + Phase 2 → 3 → 4 → 5 → 6 to 9 → Phase 10 Oracle go-live. One commit per phase, every check suite green before each commit.
+- Phases 0–4: committed foundation, tenant isolation, intake, confidence and human review, governed actions/connectors, multiple intake channels, templates, KPIs and browser workflows.
+- Phase 5 in the current uncommitted tree: migration 0012; model-call ledger and local price table; prompt v3; optional tier-1/tier-2 router; tenant-scoped vendor profiles and correction examples with local hash embeddings/pgvector; daily estimated-spend cap; cost/escalation/weekly-accuracy APIs; synthetic eval and learning comparison. Frontend has corresponding dashboard tiles, accuracy chart, model-call timeline, cap setting and admin `/evals` report. ADR 009 explains design limits.
+- Product clarity: public homepage explains the six core spaces; `/guide` gives each role a route through the invoice lifecycle and a page map.
+- Local demo: `make demo` starts with `rules`, seeds fictional Northwind and Contoso admin/reviewer/member accounts, then uploads four example PDFs through the real API. Each org should have an approved document, one awaiting review, two categories, verified money and comments. This actual end-to-end seed has **not** run in this session because Docker Desktop did not start.
 
-**Done today:** review fixes (web and API), Phase 2 backend (migrations 0006 and 0007, 210 API tests) and the Phase 2 review split view (79 web tests, `make smoke-review`).
+## Verification in this session
 
-**In progress right now:** Phase 5 backend per the scratchpad brief (llm_calls with success and failure rows and a price table, prompt front-matter, tier-1/tier-2 router with the model-agreement signal, vendor memory and few-shot retrieval with pgvector and a local embedding, memory-prior signal, daily spend caps, accuracy series, eval learning scenario, optional real-model CI eval behind a secret). Its CI steps sit uncommitted in the working tree until its commit.
+- Local Python environment: Ruff clean; mypy clean; 314 API tests pass, **59 Postgres tests skip** because no `DATABASE_OWNER_URL`/running DB.
+- Web: ESLint, TypeScript, 150 unit tests, Next production build and Playwright public browser smoke pass. The public smoke covers owner/member/reviewer entry links, sign-in, protected redirect and 390/320px overflow.
+- Synthetic mock eval (150 documents): exact match 95.5%, grounded 100%, flag precision 75%, flag recall 100%, type detection 100%. Held-out learning delta is 0.0 percentage points; do not claim improved accuracy from this.
+- Docker commands failed because the Docker daemon is unavailable. Starting Docker Desktop through `open` and the nested executable also failed on this machine. Therefore full Postgres integration, API/browser workflow suites and demo activity remain unverified locally. CI after push is the next available full integration gate.
 
-## 3. Exact next step
+## Immediate next steps
 
-1. Phase 5 per the scratchpad brief (phase5_brief.md): llm_calls, prompt front-matter, tier router, vendor memory with pgvector (switch the Oracle Postgres image to pgvector), accuracy over time, spend caps, eval gate.
+1. Review this diff and `git diff --check`; run local static/test gates once more after any edits.
+2. Commit in coherent backend and web/demo/docs commits. The user previously authorized GitHub push; push to `origin/main` and inspect the GitHub CI run. Fix failures and repeat. The browser-smoke job starts with `make demo`, then runs `make eval` and the new learning UI smoke, so it verifies the seed and report on its Docker stack.
+3. When Docker Desktop is working, run `make demo` and smoke the seeded accounts, categories, PDFs, approvals, actions and Insights. If the demo seed fails, fix it before telling the owner the project is ready for their local test.
+4. The owner explicitly paused deployment. Do not provision Oracle/Render or present a live URL as verified.
 
-## 4. Files in play
+## Known product limits and roadmap
 
-- `apps/api/app/workflow_config.py`, `rules.py`, `confidence.py`, `review_service.py`, `prompts/`: new Phase 2 modules.
-- `apps/api/alembic/versions/0006_*.py`: field confidence columns, `field_corrections`, `review_tasks`, `audit_events.document_id`, `documents.document_type`, missing indexes, workflow_configs INSERT grant.
-- `apps/api/app/worker.py`, `llm/provider.py`, `document_service.py`, `invoice_workflows.py`, `main.py`, `config.py`, `login_throttle.py`, `onboarding.py`: pipeline, new endpoints and review fixes.
-- `apps/web/app/**`, `components/workspace/*`, `lib/*`, `middleware.ts`, `vitest.config.ts`: frontend fixes.
-- `docs/adr/006-confidence-scoring.md`: signal weights.
+- Text-layer PDFs only, maximum 10 MB/10 pages/50,000 characters. No OCR or image formats. The default organization policy requires review; threshold auto-approval is opt-in.
+- The daily spend cap is a soft estimate from recorded calls and local model prices, not an atomic financial limit. Provider prices and real model accuracy have not been independently verified. Any model key previously put in chat should be rotated before use.
+- Phase 6 exception-agent tool loop, Phase 7 legacy portal/browser connector, Phase 8 private Ollama/observability/retention/load/chaos hardening, Phase 9 MCP/ROI/voice and Phase 10 public go-live are not complete. Do not describe the original `SPEC.md` roadmap as implemented. The broader public-service gaps in README remain.
 
-## 5. Decisions and deviations
-
-- New organizations default to `review_policy: always`; threshold-based auto-approval is opt-in per org. Reason: safe first-day behavior at a customer; keeps existing flows and tests valid.
-- `extracted_fields` stays immutable (INSERT-only); reviewer actions are append-only `field_corrections`; the effective value is the latest correction. Reason: evidence must never be rewritten.
-- `Settings.environment` default flips to `production`; local, CI and tests set `development` explicitly. Reason: fail closed.
-- Postgres outbox instead of Celery/Redis (ADR 003). Redis in the dev Compose file is unused and will be removed; Mailpit stays for Phase 4 email intake and Phase 6 drafts.
-- Oracle Always Free VM instead of Railway (ADR 005). SPEC.md still says Railway in places; treat the spec as the roadmap, `docs/deployment.md` as the runbook.
-- Phase 3 design notes: `org_settings` (kill switch, shadow mode), `action_policies`, `connector_instances` (Fernet-encrypted credentials), `actions` with idempotency key, outbox topics `propose_actions` and `execute_action`, policy and kill-switch check immediately before execution in the worker, dead-letter after 5 attempts with a retry endpoint.
-
-## 6. Environment
-
-- Local web http://localhost:3300, API http://localhost:8000/docs. No staging or production URL exists yet.
-- External accounts: GitHub repo `Abhinavsuri90/opspilot` with Actions CI. Oracle Cloud account not yet created (guide in `docs/deployment.md`, Part 1 steps given to the owner). Render account exists but is not to be used (paid plans).
-- Env var names: see `.env.example` (DATABASE_URL, DATABASE_OWNER_URL, APP_DB_PASSWORD, JWT_SECRET, COOKIE_SECURE, WEB_ORIGIN, ENVIRONMENT, S3_*, LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL, MAX_DOCUMENTS_PER_ORG, EXTRACTION_TIMEOUT_SECONDS, UPLOAD_PARSE_TIMEOUT_SECONDS, MAX_CONCURRENT_PARSES, MAX_CONCURRENT_CONNECTOR_CALLS, TRUSTED_PROXY_CIDRS, CONNECTOR_ENCRYPTION_KEY, ACTION_EXECUTE_TIMEOUT_SECONDS, MAILPIT_API_URL for development only). Never store values here. Outside development the connector encryption key is mandatory; `infra/oracle/init_env.py` generates it.
-- Demo logins exist only after `make demo` locally (Northwind and Contoso admins; password from DEMO_PASSWORD in the ignored `.env`).
-
-## 7. How to run and test
+## Useful commands
 
 ```sh
-LLM_PROVIDER=rules OPENROUTER_API_KEY= make up      # start local stack
-make lint typecheck test                            # backend + web gates
-cd apps/web && npm run test:e2e:public && node scripts/e2e-workspace.mjs
-make eval                                           # extraction eval report
-make gen-client                                     # after any API change
+LLM_PROVIDER=rules OPENROUTER_API_KEY= make up
+make demo
+make lint typecheck test
+make eval
+make smoke-workspace
+(cd apps/web && npm run test:e2e:public)
+make down
 ```
 
-## 8. Known issues and gotchas
-
-- The local Northwind org reached 99 of 100 documents because Postgres tests never cleaned up; the fix (teardown cleanup) is part of the current backend stream. If `make test` returns 409 quota errors, that is why.
-- Running the API test suite and the browser suites at the same time can trip the shared login throttle; run them sequentially.
-- The `gh` CLI is not installed; use the GitHub REST API or the web UI to check CI.
-- The local assistant-instructions file is intentionally untracked through a local git exclude and must never be committed.
-- Git history before `7ffb822` still contains the old tooling file; rewriting history is the owner's call.
-
-## 9. Open questions for the owner
-
-- Confirm the Oracle home region choice before creating the account (cannot be changed later).
-- Decide whether to rewrite git history to remove the old tooling file (force push; CI run links in PROGRESS.md would point at rewritten commits).
-- OpenRouter: a fresh key is needed before any live-model evaluation; the key shared in an earlier chat must be revoked.
+`make up` does not create demo accounts. `make demo` does. The ignored `.env` supplies local secrets and `DEMO_PASSWORD`; never print or commit its contents. After backend edits, `docker compose build api` is required because source is copied into the image. Docker browser suites and API DB tests should run sequentially because their logins share a throttle. User-facing guide: README and `/guide`. Architecture: `SYSTEM_DESIGN.md`. Historical work: `PROGRESS.md`.
