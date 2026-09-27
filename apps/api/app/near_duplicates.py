@@ -11,9 +11,11 @@ documents both ways, adds a reason to the identifier field and forces human revi
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.confidence import Evaluation, parse_money
 from app.intake_models import DocumentLink
@@ -30,6 +32,18 @@ EXCLUDED_STATUSES = ("queued", "extracting", "validating", "failed")
 
 def normalize_text(value: str | None) -> str:
     return " ".join((value or "").split()).casefold()
+
+
+def normalized_sql(session: Session, column: ColumnElement[Any]) -> ColumnElement[Any]:
+    """The SQL side of :func:`normalize_text`: lower case, trimmed, inner whitespace collapsed.
+
+    Postgres does the whole job; SQLite has no regexp_replace, so it lowercases and trims and
+    the Python comparison on the candidate's effective values applies the full rule.
+    """
+    lowered = func.lower(func.trim(column))
+    if session.get_bind().dialect.name == "postgresql":
+        return func.regexp_replace(lowered, r"\s+", " ", "g")
+    return lowered
 
 
 def normalize_money(value: str | None) -> Decimal | None:
@@ -59,7 +73,7 @@ def find_near_duplicates(
                 Document.document_type == document.document_type,
                 Document.id != document.id,
                 Document.status.not_in(EXCLUDED_STATUSES),
-                func.lower(func.trim(stored_number)) == number,
+                normalized_sql(session, stored_number) == number,
             )
             .order_by(Document.created_at, Document.id)
             .limit(MAX_CANDIDATES)
@@ -123,7 +137,12 @@ def flag_near_duplicates(
     evaluation: Evaluation,
     now: datetime,
 ) -> list[Document]:
-    """Find, link and flag; the identifier field is sent to review with the reason."""
+    """Find, link and flag; the identifier field is sent to review with the reason.
+
+    The reason names no file: the earlier document may be restricted from some reviewers,
+    and the viewer-filtered ``near_duplicates`` list on the document detail is where names
+    belong.
+    """
     values = {item.name: item.value for item in evaluation.fields}
     matches = find_near_duplicates(session, document, type_spec, values)
     if not matches:
@@ -132,6 +151,10 @@ def flag_near_duplicates(
     identifier = type_spec.primary_identifier()
     for assessment in evaluation.fields:
         if identifier is not None and assessment.name == identifier.name:
-            assessment.reasons.extend(f"Possible duplicate of {m.filename}" for m in matches)
+            assessment.reasons.append(duplicate_reason(type_spec))
             assessment.status = "needs_review"
     return matches
+
+
+def duplicate_reason(type_spec: DocumentTypeSpec) -> str:
+    return f"Possible duplicate of an earlier {type_spec.label.lower()}"

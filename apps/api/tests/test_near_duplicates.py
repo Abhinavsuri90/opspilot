@@ -21,7 +21,7 @@ from app.storage import get_store
 from app.worker import process_one
 from app.workflow_config import default_invoice_config, default_logistics_config
 from app.workflow_models import FieldCorrection, InvoiceMetadata
-from tests.conftest import TenantFactory, postgres
+from tests.conftest import TenantFactory, owner_engine, postgres
 from tests.test_documents import MemoryStore, audit_events, tenant_login, threshold_config, upload
 from tests.test_review import add_fields, make_document
 
@@ -174,7 +174,8 @@ def test_flag_links_both_ways_forces_review_and_is_idempotent(engine: Engine) ->
         assert [item.id for item in matches] == [original.id]
         number = next(item for item in evaluation.fields if item.name == "invoice_number")
         assert number.status == "needs_review"
-        assert number.reasons == ["Possible duplicate of a.pdf"]
+        assert number.reasons == ["Possible duplicate of an earlier invoice"]
+        assert "a.pdf" not in " ".join(number.reasons)
         assert all(item.status == "auto" for item in evaluation.fields if item is not number)
         session.flush()
         links = session.scalars(select(DocumentLink).where(DocumentLink.org_id == org_id)).all()
@@ -223,12 +224,21 @@ def test_second_upload_of_the_same_invoice_is_linked_and_reviewed(
     app.dependency_overrides[get_store] = lambda: store
     try:
         with TestClient(app) as client:
-            tenant_login(client, tenant, "member")
+            # The first invoice belongs to the admin and is restricted from ordinary members.
+            tenant_login(client, tenant, "admin")
             first_pdf = invoice_pdf(invoice_number="DUP-0001", total="$88.00")
             first = uuid.UUID(upload(client, "first.pdf", first_pdf)["id"])
             assert process_one(store, first) is True
             assert client.get(f"/v1/documents/{first}").json()["status"] == "auto_approved"
+            with Session(owner_engine()) as owner, owner.begin():
+                owner.add(
+                    InvoiceMetadata(
+                        document_id=first, org_id=tenant.org_id, visibility="restricted"
+                    )
+                )
 
+            tenant_login(client, tenant, "member")
+            assert client.get(f"/v1/documents/{first}").status_code == 404
             second_pdf = invoice_pdf(
                 invoice_number="DUP-0001", total="$88.00", extra_lines={"Due Date": "2026-10-30"}
             )
@@ -238,9 +248,15 @@ def test_second_upload_of_the_same_invoice_is_linked_and_reviewed(
             assert body["status"] == "needs_review" and body["flagged_count"] == 1
             number = next(field for field in body["fields"] if field["name"] == "invoice_number")
             assert number["status"] == "needs_review"
-            assert "Possible duplicate of first.pdf" in number["reasons"]
-            assert [ref["document_id"] for ref in body["near_duplicates"]] == [str(first)]
-            assert body["near_duplicates"][0]["filename"] == "first.pdf"
+            assert "Possible duplicate of an earlier invoice" in number["reasons"]
+            # The member may not see the restricted original, so its name appears nowhere.
+            assert "first.pdf" not in " ".join(number["reasons"])
+            assert body["near_duplicates"] == []
+
+            tenant_login(client, tenant, "admin")
+            admin_body = client.get(f"/v1/documents/{second}").json()
+            assert [ref["document_id"] for ref in admin_body["near_duplicates"]] == [str(first)]
+            assert admin_body["near_duplicates"][0]["filename"] == "first.pdf"
             first_body = client.get(f"/v1/documents/{first}").json()
             assert [ref["document_id"] for ref in first_body["near_duplicates"]] == [str(second)]
             events = dict(audit_events(tenant.org_id, second))
@@ -249,5 +265,6 @@ def test_second_upload_of_the_same_invoice_is_linked_and_reviewed(
             assert events["document.needs_review"]["flagged_fields"] == ["invoice_number"]
             queue = client.get("/v1/review/queue").json()
             assert [row["document_id"] for row in queue] == [str(second)]
+            assert queue[0]["flagged_count"] == 1
     finally:
         del app.dependency_overrides[get_store]

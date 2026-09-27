@@ -131,6 +131,11 @@ def metrics_overview(
     days: Annotated[int, Query(ge=1, le=365)] = 30,
     document_type: Annotated[str | None, Query(pattern=DOCUMENT_TYPE_PATTERN)] = None,
 ) -> MetricsOverview:
+    """KPIs over the documents the caller may see.
+
+    ``days`` counts back from today's UTC date and every ``series`` point is a UTC calendar
+    day; ``cost_per_document`` is null until LLM calls are metered.
+    """
     session, user, org, membership = context
     return metrics_service.overview(
         session, org.id, user.id, membership.role, days=days, document_type=document_type

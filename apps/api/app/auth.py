@@ -19,6 +19,7 @@ Identity = tuple[Session, User, Organization, Membership]
 # The only routes an API key may call: programmatic intake and status polling. Every other
 # route needs a browser session even when a Bearer header is present.
 API_KEY_ROUTES = frozenset({("POST", "/v1/documents"), ("GET", "/v1/documents/{document_id}")})
+API_KEY_HEADER_PREFIX = "Bearer opk_"
 
 
 class SessionResponse(BaseModel):
@@ -93,7 +94,9 @@ def current_session(
     opspilot_session: Annotated[str | None, Cookie()] = None,
     authorization: Annotated[str | None, Header()] = None,
 ) -> Identity:
-    if authorization is not None:
+    # Only an OpsPilot key is handled here; any other Authorization header (a proxy's, a
+    # browser extension's) falls through to the session cookie.
+    if authorization is not None and authorization.startswith(API_KEY_HEADER_PREFIX):
         return api_key_identity(request, session, authorization)
     return cookie_identity(session, opspilot_session or "")
 

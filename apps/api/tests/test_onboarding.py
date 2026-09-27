@@ -384,6 +384,7 @@ def test_registration_template_chooses_the_starting_workflow(client: TestClient)
     assert [item["name"] for item in workflow.json()["config"]["document_types"]] == [
         "purchase_order",
         "delivery_note",
+        "invoice",
     ]
     with SessionLocal() as session:
         set_org_context(session, uuid.UUID(identity["org_id"]))

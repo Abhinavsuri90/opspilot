@@ -593,7 +593,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Metrics Overview */
+        /**
+         * Metrics Overview
+         * @description KPIs over the documents the caller may see.
+         *
+         *     ``days`` counts back from today's UTC date and every ``series`` point is a UTC calendar
+         *     day; ``cost_per_document`` is null until LLM calls are metered.
+         */
         get: operations["metrics_overview_v1_metrics_overview_get"];
         put?: never;
         post?: never;

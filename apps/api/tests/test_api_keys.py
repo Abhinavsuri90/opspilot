@@ -183,8 +183,11 @@ def test_active_key_limit_counts_only_live_keys(
 def test_bearer_header_is_refused_on_routes_outside_intake() -> None:
     with TestClient(app) as client:
         response = client.get("/v1/actions", headers={"Authorization": "Bearer opk_x"})
+        other = client.get("/v1/actions", headers={"Authorization": "Bearer something-else"})
     assert response.status_code == 401
     assert response.json()["error"]["message"] == "API keys can only submit and poll documents"
+    assert other.status_code == 401
+    assert other.json()["error"]["message"] == "Not authenticated"
 
 
 def _clear_key_budget(key_ids: list[str]) -> None:
@@ -258,10 +261,17 @@ def test_api_key_authenticates_only_document_intake_and_polling(
                 == 404
             )
             forged = f"opk_{key.split('_')[1]}_" + "x" * 40
-            for bad in ("Bearer nope", f"Bearer {forged}", "Basic abc", "Bearer "):
+            for bad in (f"Bearer {forged}", "Bearer opk_short", "Bearer opk_"):
                 refused = api.get(f"/v1/documents/{document_id}", headers={"Authorization": bad})
                 assert refused.status_code == 401, bad
                 assert refused.json()["error"]["message"] == "Invalid API key"
+            # Anything that is not an OpsPilot key is ignored in favour of the session cookie.
+            for header in ("Bearer nope", "Basic abc", "Bearer "):
+                fell_through = api.get(
+                    f"/v1/documents/{document_id}", headers={"Authorization": header}
+                )
+                assert fell_through.status_code == 401, header
+                assert fell_through.json()["error"]["message"] == "Not authenticated"
             assert api.get(f"/v1/documents/{document_id}").status_code == 401
 
         with SessionLocal() as session:

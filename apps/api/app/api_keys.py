@@ -19,7 +19,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db import set_api_key_context, set_org_context
+from app.db import clear_api_key_context, set_api_key_context, set_org_context
 from app.intake_models import ApiKey
 from app.login_throttle import reserve_attempt
 from app.models import AuditEvent, Membership, Organization, User
@@ -137,7 +137,9 @@ def create_api_key(
         # The prefix is unique across tenants; the prefix policy lets this check see a
         # collision in another tenant without exposing anything else.
         set_api_key_context(session, generated.prefix)
-        if get_api_key_by_prefix(session, generated.prefix) is not None:
+        taken = get_api_key_by_prefix(session, generated.prefix) is not None
+        clear_api_key_context(session)
+        if taken:
             continue
         key = ApiKey(
             id=uuid.uuid4(),

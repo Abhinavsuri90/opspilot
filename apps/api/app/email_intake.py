@@ -13,10 +13,12 @@ from __future__ import annotations
 import email
 import email.policy
 import imaplib
+import json
 import logging
 import re
 import socket
 import ssl
+import threading
 import uuid
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
@@ -50,11 +52,22 @@ from app.timeouts import OperationTimeout, ParserBusy, run_connector_call
 
 logger = logging.getLogger(__name__)
 POLL_INTERVAL_SECONDS = 60
+# How often the poller thread looks for a due inbox when the previous pass found none.
+POLL_TICK_SECONDS = 15
 POLL_TIMEOUT_SECONDS = 30.0
 MAX_MESSAGES_PER_POLL = 25
+# A message is skipped without being downloaded when the server reports it larger than this.
+MAX_MESSAGE_BYTES = 4 * MAX_UPLOAD_BYTES
+MAX_ATTACHMENTS_PER_MESSAGE = 10
+# A message whose processing keeps raising is settled (marked read, left with its error)
+# after this many failed attempts so one poisonous email cannot block the inbox forever.
+MAX_MESSAGE_ATTEMPTS = 3
 MAX_BODY_CHARS = document_service.MAX_CONTEXT_CHARS
+MAX_UID_CHARS = 400
 MAILPIT_DOMAIN = "opspilot.local"
 IMAP_TIMEOUT_SECONDS = 20
+TOO_LARGE = "Message too large"
+_RFC822_SIZE = re.compile(rb"RFC822\.SIZE\s+(\d+)")
 _HOSTNAME = r"^(?=.{1,253}$)(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$"
 
 
@@ -73,11 +86,20 @@ class Attachment:
 
 @dataclass(frozen=True)
 class InboundMessage:
+    """One inbound email; ``uid`` is the idempotency key stored in email_messages.
+
+    For IMAP the uid is ``<folder>:<uidvalidity>:<uid>`` because IMAP uids are only unique
+    within one folder and one UIDVALIDITY epoch; Mailpit ids are prefixed ``mailpit:``.
+    ``problem`` is set by a backend that refused the message (for example too large) so it
+    is recorded and marked processed without any document being created.
+    """
+
     uid: str
     sender: str
     subject: str
     body_text: str
     attachments: list[Attachment] = field(default_factory=list)
+    problem: str | None = None
 
     def pdf_attachments(self) -> list[Attachment]:
         return [item for item in self.attachments if item.is_pdf]
@@ -162,10 +184,18 @@ def parse_email(raw: bytes, uid: str) -> InboundMessage:
         except (LookupError, UnicodeDecodeError, KeyError):
             body = ""
     attachments: list[Attachment] = []
+    considered = 0
+    accepted_bytes = 0
     for part in parsed.iter_attachments():
+        # Bounded work per message: at most MAX_ATTACHMENTS_PER_MESSAGE parts are looked at
+        # and parsing stops once the accepted attachments reach the message size bound.
+        considered += 1
+        if considered > MAX_ATTACHMENTS_PER_MESSAGE or accepted_bytes >= MAX_MESSAGE_BYTES:
+            break
         payload = part.get_payload(decode=True)
         if not isinstance(payload, bytes) or len(payload) > MAX_UPLOAD_BYTES:
             continue
+        accepted_bytes += len(payload)
         attachments.append(
             Attachment(part.get_filename() or "attachment", payload, part.get_content_type())
         )
@@ -204,12 +234,15 @@ class MailpitSource:
                 (str(sender_info.get("Name") or ""), str(sender_info.get("Address") or ""))
             )
             attachments = []
-            for item in body.get("Attachments") or []:
+            for item in (body.get("Attachments") or [])[:MAX_ATTACHMENTS_PER_MESSAGE]:
                 content_type = str(item.get("ContentType") or "")
                 filename = str(item.get("FileName") or "attachment")
                 if content_type.lower() != "application/pdf" and not filename.lower().endswith(
                     ".pdf"
                 ):
+                    continue
+                size = item.get("Size")
+                if isinstance(size, int) and size > MAX_UPLOAD_BYTES:
                     continue
                 part = self.client.get(f"/api/v1/message/{message_id}/part/{item.get('PartID')}")
                 part.raise_for_status()
@@ -217,7 +250,7 @@ class MailpitSource:
                     attachments.append(Attachment(filename, part.content, content_type))
             messages.append(
                 InboundMessage(
-                    message_id,
+                    f"mailpit:{message_id}",
                     sender[:320],
                     " ".join(str(body.get("Subject") or "").split())[:300],
                     _clip(str(body.get("Text") or ""), MAX_BODY_CHARS),
@@ -227,7 +260,8 @@ class MailpitSource:
         return messages
 
     def mark_processed(self, uid: str) -> None:
-        response = self.client.put("/api/v1/messages", json={"IDs": [uid], "Read": True})
+        message_id = uid.removeprefix("mailpit:")
+        response = self.client.put("/api/v1/messages", json={"IDs": [message_id], "Read": True})
         response.raise_for_status()
 
     def test_connection(self) -> ConnectionTest:
@@ -281,6 +315,7 @@ class ImapSource:
         self._factory = factory or PinnedIMAP4SSL
         self._allow_private = allow_private
         self._client: Any | None = None
+        self._uidvalidity = "0"
 
     def _connect(self) -> Any:
         if self._client is not None:
@@ -296,8 +331,39 @@ class ImapSource:
         status, _ = client.select(f'"{self.config.folder}"', readonly=False)
         if status != "OK":
             raise ConnectorConfigError(f"IMAP folder {self.config.folder!r} could not be opened")
+        self._uidvalidity = self._read_uidvalidity(client)
         self._client = client
         return client
+
+    @staticmethod
+    def _read_uidvalidity(client: Any) -> str:
+        """The folder's UIDVALIDITY from the SELECT response; "0" when the server omits it."""
+        try:
+            _, data = client.response("UIDVALIDITY")
+        except Exception:
+            return "0"
+        for item in data or []:
+            text = item.decode("ascii", "ignore") if isinstance(item, bytes) else str(item or "")
+            if text.strip().isdigit():
+                return text.strip()
+        return "0"
+
+    def _key(self, uid: str) -> str:
+        return f"{self.config.folder}:{self._uidvalidity}:{uid}"
+
+    @staticmethod
+    def _raw_uid(key: str) -> str:
+        return key.rsplit(":", 1)[-1]
+
+    @staticmethod
+    def _size_of(data: list[Any]) -> int | None:
+        for item in data or []:
+            blob = item[0] if isinstance(item, tuple) and item else item
+            if isinstance(blob, bytes):
+                match = _RFC822_SIZE.search(blob)
+                if match is not None:
+                    return int(match.group(1))
+        return None
 
     def _search(self, client: Any) -> list[str]:
         criteria: list[str] = ["UNSEEN"]
@@ -314,6 +380,12 @@ class ImapSource:
         client = self._connect()
         messages = []
         for uid in self._search(client)[:MAX_MESSAGES_PER_POLL]:
+            # Ask for the size first so an oversized message is never pulled into memory.
+            status, data = client.uid("FETCH", uid, "(RFC822.SIZE)")
+            size = self._size_of(data) if status == "OK" else None
+            if size is not None and size > MAX_MESSAGE_BYTES:
+                messages.append(InboundMessage(self._key(uid), "", "", "", [], TOO_LARGE))
+                continue
             status, data = client.uid("FETCH", uid, "(BODY.PEEK[])")
             if status != "OK":
                 continue
@@ -327,12 +399,12 @@ class ImapSource:
             )
             if raw is None:
                 continue
-            messages.append(parse_email(raw, uid))
+            messages.append(parse_email(raw, self._key(uid)))
         return messages
 
     def mark_processed(self, uid: str) -> None:
         client = self._connect()
-        client.uid("STORE", uid, "+FLAGS", "(\\Seen)")
+        client.uid("STORE", self._raw_uid(uid), "+FLAGS", "(\\Seen)")
 
     def test_connection(self) -> ConnectionTest:
         client = self._connect()
@@ -408,8 +480,6 @@ def build_source(snapshot: InboxSnapshot, *, allow_private: bool | None = None) 
 
 
 def snapshot_of(inbox: EmailInbox, slug: str) -> InboxSnapshot:
-    import json
-
     try:
         config = json.loads(inbox.config_json)
     except ValueError:
@@ -429,6 +499,8 @@ def _problem(exc: BaseException) -> str:
     """Error text safe to store: class and message, never mailbox content."""
     if isinstance(exc, OperationTimeout):
         return "Mailbox poll timed out"
+    if isinstance(exc, StorageError):
+        return str(exc)[:300] or "Object storage is unavailable"
     if isinstance(exc, ParserBusy):
         return "Worker is busy; the inbox is retried next tick"
     if isinstance(exc, DestinationBlocked | ConnectorConfigError | CredentialsUnavailable):
@@ -450,6 +522,7 @@ class PollOutcome:
     messages: int = 0
     documents: int = 0
     skipped: int = 0
+    failed: int = 0
     error: str | None = None
 
 
@@ -465,12 +538,14 @@ def process_message(
     org_id = snapshot.org_id
     with SessionLocal() as session:
         set_org_context(session, org_id)
-        if get_email_message(session, org_id, message.uid) is not None:
+        existing = get_email_message(session, org_id, message.uid)
+        if existing is not None and is_settled(existing):
             return None
     linked: list[uuid.UUID] = []
     created = 0
     problems: list[str] = []
-    for attachment in message.pdf_attachments():
+    attachments = [] if message.problem else message.pdf_attachments()
+    for attachment in attachments:
         with SessionLocal() as session:
             set_org_context(session, org_id)
             try:
@@ -497,27 +572,55 @@ def process_message(
             linked.append(result.id)
             if not result.duplicate:
                 created += 1
-    if not message.pdf_attachments():
+    if message.problem:
+        problems.append(message.problem)
+    elif not attachments:
         problems.append("No PDF attachment")
     error = "; ".join(problems)[:300] if problems else None
     with SessionLocal() as session, session.begin():
         set_org_context(session, org_id)
-        session.add(
-            EmailMessage(
+        row = get_email_message(session, org_id, message.uid)
+        if row is None:
+            row = EmailMessage(id=uuid.uuid4(), org_id=org_id, uid=message.uid[:MAX_UID_CHARS])
+            session.add(row)
+        row.sender = message.sender[:320]
+        row.subject = message.subject[:300]
+        # The first document the message points at, even when the PDF was already known;
+        # document_count only counts documents this message created.
+        row.document_id = linked[0] if linked else None
+        row.document_count = created
+        row.error = error
+        # A completed pass settles the row whatever earlier attempts failed.
+        row.attempts = 0
+        row.processed_at = datetime.now(UTC)
+    return created, error
+
+
+def is_settled(row: EmailMessage) -> bool:
+    """A row from a completed pass (attempts 0) or one that used up its retry budget."""
+    return row.attempts == 0 or row.attempts >= MAX_MESSAGE_ATTEMPTS
+
+
+def record_failure(snapshot: InboxSnapshot, message: InboundMessage, exc: BaseException) -> bool:
+    """Count one failed processing attempt; True once the message must be left alone."""
+    with SessionLocal() as session, session.begin():
+        set_org_context(session, snapshot.org_id)
+        row = get_email_message(session, snapshot.org_id, message.uid)
+        if row is None:
+            row = EmailMessage(
                 id=uuid.uuid4(),
-                org_id=org_id,
-                uid=message.uid[:255],
+                org_id=snapshot.org_id,
+                uid=message.uid[:MAX_UID_CHARS],
                 sender=message.sender[:320],
                 subject=message.subject[:300],
-                # The first document the message points at, even when the PDF was already
-                # known; document_count only counts documents this message created.
-                document_id=linked[0] if linked else None,
-                document_count=created,
-                error=error,
-                processed_at=datetime.now(UTC),
+                document_count=0,
+                attempts=0,
             )
-        )
-    return created, error
+            session.add(row)
+        row.attempts += 1
+        row.error = _problem(exc)
+        row.processed_at = datetime.now(UTC)
+        return row.attempts >= MAX_MESSAGE_ATTEMPTS
 
 
 def poll_inbox(
@@ -526,24 +629,50 @@ def poll_inbox(
     *,
     source: EmailSource | None = None,
 ) -> PollOutcome:
-    """Fetch new messages under a hard timeout, create documents, then mark each message."""
+    """Fetch new messages under a hard timeout, create documents, then mark each message.
+
+    One message failing never aborts the batch: its attempt is counted on its row and the
+    message is retried on later polls until MAX_MESSAGE_ATTEMPTS, then settled.
+    """
     outcome = PollOutcome()
     object_store = store or get_store()
     opened = source
     try:
         opened = opened or build_source(snapshot)
         messages = run_connector_call(opened.fetch_new, POLL_TIMEOUT_SECONDS)
+        # Processing may take a while (each PDF is parsed under its own timeout); hold the
+        # lease long enough that another worker cannot claim this inbox meanwhile.
+        extend_lease(
+            snapshot.org_id, datetime.now(UTC) + timedelta(seconds=lease_extension_seconds())
+        )
         for message in messages[:MAX_MESSAGES_PER_POLL]:
-            result = process_message(snapshot, message, object_store)
-            if result is None:
-                outcome.skipped += 1
+            try:
+                result = process_message(snapshot, message, object_store)
+            except Exception as exc:
+                outcome.failed += 1
+                outcome.error = _problem(exc)
+                logger.warning(
+                    "Message %s in inbox %s failed: %s",
+                    message.uid,
+                    snapshot.address,
+                    outcome.error,
+                )
+                if not record_failure(snapshot, message, exc):
+                    continue
             else:
-                outcome.messages += 1
-                outcome.documents += result[0]
-            opened.mark_processed(message.uid)
-    except StorageError as exc:
-        # Transient: nothing was recorded for the failing message, so it is retried.
-        outcome.error = str(exc)[:300]
+                if result is None:
+                    outcome.skipped += 1
+                else:
+                    outcome.messages += 1
+                    outcome.documents += result[0]
+            try:
+                opened.mark_processed(message.uid)
+            except Exception as exc:
+                # The row is already settled, so a re-delivered message is skipped next time.
+                outcome.error = _problem(exc)
+                logger.warning(
+                    "Could not mark message %s processed: %s", message.uid, outcome.error
+                )
     except Exception as exc:
         outcome.error = _problem(exc)
         logger.warning("Email poll failed for inbox %s: %s", snapshot.address, outcome.error)
@@ -551,6 +680,19 @@ def poll_inbox(
         if opened is not None:
             opened.close()
     return outcome
+
+
+def lease_extension_seconds() -> float:
+    """Worst-case processing time for one batch: every PDF parse at its timeout plus slack."""
+    return MAX_MESSAGES_PER_POLL * (get_settings().upload_parse_timeout_seconds + 5)
+
+
+def extend_lease(org_id: uuid.UUID, until: datetime) -> None:
+    with SessionLocal() as session, session.begin():
+        set_org_context(session, org_id)
+        inbox = get_email_inbox(session, org_id)
+        if inbox is not None:
+            inbox.next_poll_at = until
 
 
 def claim_due_inbox(org_id: uuid.UUID, now: datetime) -> InboxSnapshot | None:
@@ -568,6 +710,7 @@ def claim_due_inbox(org_id: uuid.UUID, now: datetime) -> InboxSnapshot | None:
 
 
 def record_poll(org_id: uuid.UUID, outcome: PollOutcome, now: datetime) -> None:
+    """Finish a poll: the next one is due a full interval after this one completed."""
     with SessionLocal() as session, session.begin():
         set_org_context(session, org_id)
         inbox = get_email_inbox(session, org_id)
@@ -575,6 +718,40 @@ def record_poll(org_id: uuid.UUID, outcome: PollOutcome, now: datetime) -> None:
             return
         inbox.last_polled_at = now
         inbox.last_error = outcome.error
+        inbox.next_poll_at = now + timedelta(seconds=POLL_INTERVAL_SECONDS)
+
+
+def poll_one_due_inbox(
+    now: datetime | None = None,
+    store: ObjectStore | None = None,
+    *,
+    org_ids: Iterable[uuid.UUID] | None = None,
+) -> bool:
+    """Poll the first active inbox whose next poll time has passed; False when none is due.
+
+    ``org_ids`` limits the pass to some organizations; the poller thread leaves it unset.
+    """
+    now = now or datetime.now(UTC)
+    if org_ids is None:
+        with SessionLocal() as session:
+            org_ids = list(session.scalars(select(Organization.id).order_by(Organization.id)))
+    for org_id in org_ids:
+        snapshot = claim_due_inbox(org_id, now)
+        if snapshot is None:
+            continue
+        outcome = poll_inbox(snapshot, store)
+        record_poll(org_id, outcome, datetime.now(UTC))
+        if outcome.messages or outcome.failed or outcome.error:
+            logger.info(
+                "Polled inbox for org %s: %d message(s), %d document(s), %d failed, error=%s",
+                org_id,
+                outcome.messages,
+                outcome.documents,
+                outcome.failed,
+                outcome.error,
+            )
+        return True
+    return False
 
 
 def poll_due_inboxes(
@@ -583,31 +760,45 @@ def poll_due_inboxes(
     *,
     org_ids: Iterable[uuid.UUID] | None = None,
 ) -> int:
-    """One tick: poll every active inbox whose next poll time has passed. Returns polls made.
-
-    ``org_ids`` limits the tick to some organizations; the worker leaves it unset.
-    """
-    now = now or datetime.now(UTC)
-    if org_ids is None:
-        with SessionLocal() as session:
-            org_ids = list(session.scalars(select(Organization.id).order_by(Organization.id)))
+    """Poll every due inbox, one at a time. Returns the number of polls made."""
+    scope = list(org_ids) if org_ids is not None else None
     polled = 0
-    for org_id in org_ids:
-        snapshot = claim_due_inbox(org_id, now)
-        if snapshot is None:
-            continue
-        outcome = poll_inbox(snapshot, store)
-        record_poll(org_id, outcome, datetime.now(UTC))
+    while poll_one_due_inbox(now, store, org_ids=scope):
         polled += 1
-        if outcome.messages or outcome.error:
-            logger.info(
-                "Polled inbox for org %s: %d message(s), %d document(s), error=%s",
-                org_id,
-                outcome.messages,
-                outcome.documents,
-                outcome.error,
-            )
     return polled
+
+
+def run_poller(
+    stop: threading.Event,
+    store: ObjectStore | None = None,
+    org_ids: Iterable[uuid.UUID] | None = None,
+) -> None:
+    """The poller loop: one inbox per pass, a tick's rest when nothing is due, never raises.
+
+    Runs on its own daemon thread inside the worker process (see ``start_poller``) so a slow
+    or hung mailbox never delays document extraction or action execution. ``org_ids`` limits
+    the loop to some organizations (tests); the worker leaves it unset.
+    """
+    scope = list(org_ids) if org_ids is not None else None
+    while not stop.is_set():
+        try:
+            polled = poll_one_due_inbox(store=store, org_ids=scope)
+        except Exception:
+            logger.exception("Email intake pass failed; retrying after the next tick")
+            polled = False
+        if not polled:
+            stop.wait(POLL_TICK_SECONDS)
+
+
+def start_poller(
+    store: ObjectStore | None = None, org_ids: Iterable[uuid.UUID] | None = None
+) -> tuple[threading.Thread, threading.Event]:
+    stop = threading.Event()
+    thread = threading.Thread(
+        target=run_poller, args=(stop, store, org_ids), name="email-intake", daemon=True
+    )
+    thread.start()
+    return thread, stop
 
 
 def test_inbox_connection(snapshot: InboxSnapshot) -> ConnectionTest:
@@ -642,6 +833,9 @@ __all__ = [
     "parse_email",
     "poll_due_inboxes",
     "poll_inbox",
+    "poll_one_due_inbox",
     "process_message",
+    "run_poller",
+    "start_poller",
     "test_inbox_connection",
 ]

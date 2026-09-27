@@ -150,7 +150,11 @@ class RulesInvoiceProvider:
                             )
                         )
         if not fields:
-            raise ExtractionError(f"No supported {type_spec.label.lower()} fields were found")
+            labels = ", ".join(spec.label for spec in type_spec.fields)
+            raise ExtractionError(
+                f"No supported {type_spec.label.lower()} fields were found "
+                f"(detected type: {type_spec.name}; expected lines such as {labels})"
+            )
         return ExtractionResult(
             fields=fields,
             pages=pages,

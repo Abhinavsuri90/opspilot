@@ -9,6 +9,9 @@ Definitions (see docs/adr/008-intake-channels-and-templates.md):
 - time to complete: review task completed minus opened; zero for auto-approved documents;
 - hours saved: processed documents x baseline minutes minus actual review minutes, floored
   at zero, in hours. Cost per document stays null until LLM calls are metered (Phase 5).
+
+Days are UTC calendar days: the range ends on today's UTC date and each series point
+buckets documents by the UTC date they were created.
 """
 
 import statistics
@@ -172,10 +175,13 @@ def overview(
         or 0
     )
 
+    rows_by_day: dict[date, list[_DocumentRow]] = {}
+    for entry in rows:
+        rows_by_day.setdefault(entry.day, []).append(entry)
     series: list[SeriesPoint] = []
     for offset in range(days):
         day = start + timedelta(days=offset)
-        day_rows = [row for row in rows if row.day == day]
+        day_rows = rows_by_day.get(day, [])
         total_fields, corrected_fields = fields_by_day.get(day, [0, 0])
         series.append(
             SeriesPoint(

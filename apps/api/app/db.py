@@ -42,3 +42,8 @@ def set_api_key_context(session: Session, key_prefix: str) -> None:
     session.execute(
         text("SELECT set_config('app.api_key_prefix', :prefix, true)"), {"prefix": key_prefix}
     )
+
+
+def clear_api_key_context(session: Session) -> None:
+    """Withdraw the prefix policy once the lookup is done (the policy treats '' as unset)."""
+    set_api_key_context(session, "")

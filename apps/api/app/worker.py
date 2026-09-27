@@ -703,29 +703,20 @@ def run_connector(plan: ExecutionPlan) -> ExecutionResult:
         )
 
 
-# How often the loop checks for inboxes that are due; each inbox is polled at most once per
-# email_intake.POLL_INTERVAL_SECONDS regardless of how many workers run.
-EMAIL_TICK_SECONDS = 15
-
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     # Invalid provider configuration is a deployment error, not a recoverable
     # document error. Let the process exit so the platform reports it clearly.
     get_provider()
-    next_email_tick = 0.0
+    # Mailbox polling runs on its own daemon thread so a slow IMAP server never holds up
+    # extraction or action execution; it dies with the process.
+    email_intake.start_poller()
     while True:
         try:
             worked = process_one()
         except Exception:
             logger.exception("Worker loop failed; retrying")
             worked = False
-        if time.monotonic() >= next_email_tick:
-            next_email_tick = time.monotonic() + EMAIL_TICK_SECONDS
-            try:
-                email_intake.poll_due_inboxes()
-            except Exception:
-                logger.exception("Email intake tick failed; retrying next tick")
         if not worked:
             time.sleep(2)
 

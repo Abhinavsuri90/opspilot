@@ -33,18 +33,45 @@ DEMO_ORGS = [
 EXPORT_CONNECTOR = "archive"
 
 
-def is_untouched_default(raw: object) -> bool:
+def earlier_demo_shapes(slug: str, template: str) -> list[dict[str, object]]:
+    """Configurations an earlier seed wrote for this organization, as stored JSON.
+
+    The logistics template first shipped with purchase orders and delivery notes only; the
+    supplier invoice type was added later. A row that still matches that shape was never
+    edited and is upgraded like the default.
+    """
+    wanted = demo_config(slug, template)
+    shapes: list[dict[str, object]] = []
+    if template == "logistics":
+        without_invoice = WorkflowConfigModel.model_validate(
+            {
+                **wanted.model_dump(),
+                "document_types": [
+                    item.model_dump()
+                    for item in wanted.document_types
+                    if item.name != "invoice"
+                ],
+            }
+        )
+        shapes.append(json.loads(without_invoice.model_dump_json()))
+    return shapes
+
+
+def is_untouched_default(raw: object, slug: str = "", template: str = "invoice") -> bool:
     """True when nobody edited the configuration through the settings editor.
 
     Rows written before the editor existed hold the Phase 1 shape (a list of type names)
     and load as the default invoice workflow; the editor only ever writes full models. A
-    full model that still equals the invoice template is untouched as well.
+    full model that still equals the invoice template, or a shape an earlier seed wrote for
+    this organization, is untouched as well.
     """
     if not isinstance(raw, dict):
         return False
     types = raw.get("document_types")
     legacy = not isinstance(types, list) or not types or all(isinstance(t, str) for t in types)
     if legacy:
+        return True
+    if raw in earlier_demo_shapes(slug, template):
         return True
     try:
         return WorkflowConfigModel.model_validate(raw) == default_invoice_config()
@@ -112,7 +139,9 @@ def ensure_workflow(session: Session, org_id: uuid.UUID, slug: str, template: st
             current = json.loads(latest.config_json)
         except ValueError:
             return
-        if current == json.loads(wanted.model_dump_json()) or not is_untouched_default(current):
+        if current == json.loads(wanted.model_dump_json()) or not is_untouched_default(
+            current, slug, template
+        ):
             # Already the demo shape, or edited by hand: leave it alone.
             return
         version = latest.version + 1

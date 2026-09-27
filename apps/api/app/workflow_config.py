@@ -280,50 +280,56 @@ class WorkflowConfigModel(BaseModel):
         return [item for item in self.destinations if item.applies_to(document_type)]
 
 
-def default_invoice_config() -> WorkflowConfigModel:
-    return WorkflowConfigModel(
-        document_types=[
-            DocumentTypeSpec(
-                name="invoice",
-                label="Invoice",
-                detect=["invoice"],
-                fields=[
-                    FieldSpec(name="vendor", type="text", required=True, threshold=0.8),
-                    FieldSpec(
-                        name="invoice_number",
-                        type="identifier",
-                        required=True,
-                        regex=r"^[A-Za-z0-9-/]{3,40}$",
-                        threshold=0.8,
-                    ),
-                    FieldSpec(name="invoice_date", type="date", required=True, threshold=0.8),
-                    FieldSpec(name="due_date", type="date"),
-                    FieldSpec(name="subtotal", type="money"),
-                    FieldSpec(name="tax", type="money"),
-                    FieldSpec(name="total", type="money", required=True, threshold=0.9),
-                    FieldSpec(name="currency", type="currency", regex=r"^[A-Z]{3}$"),
-                    FieldSpec(name="po_number", label="PO Number", type="identifier"),
-                ],
-                rules=[
-                    RuleSpec(
-                        name="totals_add_up",
-                        expression="subtotal + tax == total",
-                        tolerance=Decimal("0.01"),
-                        message="Subtotal plus tax must equal total",
-                    ),
-                    RuleSpec(
-                        name="due_after_issue",
-                        expression="invoice_date <= due_date",
-                        message="Due date must not precede the invoice date",
-                    ),
-                ],
-            )
-        ]
+def invoice_document_type() -> DocumentTypeSpec:
+    """The supplier invoice type shared by every template."""
+    return DocumentTypeSpec(
+        name="invoice",
+        label="Invoice",
+        detect=["invoice"],
+        fields=[
+            FieldSpec(name="vendor", type="text", required=True, threshold=0.8),
+            FieldSpec(
+                name="invoice_number",
+                type="identifier",
+                required=True,
+                regex=r"^[A-Za-z0-9-/]{3,40}$",
+                threshold=0.8,
+            ),
+            FieldSpec(name="invoice_date", type="date", required=True, threshold=0.8),
+            FieldSpec(name="due_date", type="date"),
+            FieldSpec(name="subtotal", type="money"),
+            FieldSpec(name="tax", type="money"),
+            FieldSpec(name="total", type="money", required=True, threshold=0.9),
+            FieldSpec(name="currency", type="currency", regex=r"^[A-Z]{3}$"),
+            FieldSpec(name="po_number", label="PO Number", type="identifier"),
+        ],
+        rules=[
+            RuleSpec(
+                name="totals_add_up",
+                expression="subtotal + tax == total",
+                tolerance=Decimal("0.01"),
+                message="Subtotal plus tax must equal total",
+            ),
+            RuleSpec(
+                name="due_after_issue",
+                expression="invoice_date <= due_date",
+                message="Due date must not precede the invoice date",
+            ),
+        ],
     )
 
 
+def default_invoice_config() -> WorkflowConfigModel:
+    return WorkflowConfigModel(document_types=[invoice_document_type()])
+
+
 def default_logistics_config() -> WorkflowConfigModel:
-    """Purchase orders and delivery notes for a logistics customer (the Contoso template)."""
+    """Purchase orders, delivery notes and supplier invoices for a logistics customer.
+
+    Contoso receives invoices from its suppliers as well, so the invoice type comes third
+    with the same specification as the invoice template; detection scores keywords, so an
+    invoice is never typed as a purchase order just because that type is listed first.
+    """
     return WorkflowConfigModel(
         document_types=[
             DocumentTypeSpec(
@@ -382,6 +388,7 @@ def default_logistics_config() -> WorkflowConfigModel:
                     FieldSpec(name="received_by", type="text"),
                 ],
             ),
+            invoice_document_type(),
         ]
     )
 

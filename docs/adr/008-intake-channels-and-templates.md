@@ -19,8 +19,8 @@ orders and delivery notes next to the invoice configuration. Registration takes 
 `template` (`invoice`, the default, or `logistics`); the seed gives Northwind the invoice
 template plus a CSV export destination and Contoso the logistics template. Document types
 are detected by counting occurrences of each type's `detect` keywords, with a bonus for a
-keyword in the first 200 characters (the heading), so a delivery note that quotes a "PO
-Number" is not read as a purchase order. The rules provider still extracts purely from the
+keyword on the first non-empty line of text (the title), so a delivery note that quotes a
+"PO Number" is not read as a purchase order. The rules provider still extracts purely from the
 configured labels; purchase orders and delivery notes needed no provider change.
 
 **Near duplicates force a human.** An exact duplicate never gets past upload (unique content
@@ -28,9 +28,15 @@ hash per tenant). After extraction the worker compares the new document's counte
 (`vendor` or `supplier`), primary identifier (the type's first required identifier field) and
 `total` with other documents of the same tenant and type, using those documents' effective,
 corrected values. A match is recorded in `document_links` in both directions, adds
-"Possible duplicate of <filename>" to the identifier field, flags that field and forces
-`needs_review` even under a threshold policy. Custom types without an identifier field skip
-the check; types without a `total` compare the first two elements only.
+"Possible duplicate of an earlier <document type label>" to the identifier field, flags that
+field and forces `needs_review` even under a threshold policy. The reason deliberately names
+no file: the earlier document may be restricted from the reviewer, so file names appear only
+in the document detail's `near_duplicates` list, which is filtered by what the viewer may
+see. At most 20 candidates per document are compared (the earliest with the same
+identifier, per type); the SQL pre-filter normalizes case, trims and collapses whitespace
+(on Postgres; SQLite lowercases and trims and Python applies the full rule). Custom types
+without an identifier field skip the check; types without a `total` compare the first two
+elements only.
 
 **API keys act as their creator.** `POST /v1/settings/api-keys` returns `opk_<prefix>_<secret>`
 once; the database keeps the eight-character prefix and the SHA-256 of the whole key. A key
@@ -49,15 +55,23 @@ membership is no longer active or the key is revoked.
 with an `imap` backend for customers (host, port, username, folder, optional since date;
 password Fernet-encrypted like connector credentials) and a `mailpit` backend for
 development (`<slug>@opspilot.local` through the Mailpit HTTP API at `MAILPIT_API_URL`,
-refused outside development). The worker loop checks every 15 seconds for inboxes whose
-`next_poll_at` has passed and leases them with `FOR UPDATE SKIP LOCKED`, so an inbox is
-polled at most once per 60 seconds however many workers run. Each PDF attachment goes through
+refused outside development). A dedicated daemon thread in the worker process (`email_intake.run_poller`)
+checks every 15 seconds for inboxes whose `next_poll_at` has passed and leases one per
+pass with `FOR UPDATE SKIP LOCKED`, so a slow mailbox never delays extraction or action
+execution and an inbox is polled at most once per 60 seconds however many workers run. After
+the fetch the lease is extended to cover the worst case (25 messages at the PDF parse
+timeout plus slack) and reset to one interval when the poll completes. Messages larger than
+four times the upload limit are skipped by size before download (IMAP `RFC822.SIZE`), at most
+ten attachments per message are considered, and a message whose processing raises is
+retried on later polls and settled after three failed attempts (`email_messages.attempts`)
+so one poisonous email cannot block the inbox. Each PDF attachment goes through
 `document_service.upload` with `source = email`, `source_ref = "<from> <subject>"` and the
 plain-text body (capped at 20,000 characters) in `context_text`; the system is the audit actor
-and the message uid is in the detail. `email_messages` records each processed uid per tenant,
-so a message seen twice (a crash after upload but before the record, or a mailbox that does
-not honour the read flag) creates nothing new: the second pass finds the row or the content
-hash. IMAP hosts must pass the same address guard as webhook destinations outside
+and the message uid is in the detail. `email_messages` records each processed message per tenant under a key that is unique
+across folders and UIDVALIDITY epochs (`<folder>:<uidvalidity>:<uid>` for IMAP,
+`mailpit:<id>` for Mailpit), so a message seen twice (a crash after upload but before the
+record, or a mailbox that does not honour the read flag) creates nothing new: the second
+pass finds the row or the content hash. IMAP hosts must pass the same address guard as webhook destinations outside
 development, and the socket connects to the checked address while TLS verifies the host name
 (the webhook pinning approach). Mailpit specifics were verified against a live v1.31: search
 is `GET /api/v1/search?query=to:"<address>" is:unread` (the list endpoint ignores `query`),
@@ -89,7 +103,8 @@ detection to the baseline.
   default configuration; an edited organization keeps its edits, so existing local databases
   may still show Contoso on invoices until re-seeded.
 - Email intake cannot see a mailbox until an administrator configures it; there is no
-  catch-all. Polling every 15 seconds costs one small query per organization per tick.
+  catch-all. Polling every 15 seconds costs one small query per organization per tick, on
+  the poller thread rather than the extraction loop.
 - API keys have one scope (`documents:write`) and a fixed budget; per-key scopes and limits
   are stored but not yet configurable.
 - Near-duplicate detection compares one identity triple. Documents that differ in the

@@ -2,7 +2,7 @@
 
 ## 1. Last updated
 
-2026-09-27, mid-session. Latest commits: `e01614f` web fixes, `52172bb` Phase 2 API, `e729ebc` CI retry, plus the review fix pass (migration 0007, 210 API tests). Phase 3 complete. Phase 4 backend committed (migration 0010, 321 API tests); Phase 4 frontend in progress; independent review of the Phase 4 backend diff pending: see sections 3 and 4.
+2026-09-27, mid-session. Latest commits: `e01614f` web fixes, `52172bb` Phase 2 API, `e729ebc` CI retry, plus the review fix pass (migration 0007, 210 API tests). Phase 3 complete. Phase 4 backend committed and hardened (migrations 0010 and 0011, 328 API tests); Phase 4 frontend in progress; Phase 5 backend next: see sections 3 and 4.
 
 ## 2. Current status
 
@@ -16,9 +16,8 @@ The owner then chose to implement the rest of SPEC.md before deploying. Build or
 
 ## 3. Exact next step
 
-1. When the Phase 4 review lands: fix pass (backend agent), gates, commit.
-2. When the Phase 4 frontend lands: web gates, rebuild web, run all browser suites, update page map and README pages table, commit, push.
-3. Phase 5 per the scratchpad brief (phase5_brief.md): llm_calls, prompt front-matter, tier router, vendor memory with pgvector (switch the Oracle Postgres image to pgvector), accuracy over time, spend caps, eval gate.
+1. When the Phase 4 frontend lands: web gates, rebuild web, run all browser suites, update page map and README pages table, commit, push.
+2. Phase 5 per the scratchpad brief (phase5_brief.md): llm_calls, prompt front-matter, tier router, vendor memory with pgvector (switch the Oracle Postgres image to pgvector), accuracy over time, spend caps, eval gate.
 
 ## 4. Files in play
 

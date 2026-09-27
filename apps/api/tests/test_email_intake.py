@@ -5,7 +5,7 @@ import json
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from email.message import EmailMessage as MimeMessage
 from types import SimpleNamespace
 from typing import Any
@@ -18,14 +18,18 @@ from sqlalchemy import Engine, create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app import email_intake, email_settings
+from app import document_service, email_intake, email_settings
 from app.auth import current_session
 from app.connectors.base import ConnectionTest, ConnectorConfigError
 from app.connectors.credentials import decrypt_credentials
 from app.connectors.network import DestinationBlocked
 from app.db import SessionLocal, set_org_context
 from app.email_intake import (
+    MAX_ATTACHMENTS_PER_MESSAGE,
     MAX_BODY_CHARS,
+    MAX_MESSAGE_ATTEMPTS,
+    MAX_MESSAGE_BYTES,
+    TOO_LARGE,
     Attachment,
     ImapConfig,
     ImapSource,
@@ -37,8 +41,10 @@ from app.email_intake import (
     validate_inbox_credentials,
 )
 from app.intake_models import EmailInbox, EmailMessage
+from app.limits import MAX_UPLOAD_BYTES
 from app.main import app
 from app.models import AuditEvent, Base, Document, Membership, Organization, User, WorkflowConfig
+from app.storage import get_store
 from app.workflow_config import default_invoice_config
 from tests.conftest import TenantFactory, owner_engine, postgres
 from tests.test_documents import MemoryStore
@@ -88,6 +94,16 @@ def test_parse_email_reads_sender_subject_body_and_pdf_attachments() -> None:
     assert len(long_body.body_text) == MAX_BODY_CHARS
     bare = parse_email(mime(sender="vendor@example.com", attachments=()), "2")
     assert bare.sender == "vendor@example.com" and bare.pdf_attachments() == []
+    many = parse_email(
+        mime(attachments=tuple((f"p{i}.pdf", PDF, "application", "pdf") for i in range(14))), "3"
+    )
+    assert len(many.attachments) == MAX_ATTACHMENTS_PER_MESSAGE
+    big = b"%PDF-" + b"x" * (MAX_UPLOAD_BYTES - 5)
+    crowded = parse_email(
+        mime(attachments=tuple((f"b{i}.pdf", big, "application", "pdf") for i in range(6))), "4"
+    )
+    # Parsing stops once the accepted parts reach the message size bound.
+    assert len(crowded.attachments) == MAX_MESSAGE_BYTES // MAX_UPLOAD_BYTES
 
 
 def test_mailpit_source_fetches_unread_messages_and_marks_them_read() -> None:
@@ -99,7 +115,14 @@ def test_mailpit_source_fetches_unread_messages_and_marks_them_read() -> None:
             assert request.url.params["query"] == 'to:"acme@opspilot.local" is:unread'
             assert request.url.params["limit"] == "25"
             return httpx.Response(
-                200, json={"messages": [{"ID": "m1", "Read": False}, {"ID": "m2", "Read": False}]}
+                200,
+                json={
+                    "messages": [
+                        {"ID": "m1", "Read": False},
+                        {"ID": "m2", "Read": False},
+                        {"ID": "m3", "Read": False},
+                    ]
+                },
             )
         if request.url.path == "/api/v1/message/m1":
             return httpx.Response(
@@ -134,6 +157,32 @@ def test_mailpit_source_fetches_unread_messages_and_marks_them_read() -> None:
                     ],
                 },
             )
+        if request.url.path == "/api/v1/message/m3":
+            # An oversized PDF is skipped by its reported size; the eleventh part is never
+            # looked at; the part after it would be a valid PDF but is beyond the cap.
+            parts = [
+                {
+                    "PartID": "2",
+                    "FileName": "huge.pdf",
+                    "ContentType": "application/pdf",
+                    "Size": 11 * 1024 * 1024,
+                }
+            ]
+            parts += [
+                {"PartID": str(3 + index), "FileName": f"n{index}.txt", "ContentType": "text/plain"}
+                for index in range(9)
+            ]
+            parts.append({"PartID": "99", "FileName": "late.pdf", "ContentType": "application/pdf"})
+            return httpx.Response(
+                200,
+                json={
+                    "ID": "m3",
+                    "From": {"Name": "", "Address": "c@example.com"},
+                    "Subject": "Bulk",
+                    "Text": "",
+                    "Attachments": parts,
+                },
+            )
         if request.method == "PUT" and request.url.path == "/api/v1/messages":
             assert json.loads(request.content) == {"IDs": ["m1"], "Read": True}
             return httpx.Response(200, text="ok")
@@ -145,12 +194,14 @@ def test_mailpit_source_fetches_unread_messages_and_marks_them_read() -> None:
     source = MailpitSource("http://mailpit:8025", "acme@opspilot.local", client)
     messages = source.fetch_new()
     assert [(m.uid, m.sender, m.subject, m.body_text) for m in messages] == [
-        ("m1", "Ada <ada@example.com>", "Invoice 7", "Body text"),
-        ("m2", "b@example.com", "No pdf", ""),
+        ("mailpit:m1", "Ada <ada@example.com>", "Invoice 7", "Body text"),
+        ("mailpit:m2", "b@example.com", "No pdf", ""),
+        ("mailpit:m3", "c@example.com", "Bulk", ""),
     ]
     assert [item.filename for item in messages[0].pdf_attachments()] == ["invoice.pdf"]
     assert messages[0].attachments[0].data == PDF and messages[1].attachments == []
-    source.mark_processed("m1")
+    assert messages[2].attachments == [] and messages[2].problem is None
+    source.mark_processed("mailpit:m1")
     assert source.test_connection() == ConnectionTest(
         True, "Mailpit v1.31.2 reachable; polling acme@opspilot.local"
     )
@@ -159,6 +210,7 @@ def test_mailpit_source_fetches_unread_messages_and_marks_them_read() -> None:
         "/api/v1/message/m1",
         "/api/v1/message/m1/part/2",
         "/api/v1/message/m2",
+        "/api/v1/message/m3",
         "/api/v1/messages",
         "/api/v1/info",
     ]
@@ -168,8 +220,15 @@ def test_mailpit_source_fetches_unread_messages_and_marks_them_read() -> None:
 class FakeImap:
     """Records the IMAP conversation; answers UID SEARCH, FETCH and STORE like a server."""
 
-    def __init__(self, raw: dict[str, bytes]) -> None:
+    def __init__(
+        self,
+        raw: dict[str, bytes],
+        sizes: dict[str, int] | None = None,
+        uidvalidity: str = "4242",
+    ) -> None:
         self.raw = raw
+        self.sizes = sizes or {}
+        self.uidvalidity = uidvalidity
         self.calls: list[tuple[Any, ...]] = []
         self.connection: dict[str, Any] = {}
         self.logged_out = False
@@ -186,10 +245,19 @@ class FakeImap:
         self.calls.append(("select", folder, readonly))
         return "OK", [b"2"]
 
+    def response(self, code: str) -> tuple[str, list[bytes | None]]:
+        if code == "UIDVALIDITY":
+            return code, [self.uidvalidity.encode("ascii")]
+        return code, [None]
+
     def uid(self, command: str, *args: Any) -> tuple[str, list[Any]]:
         self.calls.append(("uid", command, *args))
         if command == "SEARCH":
             return "OK", [" ".join(self.raw).encode("ascii")]
+        if command == "FETCH" and args[1] == "(RFC822.SIZE)":
+            uid = str(args[0])
+            size = self.sizes.get(uid, len(self.raw[uid]))
+            return "OK", [f"{uid} (UID {uid} RFC822.SIZE {size})".encode()]
         if command == "FETCH":
             data = self.raw[str(args[0])]
             return "OK", [(f"{args[0]} (BODY[] {{{len(data)}}}".encode(), data), b")"]
@@ -217,13 +285,14 @@ def test_imap_source_polls_unseen_with_uid_commands_and_pins_checked_hosts(
         "timeout": 20,
     }
     assert [(m.uid, m.subject, len(m.pdf_attachments())) for m in messages] == [
-        ("7", "Seven", 1),
-        ("9", "Nine", 0),
+        ("AP:4242:7", "Seven", 1),
+        ("AP:4242:9", "Nine", 0),
     ]
     assert fake.calls[:2] == [("login", "ap@example.test", "secret-pw"), ("select", '"AP"', False)]
     assert ("uid", "SEARCH", None, "UNSEEN", "SINCE", "01-Sep-2026") in fake.calls
+    assert ("uid", "FETCH", "7", "(RFC822.SIZE)") in fake.calls
     assert ("uid", "FETCH", "7", "(BODY.PEEK[])") in fake.calls
-    source.mark_processed("7")
+    source.mark_processed("AP:4242:7")
     assert ("uid", "STORE", "7", "+FLAGS", "(\\Seen)") in fake.calls
     assert source.test_connection().ok
     source.close()
@@ -246,6 +315,57 @@ def test_imap_source_polls_unseen_with_uid_commands_and_pins_checked_hosts(
     assert (
         fake.connection["address"] == pinned_to and fake.connection["host"] == "mail.example.test"
     )
+
+
+def test_imap_source_skips_oversized_messages_without_downloading_them() -> None:
+    fake = FakeImap(
+        {"1": mime(subject="Small"), "2": mime(subject="Huge")},
+        sizes={"2": MAX_MESSAGE_BYTES + 1},
+    )
+    source = ImapSource(
+        ImapConfig(host="mail.example.test", username="ap"),
+        "pw",
+        factory=fake.connect,
+        allow_private=True,
+    )
+    messages = source.fetch_new()
+    assert [(m.uid, m.subject, m.problem) for m in messages] == [
+        ("INBOX:4242:1", "Small", None),
+        ("INBOX:4242:2", "", TOO_LARGE),
+    ]
+    assert messages[1].attachments == [] and messages[1].pdf_attachments() == []
+    fetched_bodies = [
+        call[2]
+        for call in fake.calls
+        if call[:2] == ("uid", "FETCH") and call[3] == "(BODY.PEEK[])"
+    ]
+    assert fetched_bodies == ["1"]
+    source.mark_processed("INBOX:4242:2")
+    assert ("uid", "STORE", "2", "+FLAGS", "(\\Seen)") in fake.calls
+
+
+def test_imap_keys_change_with_folder_and_uidvalidity() -> None:
+    raw = {"7": mime(subject="Seven")}
+    keys = []
+    for folder, validity in (("AP", "1"), ("Archive", "1"), ("AP", "2")):
+        fake = FakeImap(raw, uidvalidity=validity)
+        source = ImapSource(
+            ImapConfig(host="mail.example.test", username="ap", folder=folder),
+            "pw",
+            factory=fake.connect,
+            allow_private=True,
+        )
+        keys.append(source.fetch_new()[0].uid)
+    assert keys == ["AP:1:7", "Archive:1:7", "AP:2:7"] and len(set(keys)) == 3
+    silent = FakeImap(raw)
+    silent.response = lambda code: (code, [None])  # type: ignore[method-assign]
+    source = ImapSource(
+        ImapConfig(host="mail.example.test", username="ap"),
+        "pw",
+        factory=silent.connect,
+        allow_private=True,
+    )
+    assert source.fetch_new()[0].uid == "INBOX:0:7"
 
 
 def test_inbox_config_and_credential_validation() -> None:
@@ -509,13 +629,14 @@ def test_worker_tick_polls_due_inboxes_once_and_is_idempotent(
     source = FakeSource(
         [
             InboundMessage(
-                "m1",
+                "mailpit:m1",
                 "Ada <ada@example.com>",
                 "Invoice 7",
                 "Body\ntext",
                 [Attachment("invoice.pdf", PDF, "application/pdf")],
             ),
-            InboundMessage("m2", "b@example.com", "No attachment", "", []),
+            InboundMessage("mailpit:m2", "b@example.com", "No attachment", "", []),
+            InboundMessage("INBOX:1:3", "c@example.com", "", "", [], TOO_LARGE),
         ]
     )
     monkeypatch.setattr(email_intake, "build_source", lambda snapshot, allow_private=None: source)
@@ -536,9 +657,13 @@ def test_worker_tick_polls_due_inboxes_once_and_is_idempotent(
         assert document.context_text == "Body\ntext"
         assert document.uploaded_by == tenant.users["admin"]
         rows = {row.uid: row for row in session.scalars(select(EmailMessage))}
-        assert rows["m1"].document_id == document.id and rows["m1"].document_count == 1
-        assert rows["m1"].error is None and rows["m1"].sender == "Ada <ada@example.com>"
-        assert rows["m2"].document_id is None and rows["m2"].error == "No PDF attachment"
+        assert rows["mailpit:m1"].document_id == document.id
+        assert rows["mailpit:m1"].document_count == 1 and rows["mailpit:m1"].attempts == 0
+        assert rows["mailpit:m1"].error is None
+        assert rows["mailpit:m1"].sender == "Ada <ada@example.com>"
+        assert rows["mailpit:m2"].document_id is None
+        assert rows["mailpit:m2"].error == "No PDF attachment"
+        assert rows["INBOX:1:3"].error == TOO_LARGE and rows["INBOX:1:3"].document_count == 0
         row = session.get(EmailInbox, tenant.org_id)
         assert row is not None and row.last_polled_at is not None and row.last_error is None
         assert row.next_poll_at is not None and row.next_poll_at > started
@@ -550,9 +675,9 @@ def test_worker_tick_polls_due_inboxes_once_and_is_idempotent(
             )
         )
         assert received is not None and received.actor_user_id is None
-        assert json.loads(received.detail_json)["message_uid"] == "m1"
+        assert json.loads(received.detail_json)["message_uid"] == "mailpit:m1"
         assert json.loads(received.detail_json)["source"] == "email"
-    assert source.marked == ["m1", "m2"]
+    assert source.marked == ["mailpit:m1", "mailpit:m2", "INBOX:1:3"]
 
     # Not due again yet; an inactive inbox is never polled.
     assert poll_due_inboxes(store=store, org_ids=scope) == 0
@@ -567,8 +692,8 @@ def test_worker_tick_polls_due_inboxes_once_and_is_idempotent(
     with SessionLocal() as session:
         set_org_context(session, tenant.org_id)
         assert len(session.scalars(select(Document)).all()) == 1
-        assert len(session.scalars(select(EmailMessage)).all()) == 2
-    assert source.marked == ["m1", "m2", "m1", "m2"]
+        assert len(session.scalars(select(EmailMessage)).all()) == 3
+    assert source.marked == ["mailpit:m1", "mailpit:m2", "INBOX:1:3"] * 2
 
     # A failing mailbox records the error and keeps the inbox for the next tick.
     source.fail = True
@@ -578,3 +703,182 @@ def test_worker_tick_polls_due_inboxes_once_and_is_idempotent(
         set_org_context(session, tenant.org_id)
         row = session.get(EmailInbox, tenant.org_id)
         assert row is not None and row.last_error == "Mailpit request failed: ConnectError"
+
+
+@postgres
+def test_one_failing_message_is_retried_then_settled_without_blocking_the_batch(
+    make_tenant: TenantFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = make_tenant()
+    engine = owner_engine()
+    with Session(engine) as session, session.begin():
+        session.add(
+            EmailInbox(
+                org_id=tenant.org_id,
+                backend="mailpit",
+                address=f"{tenant.slug}@opspilot.local",
+                config_json="{}",
+                active=True,
+                version=1,
+                created_by=tenant.users["admin"],
+            )
+        )
+    engine.dispose()
+    good = InboundMessage(
+        "mailpit:good",
+        "a@example.com",
+        "Fine",
+        "",
+        [Attachment("fine.pdf", invoice_pdf(invoice_number="FINE-1"), "application/pdf")],
+    )
+    poison = InboundMessage(
+        "mailpit:poison",
+        "b@example.com",
+        "Poison",
+        "",
+        [Attachment("poison.pdf", invoice_pdf(invoice_number="POISON-1"), "application/pdf")],
+    )
+    source = FakeSource([poison, good])
+    monkeypatch.setattr(email_intake, "build_source", lambda snapshot, allow_private=None: source)
+    real_upload = document_service.upload
+
+    def flaky_upload(*args: Any, **kwargs: Any) -> Any:
+        if args[4] == "poison.pdf":
+            raise RuntimeError("storage exploded")
+        return real_upload(*args, **kwargs)
+
+    monkeypatch.setattr(document_service, "upload", flaky_upload)
+    store = MemoryStore()
+    scope = [tenant.org_id]
+
+    for attempt in range(1, MAX_MESSAGE_ATTEMPTS + 1):
+        _reset_timer(tenant.org_id)
+        assert poll_due_inboxes(store=store, org_ids=scope) == 1
+        with SessionLocal() as session:
+            set_org_context(session, tenant.org_id)
+            rows = {row.uid: row for row in session.scalars(select(EmailMessage))}
+            assert rows["mailpit:poison"].attempts == attempt
+            assert rows["mailpit:poison"].error == "RuntimeError"
+            assert rows["mailpit:poison"].document_count == 0
+            assert rows["mailpit:good"].document_count == 1 and rows["mailpit:good"].attempts == 0
+            assert len(session.scalars(select(Document)).all()) == 1
+            inbox = session.get(EmailInbox, tenant.org_id)
+            assert inbox is not None and inbox.last_error == "RuntimeError"
+        # The good message is marked on every pass; the poison one only once it is settled.
+        assert source.marked.count("mailpit:good") == attempt
+        assert source.marked.count("mailpit:poison") == (
+            1 if attempt == MAX_MESSAGE_ATTEMPTS else 0
+        )
+
+    # Settled: no further attempt, and the batch still completes cleanly.
+    _reset_timer(tenant.org_id)
+    assert poll_due_inboxes(store=store, org_ids=scope) == 1
+    with SessionLocal() as session:
+        set_org_context(session, tenant.org_id)
+        rows = {row.uid: row for row in session.scalars(select(EmailMessage))}
+        assert rows["mailpit:poison"].attempts == MAX_MESSAGE_ATTEMPTS
+        inbox = session.get(EmailInbox, tenant.org_id)
+        assert inbox is not None and inbox.last_error is None
+    assert source.marked.count("mailpit:poison") == 2
+
+
+@postgres
+def test_extended_lease_blocks_a_second_claim_until_the_poll_completes(
+    make_tenant: TenantFactory,
+) -> None:
+    tenant = make_tenant()
+    engine = owner_engine()
+    with Session(engine) as session, session.begin():
+        session.add(
+            EmailInbox(
+                org_id=tenant.org_id,
+                backend="mailpit",
+                address=f"{tenant.slug}@opspilot.local",
+                config_json="{}",
+                active=True,
+                version=1,
+                created_by=tenant.users["admin"],
+            )
+        )
+    engine.dispose()
+    now = datetime.now(UTC)
+    snapshot = email_intake.claim_due_inbox(tenant.org_id, now)
+    assert snapshot is not None and snapshot.address == f"{tenant.slug}@opspilot.local"
+    # Without an extension the inbox would be claimable again after one interval.
+    later = now + timedelta(seconds=email_intake.POLL_INTERVAL_SECONDS + 1)
+    extension = email_intake.lease_extension_seconds()
+    assert extension > email_intake.POLL_INTERVAL_SECONDS
+    email_intake.extend_lease(tenant.org_id, now + timedelta(seconds=extension))
+    assert email_intake.claim_due_inbox(tenant.org_id, later) is None
+    with SessionLocal() as session:
+        set_org_context(session, tenant.org_id)
+        inbox = session.get(EmailInbox, tenant.org_id)
+        assert inbox is not None and inbox.next_poll_at is not None
+        assert inbox.next_poll_at > later
+    # Completing the poll schedules the next one a full interval after completion.
+    email_intake.record_poll(tenant.org_id, email_intake.PollOutcome(), now)
+    assert email_intake.claim_due_inbox(tenant.org_id, later) is not None
+
+
+@postgres
+def test_extraction_proceeds_while_the_poller_thread_is_blocked_on_a_mailbox(
+    make_tenant: TenantFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    from fastapi.testclient import TestClient as Client
+
+    from app.llm.provider import MockInvoiceProvider
+    from app.worker import process_one
+    from tests.test_documents import tenant_login, upload
+
+    monkeypatch.setattr("app.worker.get_provider", MockInvoiceProvider)
+    tenant = make_tenant()
+    engine = owner_engine()
+    with Session(engine) as session, session.begin():
+        session.add(
+            EmailInbox(
+                org_id=tenant.org_id,
+                backend="mailpit",
+                address=f"{tenant.slug}@opspilot.local",
+                config_json="{}",
+                active=True,
+                version=1,
+                created_by=tenant.users["admin"],
+            )
+        )
+    engine.dispose()
+    entered, gate = threading.Event(), threading.Event()
+
+    class BlockingSource(FakeSource):
+        def fetch_new(self) -> list[InboundMessage]:
+            entered.set()
+            assert gate.wait(timeout=20)
+            return []
+
+    source = BlockingSource([])
+    monkeypatch.setattr(email_intake, "build_source", lambda snapshot, allow_private=None: source)
+    monkeypatch.setattr(email_intake, "POLL_TICK_SECONDS", 0.2)
+    store = MemoryStore()
+    app.dependency_overrides[get_store] = lambda: store
+    # Scoped to this tenant so other inboxes in the shared database stay out of the test.
+    thread, stop = email_intake.start_poller(store, [tenant.org_id])
+    try:
+        assert entered.wait(timeout=20), "the poller never reached the mailbox"
+        assert thread.is_alive()
+        with Client(app) as client:
+            tenant_login(client, tenant, "member")
+            document_id = uuid.UUID(upload(client, "meanwhile.pdf", invoice_pdf())["id"])
+            # The extraction loop is not behind the blocked poll.
+            assert process_one(store, document_id) is True
+            assert client.get(f"/v1/documents/{document_id}").json()["status"] == "needs_review"
+    finally:
+        gate.set()
+        stop.set()
+        thread.join(timeout=20)
+        del app.dependency_overrides[get_store]
+    assert not thread.is_alive()
+    with SessionLocal() as session:
+        set_org_context(session, tenant.org_id)
+        inbox = session.get(EmailInbox, tenant.org_id)
+        assert inbox is not None and inbox.last_polled_at is not None
