@@ -9,6 +9,7 @@ import argparse
 import os
 import sys
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -189,11 +190,16 @@ def seed_org(
     base_url: str, slug: str, password: str, team: tuple[str, str, str, tuple[Example, ...]]
 ) -> None:
     admin_email, reviewer_email, member_email, examples = team
-    with (
-        login(base_url, slug, admin_email, password, "admin") as admin,
-        login(base_url, slug, reviewer_email, password, "reviewer") as reviewer,
-        login(base_url, slug, member_email, password, "member") as member,
-    ):
+    # login() sends a request before returning; a used httpx.Client cannot be
+    # entered as a context manager afterward. ExitStack closes every client even
+    # if a later login or API step fails.
+    with ExitStack() as stack:
+        admin = login(base_url, slug, admin_email, password, "admin")
+        stack.callback(admin.close)
+        reviewer = login(base_url, slug, reviewer_email, password, "reviewer")
+        stack.callback(reviewer.close)
+        member = login(base_url, slug, member_email, password, "member")
+        stack.callback(member.close)
         mark_stage(slug, "categories")
         categories = ensure_categories(admin, examples)
         mark_stage(slug, "collaborators")
