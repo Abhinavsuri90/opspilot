@@ -45,6 +45,20 @@ def clear_route_overrides() -> Any:
             f"/v1/documents/{uuid.uuid4()}/fields/{uuid.uuid4()}",
             {"json": {"version": 0, "action": "accept"}},
         ),
+        ("GET", "/v1/actions", {}),
+        ("GET", f"/v1/actions/{uuid.uuid4()}", {}),
+        (
+            "POST",
+            f"/v1/actions/{uuid.uuid4()}/decision",
+            {"json": {"version": 0, "decision": "approve"}},
+        ),
+        ("POST", f"/v1/actions/{uuid.uuid4()}/retry", {"json": {"version": 0}}),
+        ("GET", "/v1/settings/policies", {}),
+        ("POST", "/v1/settings/policies", {"json": {"version": 0}}),
+        ("GET", "/v1/settings/connectors", {}),
+        ("GET", "/v1/settings/workflow", {}),
+        ("GET", f"/v1/exports?connector_id={uuid.uuid4()}", {}),
+        ("GET", f"/v1/exports/{uuid.uuid4()}/2026-09.csv", {}),
         (
             "POST",
             "/v1/documents",
@@ -83,6 +97,17 @@ def test_read_only_member_cannot_manage_documents_or_members(
 
     denied_routes: list[tuple[str, str, dict[str, Any]]] = [
         ("GET", "/v1/organization/members", {}),
+        ("GET", "/v1/settings/policies", {}),
+        ("POST", "/v1/settings/policies", {"json": {"version": 0}}),
+        ("GET", "/v1/settings/connectors", {}),
+        (
+            "POST",
+            "/v1/settings/connectors",
+            {"json": {"name": "x", "connector_type": "csv_export"}},
+        ),
+        ("GET", "/v1/settings/workflow", {}),
+        ("POST", "/v1/settings/workflow", {"json": {"base_version": 0, "yaml": "a: 1"}}),
+        ("GET", f"/v1/exports?connector_id={uuid.uuid4()}", {}),
         (
             "POST",
             "/v1/documents",

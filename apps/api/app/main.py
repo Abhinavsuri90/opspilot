@@ -53,6 +53,7 @@ from app.document_service import (
     MissingWorkflowConfig,
     UploadResponse,
 )
+from app.governance_api import router as governance_router
 from app.invoice_workflows import router as invoice_router
 from app.limits import MAX_UPLOAD_BYTES, MAX_UPLOAD_REQUEST_BYTES
 from app.login_throttle import (
@@ -73,6 +74,7 @@ from app.security import (
     DUMMY_PASSWORD_HASH,
     verify_password,
 )
+from app.settings_service import SettingsInvalid
 from app.storage import ObjectStore, StorageError, get_store
 from app.timeouts import ParserBusy
 
@@ -89,6 +91,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="OpsPilot API", version="0.1.0", lifespan=lifespan)
 app.include_router(onboarding_router)
 app.include_router(invoice_router)
+app.include_router(governance_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.web_origin],
@@ -170,6 +173,11 @@ async def retry_limit_error_handler(
     request: Request, exc: DocumentRetryLimitReached
 ) -> JSONResponse:
     return error_response(409, "retry_limit_reached", str(exc))
+
+
+@app.exception_handler(SettingsInvalid)
+async def settings_invalid_handler(request: Request, exc: SettingsInvalid) -> JSONResponse:
+    return error_response(422, "validation_error", str(exc), exc.details or None)
 
 
 @app.middleware("http")
@@ -269,7 +277,9 @@ def readyz(session: Annotated[Session, Depends(get_session)]) -> dict[str, str]:
                 "outbox_events AS e, extraction_runs AS r, extracted_fields AS f, "
                 "login_attempts AS l, invoice_metadata AS im, invoice_categories AS ic, "
                 "invoice_comments AS co, invoice_reviews AS rv, invoice_grants AS dg, "
-                "field_corrections AS fc, review_tasks AS rt LIMIT 0"
+                "field_corrections AS fc, review_tasks AS rt, org_settings AS os, "
+                "action_policies AS ap, connector_instances AS ci, actions AS ac, "
+                "action_attempts AS aa LIMIT 0"
             )
         )
     except SQLAlchemyError as exc:
@@ -366,7 +376,7 @@ def documents(
         str | None,
         Query(
             pattern="^(in_progress|queued|extracting|validating|needs_review|approved|"
-            "auto_approved|rejected|failed)$"
+            "auto_approved|rejected|failed|actions_pending|completed)$"
         ),
     ] = None,
 ) -> list[DocumentSummary]:

@@ -13,7 +13,7 @@ from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app import review_service
+from app import actions_service, review_service
 from app.access import accessible_document_clause, can_access_document
 from app.auth import Identity, current_session
 from app.models import AuditEvent, Document, ExtractedField, Membership, Organization, User
@@ -378,7 +378,9 @@ def _workspace(
 
 
 # Statuses a reviewer can act on: decide an open review, or reopen a completed one.
-COMPLETED_STATUSES = frozenset({"approved", "rejected", "auto_approved"})
+COMPLETED_STATUSES = frozenset(
+    {"approved", "rejected", "auto_approved", "actions_pending", "completed"}
+)
 REVIEWABLE_STATUSES = COMPLETED_STATUSES | {"needs_review"}
 
 
@@ -614,6 +616,8 @@ def review_invoice(
             raise HTTPException(409, "Only approved or rejected invoices can be reopened")
         new_status = "needs_review"
         review_service.open_review_task(session, org.id, document.id, config.review_sla_minutes)
+        # Proposals built from the old values must not be approved later by mistake.
+        actions_service.withdraw_proposed_actions(session, document, user.id, datetime.now(UTC))
         if metadata.verified_source == "derived":
             # Derived money reflects the fields at approval time; a reopened review
             # may change them, so the next approval derives it again.
@@ -624,6 +628,8 @@ def review_invoice(
         if payload.decision == "approve":
             approval = _prepare_approval(session, org, document, metadata)
             new_status = "approved"
+            # Destinations are proposed by the worker; the outbox row commits with the review.
+            actions_service.enqueue_propose_actions(session, org.id, document.id)
         else:
             new_status = "rejected"
         review_service.complete_review_task(
@@ -889,9 +895,12 @@ def _summary(
             {key: Decimal("0.0000") for key in ("total", "pending_review", "approved", "rejected")},
         )
         bucket["total"] += amount
-        status_key = {"needs_review": "pending_review", "auto_approved": "approved"}.get(
-            state, state
-        )
+        status_key = {
+            "needs_review": "pending_review",
+            "auto_approved": "approved",
+            "actions_pending": "approved",
+            "completed": "approved",
+        }.get(state, state)
         if status_key in {"pending_review", "approved", "rejected"}:
             bucket[status_key] += amount
 

@@ -17,6 +17,14 @@ class StoredDocumentTooLarge(StorageError):
     pass
 
 
+class StoredObjectMissing(StorageError):
+    """The key does not exist; distinct from an outage so callers can create the object."""
+
+
+def content_type_for(key: str) -> str:
+    return "text/csv; charset=utf-8" if key.endswith(".csv") else "application/pdf"
+
+
 class ObjectStore(Protocol):
     def put(self, key: str, data: bytes) -> None: ...
 
@@ -45,7 +53,7 @@ class S3ObjectStore:
     def put(self, key: str, data: bytes) -> None:
         try:
             self.client.put_object(
-                Bucket=self.bucket, Key=key, Body=data, ContentType="application/pdf"
+                Bucket=self.bucket, Key=key, Body=data, ContentType=content_type_for(key)
             )
         except (BotoCoreError, ClientError) as exc:
             raise StorageError("Object storage is unavailable") from exc
@@ -63,7 +71,12 @@ class S3ObjectStore:
                 return data
             finally:
                 body.close()
-        except (BotoCoreError, ClientError) as exc:
+        except ClientError as exc:
+            code = str(exc.response.get("Error", {}).get("Code", ""))
+            if code in {"NoSuchKey", "404", "NotFound"}:
+                raise StoredObjectMissing("Stored object does not exist") from exc
+            raise StorageError("Object storage is unavailable") from exc
+        except BotoCoreError as exc:
             raise StorageError("Object storage is unavailable") from exc
 
 

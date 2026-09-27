@@ -212,11 +212,14 @@ class OutboxEvent(Base):
     __table_args__ = (
         Index("ix_outbox_org_available", "org_id", "published_at", "available_at"),
         Index("ix_outbox_document", "org_id", "document_id"),
+        Index("ix_outbox_org_topic_available", "org_id", "topic", "published_at", "available_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
     document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id"), nullable=False)
+    # Set for execute_action events; the action row carries the rest of the job.
+    action_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     topic: Mapped[str] = mapped_column(String(100), nullable=False)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
     attempts: Mapped[int] = mapped_column(default=0, nullable=False)

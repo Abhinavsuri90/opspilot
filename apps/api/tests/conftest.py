@@ -13,6 +13,13 @@ import pytest  # noqa: E402
 from sqlalchemy import Engine, create_engine, delete, select, text  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
+from app.action_models import (  # noqa: E402
+    Action,
+    ActionAttempt,
+    ConnectorInstance,
+    OrgActionPolicy,
+    OrgSettings,
+)
 from app.db import normalize_database_url  # noqa: E402
 from app.login_throttle import client_ip_hash, identity_hash  # noqa: E402
 from app.models import (  # noqa: E402
@@ -53,7 +60,13 @@ def delete_documents(session: Session, document_ids: list[uuid.UUID]) -> None:
     """Remove documents and every dependent row, children first, with owner rights."""
     if not document_ids:
         return
+    action_ids = list(
+        session.scalars(select(Action.id).where(Action.document_id.in_(document_ids)))
+    )
+    if action_ids:
+        session.execute(delete(ActionAttempt).where(ActionAttempt.action_id.in_(action_ids)))
     for model in (
+        Action,
         FieldCorrection,
         ReviewTask,
         InvoiceReview,
@@ -80,7 +93,15 @@ def delete_organizations(session: Session, org_ids: list[uuid.UUID]) -> None:
     user_ids = list(
         session.scalars(select(Membership.user_id).where(Membership.org_id.in_(org_ids)))
     )
-    for model in (InvoiceCategory, AuditEvent, WorkflowConfig, Membership):
+    for model in (
+        ConnectorInstance,
+        OrgActionPolicy,
+        OrgSettings,
+        InvoiceCategory,
+        AuditEvent,
+        WorkflowConfig,
+        Membership,
+    ):
         session.execute(delete(model).where(model.org_id.in_(org_ids)))
     session.execute(delete(Organization).where(Organization.id.in_(org_ids)))
     if user_ids:

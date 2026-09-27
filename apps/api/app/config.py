@@ -3,6 +3,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
+from cryptography.fernet import Fernet
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -33,10 +34,30 @@ class Settings(BaseSettings):
     upload_parse_timeout_seconds: float = Field(default=15, gt=0, le=120)
     # Per-process cap on concurrent PDF parses; see app/timeouts.py.
     max_concurrent_parses: int = Field(default=4, ge=1, le=64)
+    # Wall-clock limit for one connector execution; see app/worker.py. It stays under
+    # the worker lease so a hung destination cannot be reclaimed mid-call.
+    action_execute_timeout_seconds: float = Field(default=30, gt=0, le=120)
+    # Fernet key for connector credentials at rest; see app/connectors/credentials.py.
+    # Development derives a local-only key from JWT_SECRET when this is unset.
+    connector_encryption_key: str | None = None
     # Peers allowed to supply X-Forwarded-For; see app/client_ip.py.
     trusted_proxy_cidrs: str = (
         "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,::1/128,fc00::/7"
     )
+
+    @field_validator("connector_encryption_key")
+    @classmethod
+    def parse_connector_encryption_key(cls, value: str | None) -> str | None:
+        key = (value or "").strip()
+        if not key:
+            return None
+        try:
+            Fernet(key.encode("ascii"))
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                "CONNECTOR_ENCRYPTION_KEY must be a Fernet key (44 URL-safe base64 characters)"
+            ) from exc
+        return key
 
     @field_validator("trusted_proxy_cidrs")
     @classmethod
@@ -111,6 +132,8 @@ class Settings(BaseSettings):
                     raise ValueError("S3_ENDPOINT_URL must be a remote HTTPS endpoint")
                 if not key:
                     raise ValueError("Custom S3 endpoints require explicit credentials")
+            if self.connector_encryption_key is None:
+                raise ValueError("CONNECTOR_ENCRYPTION_KEY is required outside development")
         return self
 
 

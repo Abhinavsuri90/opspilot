@@ -74,6 +74,7 @@ def test_deployment_requires_remote_storage_configuration() -> None:
         "s3_endpoint_url": "https://bucket.example.test",
         "s3_access_key_id": "staging-key",
         "s3_secret_access_key": "staging-secret",
+        "connector_encryption_key": "u2s5H8Zq1iJd0m9qF0O5v1uTn7fJbdxlN1eXKjKlY7E=",
     }
     assert Settings(_env_file=None, **valid).s3_bucket == "opspilot-staging-documents"
     for changed in (
@@ -89,9 +90,18 @@ def test_deployment_requires_remote_storage_configuration() -> None:
         {"web_origin": "https://user@example.test"},
         {"database_url": "postgresql://opspilot_app:pass@localhost:5432/opspilot"},
         {"database_url": "postgresql://opspilot_owner:pass@db.internal:5432/opspilot"},
+        {"connector_encryption_key": None},
+        {"connector_encryption_key": ""},
+        {"connector_encryption_key": "not-a-fernet-key"},
     ):
         with pytest.raises(ValidationError):
             Settings(_env_file=None, **(valid | changed))
+    # Development derives a local key instead of requiring one.
+    assert Settings(_env_file=None, environment="development").connector_encryption_key is None
+    bounded = Settings(_env_file=None, action_execute_timeout_seconds=120)
+    assert bounded.action_execute_timeout_seconds == 120
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, action_execute_timeout_seconds=121)
 
 
 def test_s3_read_is_bounded_and_closes_stream(monkeypatch: pytest.MonkeyPatch) -> None:

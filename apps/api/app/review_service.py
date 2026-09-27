@@ -35,6 +35,8 @@ from app.repositories import (
     get_workflow_config_version,
     latest_extraction_run,
     latest_run_id_for,
+    list_action_attempts,
+    list_document_actions,
     list_document_audit_events,
     list_document_comments,
     list_document_fields,
@@ -52,7 +54,7 @@ from app.workflow_config import (
 from app.workflow_models import FieldCorrection, InvoiceMetadata, ReviewTask
 
 FieldStatus = Literal["auto", "needs_review", "corrected", "approved"]
-TimelineKind = Literal["audit", "extraction", "correction", "review", "comment"]
+TimelineKind = Literal["audit", "extraction", "correction", "review", "comment", "action"]
 AssignedFilter = Literal["me", "unassigned", "all"]
 
 
@@ -541,9 +543,19 @@ _TYPED_AUDIT_EVENTS = frozenset(
         "invoice.approve",
         "invoice.reject",
         "invoice.reopen",
+        "action.proposed",
+        "action.succeeded",
+        "action.shadowed",
     }
 )
-_KIND_ORDER = {"audit": 0, "extraction": 1, "correction": 2, "review": 3, "comment": 4}
+_KIND_ORDER = {
+    "audit": 0,
+    "extraction": 1,
+    "correction": 2,
+    "review": 3,
+    "comment": 4,
+    "action": 5,
+}
 
 
 def _humanize(event_type: str) -> str:
@@ -648,5 +660,68 @@ def timeline(session: Session, org_id: uuid.UUID, document_id: uuid.UUID) -> lis
             ),
             comment.id,
         )
+    for action in list_document_actions(session, org_id, document_id):
+        base: dict[str, object] = {
+            "action_id": str(action.id),
+            "destination": action.destination,
+            "action_type": action.action_type,
+            "policy_mode": action.policy_mode,
+            "status": action.status,
+        }
+        add(
+            TimelineEntry(
+                at=action.proposed_at,
+                kind="action",
+                event_type="action.proposed",
+                actor_email=None,
+                summary=f"Proposed {action.action_type.replace('_', ' ')} to {action.destination}",
+                detail=base | {"preview": _audit_detail_from(action.preview_json)},
+            ),
+            ("proposed", action.id),
+        )
+        for attempt in list_action_attempts(session, org_id, action.id):
+            outcome = "succeeded" if attempt.ok else "failed"
+            add(
+                TimelineEntry(
+                    at=attempt.finished_at,
+                    kind="action",
+                    event_type="action.attempt",
+                    actor_email=None,
+                    summary=f"Attempt {attempt.attempt} {outcome}: "
+                    f"{attempt.response_summary or attempt.error or ''}".rstrip(": "),
+                    detail=base
+                    | {
+                        "attempt": attempt.attempt,
+                        "ok": attempt.ok,
+                        "response_summary": attempt.response_summary,
+                        "error": attempt.error,
+                        "started_at": attempt.started_at.isoformat(),
+                    },
+                ),
+                ("attempt", attempt.id),
+            )
+        if action.executed_at is not None and action.status in {"succeeded", "shadowed"}:
+            verb = "Executed" if action.status == "succeeded" else "Recorded in shadow mode"
+            add(
+                TimelineEntry(
+                    at=action.executed_at,
+                    kind="action",
+                    event_type=f"action.{action.status}",
+                    actor_email=None,
+                    summary=(
+                        f"{verb}: {action.action_type.replace('_', ' ')} to {action.destination}"
+                    ),
+                    detail=base | {"result": _audit_detail_from(action.result_json or "{}")},
+                ),
+                ("executed", action.id),
+            )
     entries.sort(key=lambda item: item[:3])
     return [entry for _, _, _, entry in entries]
+
+
+def _audit_detail_from(raw: str) -> dict[str, object]:
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        return {}
+    return dict(decoded) if isinstance(decoded, dict) else {}

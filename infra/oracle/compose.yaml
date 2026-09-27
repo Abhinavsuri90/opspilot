@@ -31,6 +31,12 @@ x-app-environment: &app-environment
   S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?Set the OCI Customer Secret Key access key}
   S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?Set the OCI Customer Secret Key secret}
   MAX_DOCUMENTS_PER_ORG: ${MAX_DOCUMENTS_PER_ORG:-1000}
+  CONNECTOR_ENCRYPTION_KEY: ${CONNECTOR_ENCRYPTION_KEY:?Set CONNECTOR_ENCRYPTION_KEY (init_env.py generates it)}
+  UPLOAD_PARSE_TIMEOUT_SECONDS: ${UPLOAD_PARSE_TIMEOUT_SECONDS:-15}
+  EXTRACTION_TIMEOUT_SECONDS: ${EXTRACTION_TIMEOUT_SECONDS:-60}
+  MAX_CONCURRENT_PARSES: ${MAX_CONCURRENT_PARSES:-4}
+  ACTION_EXECUTE_TIMEOUT_SECONDS: ${ACTION_EXECUTE_TIMEOUT_SECONDS:-30}
+  # Caddy and the web proxy sit on private Compose networks, so the default trusted ranges apply.
 
 services:
   postgres:

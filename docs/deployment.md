@@ -127,7 +127,7 @@ cd opspilot
 python3 infra/oracle/init_env.py
 ```
 
-The helper asks for hostname, region identifier, S3 endpoint, private bucket, access key and secret key. Keys are hidden while typing. It creates `infra/oracle/.env` with permissions600, distinct random database passwords and a JWT secret; it refuses to overwrite existing configuration. It is excluded from Git and Docker builds. Back up this file privately. Do not regenerate database passwords after initializing the persistent volume.
+The helper asks for hostname, region identifier, S3 endpoint, private bucket, access key and secret key. Keys are hidden while typing. It creates `infra/oracle/.env` with permissions600, distinct random database passwords, a JWT secret and the connector credential encryption key; it refuses to overwrite existing configuration. It is excluded from Git and Docker builds. Back up this file privately. Do not regenerate database passwords after initializing the persistent volume.
 
 `infra/oracle/ops` is a wrapper that consistently selects the production Compose file and private environment. Commands below run from `/home/ubuntu/opspilot`. Never run the root `make demo` on this server.
 

@@ -30,6 +30,8 @@ flowchart TB
     Store[(Private S3-compatible PDF bucket)]
     Worker[Extraction worker: leased Postgres outbox]
     Confidence[Confidence engine: grounding, format, cross-field rules, self-report]
+    Gate[Governance gate: action policy, kill switch, shadow mode]
+    Connectors[Connectors: signed webhook, CSV export, Postgres table, Google Sheets]
     Rules[Local labeled-field parser]
     Router[Optional OpenRouter structured extraction]
     Admin[Operator migration process: owner role]
@@ -42,7 +44,10 @@ flowchart TB
     Worker --> Rules
     Worker -. configured alternative .-> Router
     Worker --> Confidence
-    Worker -->|Evidence, scores, review task, state and audit| DB
+    Worker -->|Leased action, re-checked immediately before the call| Gate
+    Gate -->|Only when allowed| Connectors
+    Connectors -->|External systems| Ext[(Customer systems)]
+    Worker -->|Evidence, scores, review task, actions, attempts, state and audit| DB
     Admin -->|Alembic migrations only| DB
 ```
 
@@ -53,7 +58,8 @@ flowchart TB
 | Next.js | Pages, typed API client, TanStack Query cache, same-origin proxy | Stateless web replicas |
 | FastAPI | Authentication, permissions, validation, invoice workflow, field corrections, review queue, timeline, PDF delivery | Stateless API replicas; Postgres connection budget applies |
 | Postgres | Accounts, tenancy, workflow state, durable jobs, immutable evidence, audit | Vertical scaling first; inspect actual query plans before adding replicas |
-| Worker | PDF text parsing, optional model call, evidence validation, confidence scoring, rule evaluation, review-task creation, durable completion | One extraction at a time per process under a hard timeout; add workers within provider and DB limits |
+| Worker | PDF text parsing, optional model call, evidence validation, confidence scoring, rule evaluation, review-task creation, action proposal and execution behind the governance gate, durable completion | One job at a time per process under hard timeouts; add workers within provider, connector and DB limits |
+| Connectors | Typed configuration, encrypted credentials, connection tests, preview diffs, idempotent execution against customer systems | Each call bounded by a timeout; retries with backoff; dead-letter queue after five attempts |
 | Object store | Original PDF bytes | Managed private bucket; backup/versioning configured by operator |
 | Migration process | Schema and restricted-role grants | One serialized release step; owner credentials excluded from serving processes |
 
@@ -118,6 +124,8 @@ All document actions additionally require access to that particular document.
 | Add invoice comments | Yes | Yes | Yes | No |
 | Verify amount/currency and set category | Yes | Eligible reviewer | No | No |
 | Accept or edit extracted fields (creates a correction) | Yes | Eligible reviewer | No | No |
+| Approve, reject or retry proposed actions | Yes | Yes | No | No |
+| Kill switch, shadow mode, action policies, connectors, workflow configuration | Yes | No | No | No |
 | Approve/reject/reopen | Yes | Eligible reviewer | No | No |
 | Assign reviewer | Yes | No | No | No |
 | Manage visibility/grants | Yes | If uploader | If uploader | No |
@@ -145,6 +153,7 @@ RLS enforces organization isolation. Per-document restrictions are enforced by a
 - Bounded JSON requests (64 KB), upload requests and field lengths.
 - Unknown credentials receive a consistent error; valid pending credentials receive an actionable pending status.
 - No raw API keys, cookies, passwords, document text or email addresses in request timing logs.
+- Connector credentials are encrypted at rest with a Fernet key from the environment and are never returned by any endpoint; webhook destinations are resolved and rejected when they point at loopback, private, link-local or metadata addresses outside development, both when saved and again when sent.
 
 The web proxy forwards `X-Forwarded-For` and `X-Forwarded-Proto`. The API derives the client address with one rule: when the connecting peer is a loopback or private-network address (the web container), it takes the rightmost `X-Forwarded-For` entry, which is the value the trusted edge appended; otherwise it uses the peer address and ignores the header. A browser-supplied leftmost entry therefore cannot spoof the per-address login throttle (50 attempts per 15 minutes) or the signup throttle. An edge rate limit or bot challenge is still advisable before unrestricted public signup.
 
@@ -167,6 +176,11 @@ erDiagram
     DOCUMENT ||--o{ INVOICE_GRANT : shares
     EXTRACTED_FIELD ||--o{ FIELD_CORRECTION : corrects
     DOCUMENT ||--o| REVIEW_TASK : tracks
+    DOCUMENT ||--o{ ACTION : proposes
+    CONNECTOR_INSTANCE ||--o{ ACTION : executes
+    ACTION ||--o{ ACTION_ATTEMPT : records
+    ORGANIZATION ||--o| ORG_SETTINGS : governs
+    ORGANIZATION ||--o{ ACTION_POLICY : permits
     DOCUMENT ||--o{ AUDIT_EVENT : links
     ORGANIZATION ||--o{ AUDIT_EVENT : records
 ```
@@ -180,6 +194,10 @@ erDiagram
 | Extraction run / field | Original provider output and exact evidence retained; each field stores confidence, threshold, status (`auto`/`needs_review`), signal values and reasons; review never overwrites extraction |
 | Field correction | Append-only accept/edit rows by a reviewer; the effective value is the latest correction, else the original |
 | Review task | One per document; opened when review is required, due after the configured SLA, completed with the decision, restarted on reopen |
+| Action | One per document, destination and canonical payload (unique idempotency key per organization); statuses proposed, approved, rejected, executing, succeeded, failed, retrying, dead_lettered, shadowed, forbidden; preview stored before any call |
+| Action attempt | Append-only record of every execution attempt with outcome and a response summary that never includes the response body |
+| Connector instance | Typed configuration validated per connector; credentials encrypted with Fernet; deactivated rather than deleted |
+| Organization settings and action policies | Kill switch and shadow mode per organization; policy per action type overrides the workflow configuration default of needs approval |
 | Invoice metadata | One row/document; default visibility workspace; version begins at zero |
 | Verified money | Decimal `NUMERIC(20,4)`, nonnegative, amount and ISO currency both set or both absent |
 | Category | Unique normalized name inside organization; archive instead of deleting referenced history |
@@ -249,6 +267,39 @@ Confidence is not the model's opinion of itself. Each extracted field receives a
 
 The organization's `review_policy` decides routing: `always` (the default for new organizations) sends every document to review; `threshold` auto-approves a document only when no field is flagged and no rule failed. Approval requires every flagged field to carry a correction; verified amount and currency are derived from the effective total and currency fields when the reviewer has not entered them.
 
+### Approval to external action
+
+```mermaid
+sequenceDiagram
+    actor Reviewer
+    participant API
+    participant DB
+    participant Worker
+    participant Connector
+    Reviewer->>API: Approve document
+    API->>DB: Decision + audit + propose_actions outbox row (one transaction)
+    Worker->>DB: Lease propose_actions; load pinned workflow config
+    Worker->>DB: One Action per enabled destination with preview, policy and idempotency key
+    Note over Worker,DB: auto: approved + execute_action row · needs_approval: proposed · forbidden: never executes
+    Reviewer->>API: Approve proposed action (version check)
+    API->>DB: approved + execute_action outbox row
+    Worker->>DB: Lease execute_action; lock action
+    Worker->>DB: Re-read kill switch, shadow mode and policy immediately before the call
+    alt kill switch on
+        Worker->>DB: Defer 60 s, audit once per hour, connector never called
+    else shadow mode
+        Worker->>DB: shadowed with the preview as result
+    else allowed
+        Worker->>DB: executing, attempt started (commit)
+        Worker->>Connector: execute(payload, idempotency key) under a timeout
+        Connector-->>Worker: ok, retryable failure or terminal failure
+        Worker->>DB: attempt row; succeeded, retrying with backoff, failed or dead_lettered
+    end
+    Worker->>DB: completed when no action is still open
+```
+
+The gate runs after the lease and inside the worker, so a kill switch engaged between approval and execution still stops the call. Shadow mode records exactly what would have been sent. Retries back off exponentially with jitter and stop at five attempts; dead-lettered actions stay visible with a manual retry. Reopening a document withdraws its still-proposed actions. Details and tradeoffs: [ADR 007](docs/adr/007-governed-actions.md).
+
 ### Implemented document states
 
 ```mermaid
@@ -263,8 +314,15 @@ stateDiagram-v2
     failed --> queued: authorized manual retry
     needs_review --> approved: flagged fields corrected, money verified
     needs_review --> rejected: reason required
+    approved --> actions_pending: destinations configured
+    auto_approved --> actions_pending: destinations configured
+    approved --> completed: no destinations
+    auto_approved --> completed: no destinations
+    actions_pending --> completed: every action settled
     approved --> needs_review: reopen
     auto_approved --> needs_review: reopen
+    actions_pending --> needs_review: reopen withdraws proposals
+    completed --> needs_review: reopen
     rejected --> needs_review: reopen
 ```
 
@@ -294,6 +352,11 @@ This is at-least-once processing with guarded database completion. A crash after
 | Old worker completes after reclaim | Lease mismatch prevents stale completion |
 | Provider returns invented evidence | Grounding check drops that field and records the reason; nothing survives, the run fails; no automatic approval |
 | Extraction hangs on a pathological PDF | Hard timeout (60 s default) fails the job as non-retryable; upload-time parsing has its own 15 s bound |
+| Kill switch engaged after an action was approved | Gate re-reads settings after the lease; the call never happens; the action waits and is retried when the switch is released |
+| Worker crashes between starting and finishing an attempt | The attempt counts against the budget; the lease expires and the action is retried or dead-lettered, so a customer system sees at most one duplicate, which idempotency keys let it ignore |
+| Connector destination down or rate limiting | Retryable failures back off 1, 2, 4, 8, 16 minutes with jitter, then dead-letter with a manual retry |
+| Destination connector deleted or inactive | Action fails with a visible reason; a retry re-resolves the connector by destination name |
+| Encryption key rotated without re-entering credentials | Terminal failure named in the action; credentials must be re-entered |
 | Concurrent review/category change | Lock and version check prevent lost update |
 | Suspended user has an old cookie | Active membership check rejects new requests |
 | Object contents change unexpectedly | Hash/length check blocks processing and file delivery |
@@ -381,7 +444,7 @@ Alternative paid Render topology: public web service, private API service, backg
 
 The web service deploys the homepage, registration, login and all five workspace pages in one release. API and worker run separately so serving pages, handling requests and extracting PDFs have distinct process boundaries. All browser requests use the public web origin and its `/api` proxy; the API stays on Render's private network. The initial rollout order is database and private storage, owner-run migrations, API and worker, web, then a hosted acceptance run. A working homepage alone does not verify signup, database access or background extraction.
 
-`ENVIRONMENT` defaults to `production`, which enforces HTTPS origin, secure cookies, a strong session secret, the restricted database role and non-local storage; local development, CI and tests set `development` explicitly.
+`ENVIRONMENT` defaults to `production`, which enforces HTTPS origin, secure cookies, a strong session secret, the restricted database role, non-local storage and a configured `CONNECTOR_ENCRYPTION_KEY`; local development, CI and tests set `development` explicitly, where a local-only key is derived. The Oracle configuration helper generates the key with the other secrets.
 
 Operational responsibilities:
 
@@ -407,6 +470,7 @@ There is no tested production restore, observed availability history, centralize
 - Immutable extraction evidence and append-only decisions/comments/corrections/audit grants.
 - Confidence signals, weight renormalization, thresholds, rule-grammar rejection of unsafe syntax, approve gate on flagged fields, queue filters and ordering, timeline merge order, field access across documents and tenants.
 - Per-address login throttle, forwarded-address derivation, extraction and upload-parse timeouts, request IDs on 500 responses, schema drift between ORM and migrations.
+- Governance: policy matrix, kill switch engaged between approval and execution (thread-gated), shadow mode never calling a connector, forbidden at execution time, idempotent proposals and executions, backoff to dead letter and manual retry, webhook HMAC verified by a test receiver, SSRF matrix, credential encryption and secrecy, YAML configuration round trip and stale-version conflicts, tenant isolation of actions, connectors, policies and exports.
 - Decimal totals across currencies, verified/unverified exclusions, aggregate scope beyond 50 invoices.
 - Fresh browser registration through approval, upload, full PDF review, discussion, decision and insights.
 - Review queue filters, split view, evidence highlight rectangles, keyboard accept/edit/approve, inline validation reasons, shortcuts dialog and timeline (`npm run test:e2e:review` from `apps/web`).
@@ -423,6 +487,8 @@ Start with a real workflow: “A member joins an organization, an admin approves
 - How tenant RLS differs from document-level authorization; how totals avoid leaking restricted data.
 - Why reviewer-confirmed money is separate from immutable model extraction.
 - Why confidence combines six signals with grounding weighted highest and the model's self-report lowest, and how a failed cross-field rule flags every field it references.
+- Why the kill switch is checked inside the worker after the lease rather than at approval time, and what shadow mode is for during a customer's first days.
+- How idempotency keys, attempt records and the dead-letter queue keep at-least-once execution honest with customer systems.
 - How a lease prevents an old worker committing after a replacement worker.
 - How concurrent reviewer edits get a conflict instead of a silent overwrite.
 - Why bounded database questions and exact evidence are safer to demonstrate than unsupported model claims.

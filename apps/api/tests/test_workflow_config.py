@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.workflow_config import (
+    DestinationSpec,
     DocumentTypeSpec,
     FieldSpec,
     InvalidWorkflowConfig,
@@ -164,3 +165,79 @@ def test_regex_length_is_capped() -> None:
     with pytest.raises(ValidationError, match="longer than 200"):
         FieldSpec(name="x", regex="a" * 201)
     assert FieldSpec(name="x", regex="a" * 200).regex == "a" * 200
+
+
+def test_destinations_validate_names_fields_literals_and_types() -> None:
+    invoice = default_invoice_config().document_types[0]
+    receipt = DocumentTypeSpec(name="receipt", fields=[FieldSpec(name="merchant")])
+    good = WorkflowConfigModel(
+        document_types=[invoice, receipt],
+        destinations=[
+            DestinationSpec(
+                name="ap-sheet",
+                connector="finance",
+                action_type="append_row",
+                mapping={
+                    "Vendor": "vendor",
+                    "Amount": "${verified.amount}",
+                    "File": "${document.filename}",
+                },
+                document_types=["invoice"],
+            ),
+            DestinationSpec(
+                name="all-docs",
+                connector="hook",
+                action_type="post_webhook",
+                mapping={"id": "${document.id}"},
+                enabled=False,
+            ),
+        ],
+    )
+    assert [item.name for item in good.destinations_for("invoice")] == ["ap-sheet"]
+    assert good.destinations_for("receipt") == []
+    assert good.destinations == load_config(good.model_dump_json()).destinations
+    assert "destinations" in good.model_dump() and default_invoice_config().destinations == []
+
+    def build(**overrides: object) -> WorkflowConfigModel:
+        spec = {
+            "name": "ap-sheet",
+            "connector": "finance",
+            "action_type": "append_row",
+            "mapping": {"Vendor": "vendor"},
+        } | overrides
+        return WorkflowConfigModel.model_validate(
+            {"document_types": [invoice.model_dump(), receipt.model_dump()], "destinations": [spec]}
+        )
+
+    with pytest.raises(ValidationError, match="unknown field 'vendor' for document type 'receipt'"):
+        build()  # vendor does not exist on receipts, and the destination applies to both types
+    with pytest.raises(ValidationError, match="unknown literal"):
+        build(mapping={"x": "${document.secret}"}, document_types=["invoice"])
+    with pytest.raises(ValidationError, match="unknown document type: memo"):
+        build(document_types=["memo"])
+    with pytest.raises(ValidationError):
+        build(action_type="send_email", document_types=["invoice"])
+    with pytest.raises(ValidationError):
+        build(name="Bad Name", document_types=["invoice"])
+    with pytest.raises(ValidationError, match="column name is invalid"):
+        build(mapping={" padded": "vendor"}, document_types=["invoice"])
+    with pytest.raises(ValidationError, match="Duplicate destination name"):
+        WorkflowConfigModel.model_validate(
+            {
+                "document_types": [invoice.model_dump()],
+                "destinations": [
+                    {
+                        "name": "dup",
+                        "connector": "a",
+                        "action_type": "export_csv",
+                        "mapping": {"v": "vendor"},
+                    },
+                    {
+                        "name": "dup",
+                        "connector": "b",
+                        "action_type": "export_csv",
+                        "mapping": {"v": "vendor"},
+                    },
+                ],
+            }
+        )

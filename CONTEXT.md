@@ -2,7 +2,7 @@
 
 ## 1. Last updated
 
-2026-09-27, mid-session. Latest commits: `e01614f` web fixes, `52172bb` Phase 2 API, `e729ebc` CI retry, plus the review fix pass (migration 0007, 210 API tests). Review split view UI complete and committed; Phase 3 backend (actions, policies, connectors) in progress: see section 4.
+2026-09-27, mid-session. Latest commits: `e01614f` web fixes, `52172bb` Phase 2 API, `e729ebc` CI retry, plus the review fix pass (migration 0007, 210 API tests). Phase 3 backend committed (migration 0008, 261 API tests); Phase 3 frontend in progress: see section 4.
 
 ## 2. Current status
 
@@ -12,14 +12,13 @@ The owner then chose to implement the rest of SPEC.md before deploying. Build or
 
 **Done today:** review fixes (web and API), Phase 2 backend (migrations 0006 and 0007, 210 API tests) and the Phase 2 review split view (79 web tests, `make smoke-review`).
 
-**In progress right now:** Phase 3 backend per the brief in the session scratchpad (migration 0008: org_settings kill switch and shadow mode, action_policies, connector_instances with Fernet credentials, actions and action_attempts; connectors webhook, csv_export, postgres_table, google_sheets; worker topics propose_actions and execute_action with the policy and kill-switch check immediately before execution; settings and actions APIs; workflow config GET/POST with YAML).
+**In progress right now:** Phase 3 frontend (`/actions` with pending/history/dead-letter tabs and preview diffs, `/settings/policies` with kill switch and shadow mode, `/settings/connectors` with tests and exports, `/settings/workflow` YAML editor, AppShell navigation and paused banner, dashboard tiles, `e2e-actions.mjs` with a local signed-webhook receiver) and an independent review of the Phase 3 backend diff whose findings will be fixed in a follow-up pass.
 
 ## 3. Exact next step
 
-1. When the Phase 3 backend finishes: rebuild, run `make lint typecheck test`, `make gen-client`, review the diff (independent reviewer), commit and push.
-2. Build the Phase 3 frontend (`/actions`, `/settings/policies`, `/settings/connectors`, `/settings/workflow`, timeline actions, AppShell nav, kill-switch banner) against the new endpoints; brief drafted in the session scratchpad (phase3_frontend_brief.md).
-3. Run all seven browser suites (`make smoke-ui smoke-tenants smoke-workspace smoke-review` plus `npm run test:e2e:public`, `test:e2e:errors`, and the new actions script); update SYSTEM_DESIGN.md (actions flow, policy check, connector boundary), README, PROGRESS, CONTEXT; commit; push.
-4. Phase 4: config editor UI polish, Contoso purchase orders and delivery notes, email intake via Mailpit/IMAP, dashboard KPIs with charts.
+1. When the Phase 3 backend review lands: fix its findings (backend agent), rerun `make lint typecheck test`, commit.
+2. When the Phase 3 frontend lands: web gates, rebuild web, run all seven browser suites (`make smoke-ui smoke-tenants smoke-workspace smoke-review`, `npm run test:e2e:public`, `test:e2e:errors`, `test:e2e:actions`), add the new pages to the design doc page map and README pages table, commit, push.
+3. Phase 4 per the scratchpad brief (phase4_brief.md): Contoso purchase orders and delivery notes with a logistics template, synthetic dataset generator, near-duplicate detection, per-org API keys for programmatic intake, email intake via IMAP with a Mailpit backend for development, KPI metrics endpoint and dashboard charts.
 
 ## 4. Files in play
 
@@ -42,7 +41,7 @@ The owner then chose to implement the rest of SPEC.md before deploying. Build or
 
 - Local web http://localhost:3300, API http://localhost:8000/docs. No staging or production URL exists yet.
 - External accounts: GitHub repo `Abhinavsuri90/opspilot` with Actions CI. Oracle Cloud account not yet created (guide in `docs/deployment.md`, Part 1 steps given to the owner). Render account exists but is not to be used (paid plans).
-- Env var names: see `.env.example` (DATABASE_URL, DATABASE_OWNER_URL, APP_DB_PASSWORD, JWT_SECRET, COOKIE_SECURE, WEB_ORIGIN, ENVIRONMENT, S3_*, LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL, MAX_DOCUMENTS_PER_ORG, plus EXTRACTION_TIMEOUT_SECONDS, UPLOAD_PARSE_TIMEOUT_SECONDS, MAX_CONCURRENT_PARSES and TRUSTED_PROXY_CIDRS). Never store values here.
+- Env var names: see `.env.example` (DATABASE_URL, DATABASE_OWNER_URL, APP_DB_PASSWORD, JWT_SECRET, COOKIE_SECURE, WEB_ORIGIN, ENVIRONMENT, S3_*, LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL, MAX_DOCUMENTS_PER_ORG, EXTRACTION_TIMEOUT_SECONDS, UPLOAD_PARSE_TIMEOUT_SECONDS, MAX_CONCURRENT_PARSES, TRUSTED_PROXY_CIDRS, CONNECTOR_ENCRYPTION_KEY, ACTION_EXECUTE_TIMEOUT_SECONDS). Never store values here. Outside development the connector encryption key is mandatory; `infra/oracle/init_env.py` generates it.
 - Demo logins exist only after `make demo` locally (Northwind and Contoso admins; password from DEMO_PASSWORD in the ignored `.env`).
 
 ## 7. How to run and test

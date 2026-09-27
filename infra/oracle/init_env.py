@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Create the VM's private configuration without printing credentials."""
 
+import base64
 import getpass
 import os
 from pathlib import Path
@@ -64,12 +65,19 @@ def main() -> None:
         "POSTGRES_PASSWORD": secrets.token_hex(32),
         "APP_DB_PASSWORD": secrets.token_hex(32),
         "JWT_SECRET": secrets.token_hex(48),
+        # Fernet key: 32 random bytes, URL-safe base64. Rotating it makes stored
+        # connector credentials unreadable until they are re-entered.
+        "CONNECTOR_ENCRYPTION_KEY": base64.urlsafe_b64encode(secrets.token_bytes(32)).decode("ascii"),
         "S3_REGION": region,
         "S3_ENDPOINT_URL": endpoint,
         "S3_BUCKET": bucket,
         "S3_ACCESS_KEY_ID": access_key,
         "S3_SECRET_ACCESS_KEY": secret_key,
         "LLM_PROVIDER": "rules",
+        "EXTRACTION_TIMEOUT_SECONDS": "60",
+        "UPLOAD_PARSE_TIMEOUT_SECONDS": "15",
+        "MAX_CONCURRENT_PARSES": "4",
+        "ACTION_EXECUTE_TIMEOUT_SECONDS": "30",
         "MAX_DOCUMENTS_PER_ORG": "1000",
         "OPENROUTER_API_KEY": "",
         "OPENROUTER_MODEL": "",

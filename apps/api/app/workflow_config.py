@@ -14,8 +14,28 @@ from app import rules
 FieldType = Literal["text", "identifier", "date", "money", "integer", "currency"]
 ReviewPolicy = Literal["always", "threshold"]
 ActionPolicy = Literal["auto", "needs_approval", "forbidden"]
+ActionType = Literal["append_row", "create_record", "post_webhook", "export_csv"]
 FIELD_NAME_PATTERN = r"^[a-z][a-z0-9_]{0,99}$"
 DOCUMENT_TYPE_PATTERN = r"^[a-z][a-z0-9_]{0,49}$"
+DESTINATION_NAME_PATTERN = r"^[a-z][a-z0-9_-]{0,49}$"
+# Connector type that executes each action type; the settings API exposes the same catalogue.
+ACTION_TYPE_CONNECTORS: dict[str, str] = {
+    "append_row": "google_sheets",
+    "create_record": "postgres_table",
+    "post_webhook": "webhook",
+    "export_csv": "csv_export",
+}
+# Non-field values a destination mapping may reference; resolved at proposal time.
+MAPPING_LITERALS = frozenset(
+    {
+        "${document.id}",
+        "${document.filename}",
+        "${document.document_type}",
+        "${verified.amount}",
+        "${verified.currency}",
+        "${category.name}",
+    }
+)
 MAX_REGEX_LENGTH = 200
 _BRACE_QUANTIFIER = re.compile(r"\{\d*,?\d*\}")
 
@@ -163,6 +183,35 @@ class DocumentTypeSpec(BaseModel):
         return next((field for field in self.fields if field.name == name), None)
 
 
+class DestinationSpec(BaseModel):
+    """Where an approved document's values go: one connector, one action type, one mapping."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=DESTINATION_NAME_PATTERN)
+    connector: str = Field(min_length=1, max_length=100)
+    action_type: ActionType
+    # Destination column -> document field name, or a ``${...}`` literal from MAPPING_LITERALS.
+    mapping: dict[str, str] = Field(min_length=1, max_length=100)
+    enabled: bool = True
+    document_types: list[str] | None = Field(default=None, max_length=50)
+
+    @field_validator("mapping")
+    @classmethod
+    def check_columns(cls, value: dict[str, str]) -> dict[str, str]:
+        for column, source in value.items():
+            if not column.strip() or len(column) > 63 or column != column.strip():
+                raise ValueError(f"Destination column name is invalid: {column!r}")
+            if not source.strip():
+                raise ValueError(f"Destination column {column!r} has no source")
+        return value
+
+    def applies_to(self, document_type: str) -> bool:
+        return self.enabled and (
+            self.document_types is None or document_type in self.document_types
+        )
+
+
 class WorkflowConfigModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -171,16 +220,50 @@ class WorkflowConfigModel(BaseModel):
     review_sla_minutes: int = Field(default=240, ge=1, le=60 * 24 * 30)
     baseline_minutes: int = Field(default=12, ge=0, le=60 * 24)
     action_policies: dict[str, ActionPolicy] = Field(default_factory=dict)
+    destinations: list[DestinationSpec] = Field(default_factory=list, max_length=50)
 
     @model_validator(mode="after")
     def unique_document_types(self) -> WorkflowConfigModel:
         names = [item.name for item in self.document_types]
         if len(set(names)) != len(names):
             raise ValueError("Document type names must be unique")
+        self._check_destinations(names)
         return self
+
+    def _check_destinations(self, type_names: list[str]) -> None:
+        seen: set[str] = set()
+        for destination in self.destinations:
+            if destination.name in seen:
+                raise ValueError(f"Duplicate destination name: {destination.name}")
+            seen.add(destination.name)
+            targets = destination.document_types or type_names
+            for target in targets:
+                if target not in type_names:
+                    raise ValueError(
+                        f"Destination '{destination.name}' references unknown document type: "
+                        f"{target}"
+                    )
+            for column, source in destination.mapping.items():
+                if source in MAPPING_LITERALS:
+                    continue
+                if source.startswith("${"):
+                    raise ValueError(
+                        f"Destination '{destination.name}' column '{column}' uses unknown "
+                        f"literal {source}"
+                    )
+                for target in targets:
+                    type_spec = self.document_type(target)
+                    if type_spec is not None and type_spec.field(source) is None:
+                        raise ValueError(
+                            f"Destination '{destination.name}' column '{column}' references "
+                            f"unknown field '{source}' for document type '{target}'"
+                        )
 
     def document_type(self, name: str) -> DocumentTypeSpec | None:
         return next((item for item in self.document_types if item.name == name), None)
+
+    def destinations_for(self, document_type: str) -> list[DestinationSpec]:
+        return [item for item in self.destinations if item.applies_to(document_type)]
 
 
 def default_invoice_config() -> WorkflowConfigModel:

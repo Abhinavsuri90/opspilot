@@ -4,7 +4,7 @@
 
 **An invoice workspace for organizations and their reviewers.** Create a company workspace, approve joining teammates, upload PDFs, inspect original documents, discuss discrepancies and track verified invoice decisions.
 
-Built with Next.js, React, TanStack Query, FastAPI, Postgres row-level security and S3-compatible storage. Extraction runs asynchronously through a durable Postgres outbox. Optional OpenRouter extraction accepts a configurable model; human review and totals operate independently of model access.
+Built with Next.js, React, TanStack Query, FastAPI, Postgres row-level security and S3-compatible storage. Extraction, validation and governed actions run asynchronously through a durable Postgres outbox. Optional OpenRouter extraction accepts a configurable model; human review, totals and governance operate independently of model access.
 
 ![OpsPilot public landing page](docs/assets/landing.png)
 
@@ -17,6 +17,9 @@ Built with Next.js, React, TanStack Query, FastAPI, Postgres row-level security 
 - Per-field confidence from six signals (grounding, format, cross-field rules, self-report, with router and memory slots reserved), configurable thresholds, and plain-language reasons for every flagged field.
 - Versioned per-organization workflow configuration: document types, typed fields and cross-field rules in a safe rule grammar; new organizations default to reviewing every document.
 - Field-level accept and edit as append-only corrections, review tasks with an SLA, a filterable review queue and a per-document timeline.
+- Governed actions after approval: one proposal per configured destination with a preview of exactly what will be sent, a per-type policy (auto, needs approval, forbidden), an organization kill switch and shadow mode re-checked immediately before every external call, idempotency keys, retries with backoff and a dead-letter queue with manual retry.
+- Connectors with encrypted credentials and connection tests: HMAC-signed webhook, CSV export, Postgres table and Google Sheets.
+- Workflow configuration API with YAML import and export, append-only versions and inline validation errors.
 - Full PDF viewing with page navigation, zoom, selectable page text and download; reviewer assignment, verified amount/currency and approve/reject/reopen.
 - Invoice comments, decision history and authenticated sharing with restricted visibility.
 - Dashboard, review queue, category filters, paginated inbox and Insights.
@@ -131,7 +134,7 @@ flowchart LR
 
 - [System design](SYSTEM_DESIGN.md): implemented architecture, data model, permissions, concurrency, recovery, latency targets and capacity calculations.
 - [Deployment](docs/deployment.md): Oracle VM with private API/worker/Postgres and OCI PDF storage; paid Render alternative.
-- [Architecture decisions](docs/adr/): tenant isolation, local storage, outbox, shared throttling, free-VM deployment and confidence scoring.
+- [Architecture decisions](docs/adr/): tenant isolation, local storage, outbox, shared throttling, free-VM deployment, confidence scoring and governed actions.
 - [Product roadmap](SPEC.md): original broader vision; not a claim that all roadmap features exist.
 
 All eight pages deploy as one Next.js service. On Oracle, `infra/oracle/compose.yaml` adds Caddy HTTPS, separate private API/worker containers and persistent PostgreSQL. The browser uses the web service's same-origin API proxy; the API has no public port. The [deployment guide](docs/deployment.md) covers signup, free resource limits, private storage, migrations, backups and hosted checks. Oracle availability and hosted behavior remain to be verified. The existing Render Blueprint uses paid plans.

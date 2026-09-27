@@ -1,10 +1,20 @@
+import json
 import uuid
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import ScalarSelect, exists, func, select
+from sqlalchemy import ScalarSelect, Select, and_, exists, func, select
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.orm import Session, aliased
 
+from app.access import accessible_document_clause
+from app.action_models import (
+    Action,
+    ActionAttempt,
+    ConnectorInstance,
+    OrgActionPolicy,
+    OrgSettings,
+)
 from app.models import (
     AuditEvent,
     Document,
@@ -237,3 +247,205 @@ def list_document_comments(
         .order_by(InvoiceComment.created_at, InvoiceComment.id)
     )
     return [(comment, email) for comment, email in rows]
+
+
+# Governance: org switches, policies, connectors, actions and attempts.
+
+
+def get_org_settings(
+    session: Session, org_id: uuid.UUID, *, lock: Literal["share", "update"] | None = None
+) -> OrgSettings | None:
+    query = select(OrgSettings).where(OrgSettings.org_id == org_id)
+    if lock == "share":
+        query = query.with_for_update(read=True)
+    elif lock == "update":
+        query = query.with_for_update()
+    return session.scalar(query)
+
+
+def ensure_org_settings(session: Session, org_id: uuid.UUID) -> OrgSettings:
+    """Read the row, creating it on first use; a concurrent creator wins harmlessly."""
+    existing = get_org_settings(session, org_id)
+    if existing is not None:
+        return existing
+    if session.get_bind().dialect.name == "postgresql":
+        session.execute(
+            postgresql.insert(OrgSettings).values(org_id=org_id).on_conflict_do_nothing()
+        )
+    else:
+        session.execute(sqlite.insert(OrgSettings).values(org_id=org_id).on_conflict_do_nothing())
+    created = get_org_settings(session, org_id)
+    assert created is not None
+    return created
+
+
+def list_action_policies(session: Session, org_id: uuid.UUID) -> list[OrgActionPolicy]:
+    return list(
+        session.scalars(
+            select(OrgActionPolicy)
+            .where(OrgActionPolicy.org_id == org_id)
+            .order_by(OrgActionPolicy.action_type)
+        )
+    )
+
+
+def get_action_policy(
+    session: Session, org_id: uuid.UUID, action_type: str, *, lock: bool = False
+) -> OrgActionPolicy | None:
+    query = select(OrgActionPolicy).where(
+        OrgActionPolicy.org_id == org_id, OrgActionPolicy.action_type == action_type
+    )
+    if lock:
+        query = query.with_for_update(read=True)
+    return session.scalar(query)
+
+
+def list_connectors(session: Session, org_id: uuid.UUID) -> list[ConnectorInstance]:
+    return list(
+        session.scalars(
+            select(ConnectorInstance)
+            .where(ConnectorInstance.org_id == org_id)
+            .order_by(ConnectorInstance.name)
+        )
+    )
+
+
+def get_connector_instance(
+    session: Session, org_id: uuid.UUID, connector_id: uuid.UUID, *, lock: bool = False
+) -> ConnectorInstance | None:
+    query = select(ConnectorInstance).where(
+        ConnectorInstance.org_id == org_id, ConnectorInstance.id == connector_id
+    )
+    if lock:
+        query = query.with_for_update()
+    return session.scalar(query)
+
+
+def get_connector_by_name(
+    session: Session, org_id: uuid.UUID, name: str
+) -> ConnectorInstance | None:
+    return session.scalar(
+        select(ConnectorInstance).where(
+            ConnectorInstance.org_id == org_id, ConnectorInstance.name == name
+        )
+    )
+
+
+def get_action(
+    session: Session, org_id: uuid.UUID, action_id: uuid.UUID, *, lock: bool = False
+) -> Action | None:
+    query = select(Action).where(Action.org_id == org_id, Action.id == action_id)
+    if lock:
+        query = query.with_for_update().execution_options(populate_existing=True)
+    return session.scalar(query)
+
+
+def get_action_by_idempotency_key(
+    session: Session, org_id: uuid.UUID, idempotency_key: str
+) -> Action | None:
+    return session.scalar(
+        select(Action).where(Action.org_id == org_id, Action.idempotency_key == idempotency_key)
+    )
+
+
+def list_document_actions(
+    session: Session, org_id: uuid.UUID, document_id: uuid.UUID
+) -> list[Action]:
+    return list(
+        session.scalars(
+            select(Action)
+            .where(Action.org_id == org_id, Action.document_id == document_id)
+            .order_by(Action.proposed_at, Action.id)
+        )
+    )
+
+
+def list_action_attempts(
+    session: Session, org_id: uuid.UUID, action_id: uuid.UUID
+) -> list[ActionAttempt]:
+    return list(
+        session.scalars(
+            select(ActionAttempt)
+            .where(ActionAttempt.org_id == org_id, ActionAttempt.action_id == action_id)
+            .order_by(ActionAttempt.attempt, ActionAttempt.started_at, ActionAttempt.id)
+        )
+    )
+
+
+ActionRow = tuple[Action, Document, str | None, str | None]
+
+
+def _action_rows_query(
+    org_id: uuid.UUID, user_id: uuid.UUID, role: str
+) -> Select[Action, Document, str, str]:
+    decider = aliased(User)
+    return (
+        select(Action, Document, ConnectorInstance.name, decider.email)
+        .join(Document, and_(Document.org_id == org_id, Document.id == Action.document_id))
+        .outerjoin(
+            ConnectorInstance,
+            and_(
+                ConnectorInstance.org_id == org_id,
+                ConnectorInstance.id == Action.connector_id,
+            ),
+        )
+        .outerjoin(decider, decider.id == Action.decided_by)
+        .where(Action.org_id == org_id, accessible_document_clause(org_id, user_id, role))
+    )
+
+
+def list_accessible_actions(
+    session: Session,
+    org_id: uuid.UUID,
+    user_id: uuid.UUID,
+    role: str,
+    *,
+    status: str | None = None,
+    document_id: uuid.UUID | None = None,
+    offset: int = 0,
+    limit: int = 50,
+) -> list[ActionRow]:
+    query = _action_rows_query(org_id, user_id, role)
+    if status is not None:
+        query = query.where(Action.status == status)
+    if document_id is not None:
+        query = query.where(Action.document_id == document_id)
+    rows = session.execute(
+        query.order_by(Action.proposed_at.desc(), Action.id.desc()).offset(offset).limit(limit)
+    )
+    return [(action, document, name, email) for action, document, name, email in rows]
+
+
+def get_accessible_action(
+    session: Session, org_id: uuid.UUID, user_id: uuid.UUID, role: str, action_id: uuid.UUID
+) -> ActionRow | None:
+    row = session.execute(
+        _action_rows_query(org_id, user_id, role).where(Action.id == action_id)
+    ).first()
+    if row is None:
+        return None
+    action, document, name, email = row
+    return action, document, name, email
+
+
+def list_export_keys(session: Session, org_id: uuid.UUID, connector_id: uuid.UUID) -> list[str]:
+    """Object keys written by succeeded CSV export actions of one connector."""
+    rows = session.scalars(
+        select(Action.result_json).where(
+            Action.org_id == org_id,
+            Action.connector_id == connector_id,
+            Action.action_type == "export_csv",
+            Action.status == "succeeded",
+            Action.result_json.is_not(None),
+        )
+    )
+    keys: list[str] = []
+    for raw in rows:
+        try:
+            decoded = json.loads(raw or "{}")
+        except ValueError:
+            continue
+        key = decoded.get("external_id") if isinstance(decoded, dict) else None
+        if isinstance(key, str):
+            keys.append(key)
+    return keys
