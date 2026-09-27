@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countInProgress, documentStatusLabel, documentStatusTone, isDocumentCompleted, isDocumentInProgress } from "./document-status";
+import { countInProgress, documentStatusLabel, documentStatusTone, isDocumentActionsPending, isDocumentCompleted, isDocumentInProgress } from "./document-status";
 
 describe("document polling states", () => {
   it("keeps polling while the worker owns or validates a document", () => {
@@ -9,7 +9,7 @@ describe("document polling states", () => {
   });
 
   it("stops polling after extraction finishes or fails", () => {
-    for (const status of ["needs_review", "failed", "approved", "auto_approved", "rejected"]) {
+    for (const status of ["needs_review", "failed", "approved", "auto_approved", "rejected", "actions_pending", "completed"]) {
       expect(isDocumentInProgress(status)).toBe(false);
     }
   });
@@ -40,5 +40,20 @@ describe("document status presentation", () => {
     expect(documentStatusTone("failed")).toBe("failed");
     expect(documentStatusTone("rejected")).toBe("rejected");
     expect(documentStatusTone("unknown")).toBe("neutral");
+  });
+});
+
+describe("agent follow-up statuses", () => {
+  it("labels the Phase 3 statuses for people", () => {
+    expect(documentStatusLabel("actions_pending")).toBe("Actions pending");
+    expect(documentStatusLabel("completed")).toBe("Completed");
+  });
+
+  it("gives actions_pending its own amber tone and treats completed like an approval", () => {
+    expect(isDocumentActionsPending("actions_pending")).toBe(true);
+    expect(isDocumentActionsPending("approved")).toBe(false);
+    expect(documentStatusTone("actions_pending")).toBe("actions");
+    expect(isDocumentCompleted("completed")).toBe(true);
+    expect(documentStatusTone("completed")).toBe("completed");
   });
 });

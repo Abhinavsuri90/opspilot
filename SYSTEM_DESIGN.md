@@ -79,6 +79,10 @@ All pages belong to one Next.js application. The public homepage explains the pr
 | `/review` | Approved members: filterable queue of authorized pending invoices with SLA and flagged-field counts |
 | `/review/[id]` | Eligible reviewers and admins: keyboard-first split view with evidence highlighting, per-field confidence and reasons, accept/edit corrections, rules, decision, discussion, access and timeline |
 | `/insights` | Approved members: authorized totals, categories and bounded questions |
+| `/actions` | Approved members: pending approvals with preview diffs, execution history and the dead-letter queue; decisions and retries need a reviewer or admin |
+| `/settings/policies` | Organization admins: kill switch, shadow mode and per-action-type policy |
+| `/settings/connectors` | Organization admins: connector setup, connection tests and CSV export downloads |
+| `/settings/workflow` | Organization admins: YAML workflow configuration with inline validation, import and export |
 | `/admin` | Organization admins: membership lifecycle and category management |
 
 ```mermaid
@@ -95,8 +99,8 @@ flowchart TD
     Create --> Dashboard[Dashboard]
     Login --> Check[API verifies password and active membership]
     Check --> Dashboard
-    Dashboard --> Work[Inbox, Review queue and split view, Insights]
-    Dashboard --> Admin[Admin: organization admins only]
+    Dashboard --> Work[Inbox, Review queue and split view, Actions, Insights]
+    Dashboard --> Admin[Settings and Admin: organization admins only]
 ```
 
 The owner entry links to `/register?mode=create`; teammate entries link to `/register?mode=join&role=member` or `/register?mode=join&role=reviewer`. Query parameters only initialize the registration form. They cannot create an admin membership in another organization, approve a request or change an authenticated role. The API validates requested roles, and the organization admin controls membership decisions.
@@ -473,6 +477,7 @@ There is no tested production restore, observed availability history, centralize
 - Confidence signals, weight renormalization, thresholds, rule-grammar rejection of unsafe syntax, approve gate on flagged fields, queue filters and ordering, timeline merge order, field access across documents and tenants.
 - Per-address login throttle, forwarded-address derivation, extraction and upload-parse timeouts, request IDs on 500 responses, schema drift between ORM and migrations.
 - Governance: policy matrix, kill switch engaged between approval and execution (thread-gated), shadow mode never calling a connector, forbidden at execution time, idempotent proposals and executions, backoff to dead letter and manual retry, webhook HMAC verified by a test receiver, SSRF matrix, credential encryption and secrecy, YAML configuration round trip and stale-version conflicts, tenant isolation of actions, connectors, policies and exports.
+- Browser: connector creation and test, YAML import with line-referenced errors, policy change, proposal with preview, approval, a signed webhook received by a local receiver, kill switch blocking then releasing execution, shadow mode and forbidden outcomes (`npm run test:e2e:actions` from `apps/web`).
 - Decimal totals across currencies, verified/unverified exclusions, aggregate scope beyond 50 invoices.
 - Fresh browser registration through approval, upload, full PDF review, discussion, decision and insights.
 - Review queue filters, split view, evidence highlight rectangles, keyboard accept/edit/approve, inline validation reasons, shortcuts dialog and timeline (`npm run test:e2e:review` from `apps/web`).

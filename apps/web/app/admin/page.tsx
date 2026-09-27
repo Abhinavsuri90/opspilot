@@ -140,6 +140,11 @@ export default function AdminPage() {
   });
   const unauthorized = [members.error, categories.error, decision.error, createCategory.error, updateCategory.error].some(isUnauthorizedError);
   useEffect(() => { if (unauthorized) { queryClient.clear(); router.replace("/login"); } }, [unauthorized, queryClient, router]);
+  // The settings navigation deep-links to a tab: /admin?tab=categories.
+  useEffect(() => {
+    const requested = new URLSearchParams(window.location.search).get("tab");
+    if (requested === "categories" || requested === "members") setTab(requested);
+  }, []);
   useEffect(() => {
     if (!copied) return;
     const timer = setTimeout(() => setCopied(false), 2000);

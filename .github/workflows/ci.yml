@@ -178,6 +178,13 @@ jobs:
         env:
           WEB_BASE_URL: http://localhost:3300
           PLAYWRIGHT_CHROME_PATH: /usr/bin/google-chrome
+      - run: npm run test:e2e:actions
+        working-directory: apps/web
+        env:
+          WEB_BASE_URL: http://localhost:3300
+          PLAYWRIGHT_CHROME_PATH: /usr/bin/google-chrome
+          # The script's webhook receiver listens on the runner; containers reach it through the docker0 gateway.
+          WEBHOOK_HOST: 172.17.0.1
       - name: Show service logs on failure
         if: failure()
         run: docker compose logs --tail=150 api worker web postgres s3mock

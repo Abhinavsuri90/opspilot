@@ -6,8 +6,9 @@ import { useRouter } from "next/navigation";
 import { useState, type ReactNode } from "react";
 import { api } from "@/lib/api";
 import type { components } from "@/lib/schema";
+import { usePolicies } from "@/lib/use-policies";
 
-type Section = "dashboard" | "inbox" | "review" | "insights" | "admin";
+export type Section = "dashboard" | "inbox" | "review" | "actions" | "insights" | "admin" | "policies" | "connectors" | "workflow";
 
 type Session = components["schemas"]["SessionResponse"];
 
@@ -17,14 +18,33 @@ type AppShellProps = {
   children: ReactNode;
 };
 
-function NavIcon({ name }: { name: Section }) {
+type NavItem = { key: string; section?: Section; label: string; href: string; icon: Section | "sub" };
+
+const sectionLabels: Record<Section, string> = {
+  dashboard: "Dashboard",
+  inbox: "Inbox",
+  review: "Review",
+  actions: "Actions",
+  insights: "Insights",
+  admin: "Admin",
+  policies: "Policies",
+  connectors: "Connectors",
+  workflow: "Workflow",
+};
+
+function NavIcon({ name }: { name: Section | "sub" }) {
   const common = { fill: "none", stroke: "currentColor", strokeWidth: 1.8, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  if (name === "sub") return <span aria-hidden="true" className="grid h-5 w-5 place-items-center"><span className="h-1.5 w-1.5 rounded-full bg-current opacity-60" /></span>;
   return <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" {...common}>
     {name === "dashboard" && <><rect x="3.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="3.5" width="7" height="7" rx="1.5" /><rect x="3.5" y="13.5" width="7" height="7" rx="1.5" /><rect x="13.5" y="13.5" width="7" height="7" rx="1.5" /></>}
     {name === "inbox" && <><path d="M4 4.5h16v13.2a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4.5Z" /><path d="M4 14h4l1.5 2h5l1.5-2h4" /></>}
     {name === "review" && <><rect x="5" y="4" width="14" height="17" rx="2" /><path d="M9 4V2h6v2M9 11l2 2 4-4M9 17h6" /></>}
+    {name === "actions" && <><path d="M13 3 5 13.5h6L10 21l9-11h-6l0-7Z" /></>}
     {name === "insights" && <><path d="M4 4v16h17M8 16v-5M13 16V7M18 16v-8" /></>}
     {name === "admin" && <><circle cx="9" cy="8.5" r="3" /><path d="M3.5 19v-1.2A4.8 4.8 0 0 1 8.3 13h1.4a4.8 4.8 0 0 1 4.8 4.8V19H3.5Z" /><path d="M16 6a3 3 0 0 1 0 5.7M17 13.4a4.8 4.8 0 0 1 3.5 4.6v1" /></>}
+    {name === "policies" && <><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.4 7.5 9.5 4.3-1.1 7.5-4.9 7.5-9.5V6L12 3Z" /><path d="M9.5 12l1.8 1.8L15 10" /></>}
+    {name === "connectors" && <><path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0V7Z" /><path d="M12 16v5" /></>}
+    {name === "workflow" && <><rect x="3.5" y="4" width="7" height="5" rx="1.2" /><rect x="13.5" y="15" width="7" height="5" rx="1.2" /><path d="M10.5 6.5H15a2 2 0 0 1 2 2V15" /></>}
   </svg>;
 }
 
@@ -47,11 +67,26 @@ export function AppShell({ session, active, children }: AppShellProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [logoutError, setLogoutError] = useState("");
-  const items: { key: Section; label: string; href: string }[] = [
-    { key: "dashboard", label: "Dashboard", href: "/dashboard" },
-    { key: "inbox", label: "Inbox", href: "/inbox" },
-    ...(session.role === "admin" || session.role === "reviewer" ? [{ key: "review" as const, label: "Review", href: "/review" }] : []),
-    { key: "insights", label: "Insights", href: "/insights" },
+  const isAdmin = session.role === "admin";
+  // Only administrators may read the switches; for everyone else the query stays idle and no banner shows.
+  const policies = usePolicies(session);
+  const paused = Boolean(policies.data?.kill_switch);
+
+  const workspaceItems: NavItem[] = [
+    { key: "dashboard", section: "dashboard", label: "Dashboard", href: "/dashboard", icon: "dashboard" },
+    { key: "inbox", section: "inbox", label: "Inbox", href: "/inbox", icon: "inbox" },
+    ...(isAdmin || session.role === "reviewer" ? [{ key: "review", section: "review" as const, label: "Review", href: "/review", icon: "review" as const }] : []),
+    { key: "actions", section: "actions", label: "Actions", href: "/actions", icon: "actions" },
+    { key: "insights", section: "insights", label: "Insights", href: "/insights", icon: "insights" },
+  ];
+  // Members and categories live on the admin page; the sub-links open its tabs directly.
+  const settingsItems: NavItem[] = [
+    { key: "admin", section: "admin", label: "Admin", href: "/admin", icon: "admin" },
+    { key: "members", label: "Members", href: "/admin?tab=members", icon: "sub" },
+    { key: "categories", label: "Categories", href: "/admin?tab=categories", icon: "sub" },
+    { key: "policies", section: "policies", label: "Policies", href: "/settings/policies", icon: "policies" },
+    { key: "connectors", section: "connectors", label: "Connectors", href: "/settings/connectors", icon: "connectors" },
+    { key: "workflow", section: "workflow", label: "Workflow", href: "/settings/workflow", icon: "workflow" },
   ];
 
   async function signOut() {
@@ -69,17 +104,21 @@ export function AppShell({ session, active, children }: AppShellProps) {
     }
   }
 
-  const link = (item: { key: Section; label: string; href: string }) => <Link
-    key={item.key}
-    href={item.href}
-    onClick={() => setMenuOpen(false)}
-    aria-current={active === item.key ? "page" : undefined}
-    className={`group flex min-h-11 items-center gap-3 rounded-xl px-3.5 py-2.5 text-sm font-medium transition-colors ${active === item.key ? "bg-cyan-400/15 text-cyan-100 ring-1 ring-cyan-300/20" : "text-slate-300 hover:bg-white/10 hover:text-white"}`}
-  >
-    <NavIcon name={item.key} />
-    <span className="flex-1">{item.label}</span>
-    {active === item.key && <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-cyan-300" />}
-  </Link>;
+  const link = (item: NavItem) => {
+    const current = item.section !== undefined && active === item.section;
+    const sub = item.icon === "sub";
+    return <Link
+      key={item.key}
+      href={item.href}
+      onClick={() => setMenuOpen(false)}
+      aria-current={current ? "page" : undefined}
+      className={`group flex items-center gap-3 rounded-xl px-3.5 text-sm font-medium transition-colors ${sub ? "min-h-9 py-1.5 pl-6 text-[13px]" : "min-h-11 py-2.5"} ${current ? "bg-cyan-400/15 text-cyan-100 ring-1 ring-cyan-300/20" : "text-slate-300 hover:bg-white/10 hover:text-white"}`}
+    >
+      <NavIcon name={item.icon} />
+      <span className="flex-1">{item.label}</span>
+      {current && <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-cyan-300" />}
+    </Link>;
+  };
 
   return <div className="min-h-screen bg-[#f5f7fb] text-slate-900 lg:flex">
     <a href="#main-content" className="sr-only z-50 rounded-lg bg-white px-4 py-3 font-semibold text-slate-900 focus:not-sr-only focus:fixed focus:left-4 focus:top-4">Skip to content</a>
@@ -103,13 +142,13 @@ export function AppShell({ session, active, children }: AppShellProps) {
         </button>
       </div>
 
-      <div id="workspace-navigation" className={`${menuOpen ? "flex" : "hidden"} min-h-0 flex-1 flex-col px-4 pb-5 lg:flex lg:px-4`}>
+      <div id="workspace-navigation" className={`${menuOpen ? "flex" : "hidden"} min-h-0 flex-1 flex-col overflow-y-auto px-4 pb-5 lg:flex lg:px-4`}>
         <nav aria-label="Main navigation">
           <p className="mb-2 px-3.5 text-[10px] font-bold uppercase tracking-[.18em] text-slate-400">Workspace</p>
-          <div className="space-y-1">{items.map(link)}</div>
-          {session.role === "admin" && <>
-            <p className="mb-2 mt-8 px-3.5 text-[10px] font-bold uppercase tracking-[.18em] text-slate-400">Organization</p>
-            {link({ key: "admin", label: "Admin", href: "/admin" })}
+          <div className="space-y-1">{workspaceItems.map(link)}</div>
+          {isAdmin && <>
+            <p className="mb-2 mt-8 px-3.5 text-[10px] font-bold uppercase tracking-[.18em] text-slate-400">Settings</p>
+            <div className="space-y-1">{settingsItems.map(link)}</div>
           </>}
         </nav>
 
@@ -133,9 +172,13 @@ export function AppShell({ session, active, children }: AppShellProps) {
 
     <div className="min-w-0 flex-1">
       <header className="hidden h-[76px] items-center justify-between border-b border-slate-200/80 bg-white/80 px-8 backdrop-blur lg:flex xl:px-12">
-        <div className="flex items-center gap-2 text-sm text-slate-500"><span>Workspace</span><span aria-hidden="true" className="text-slate-300">/</span><span className="font-semibold capitalize text-slate-800">{active}</span></div>
+        <div className="flex items-center gap-2 text-sm text-slate-500"><span>Workspace</span><span aria-hidden="true" className="text-slate-300">/</span><span className="font-semibold text-slate-800">{sectionLabels[active]}</span></div>
         <div className="flex items-center gap-3 text-sm"><span className="max-w-[240px] truncate font-semibold text-slate-700">{session.org_name}</span><span className="rounded-full border border-slate-200 bg-slate-50 px-2.5 py-1 text-xs font-medium capitalize text-slate-600">{session.role}</span></div>
       </header>
+      {paused && <div role="status" data-testid="agent-paused-banner" className="flex flex-wrap items-center justify-between gap-2 bg-rose-700 px-4 py-2.5 text-sm font-semibold text-white sm:px-6 lg:px-8 xl:px-12">
+        <span><span aria-hidden="true" className="mr-2">■</span>Agent paused. No actions execute until the kill switch is disengaged.</span>
+        {active !== "policies" && <Link href="/settings/policies" className="rounded-lg border border-white/40 px-2.5 py-1 text-xs font-semibold text-white hover:bg-white/10">Open policies →</Link>}
+      </div>}
       <main id="main-content" className="mx-auto w-full max-w-[1440px] px-4 pb-16 pt-7 sm:px-6 lg:px-8 lg:pt-9 xl:px-12">{children}</main>
     </div>
   </div>;

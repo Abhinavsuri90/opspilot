@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 export const SESSION_COOKIE = "opspilot_session";
-const PROTECTED_PREFIXES = ["/dashboard", "/inbox", "/review", "/insights", "/admin"];
+const PROTECTED_PREFIXES = ["/dashboard", "/inbox", "/review", "/actions", "/insights", "/admin", "/settings"];
 
 /**
  * Cookie presence is only a fast path for obviously signed-out visitors; the API
@@ -23,5 +23,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ["/dashboard/:path*", "/inbox/:path*", "/review/:path*", "/insights/:path*", "/admin/:path*"],
+  matcher: ["/dashboard/:path*", "/inbox/:path*", "/review/:path*", "/actions/:path*", "/insights/:path*", "/admin/:path*", "/settings/:path*"],
 };

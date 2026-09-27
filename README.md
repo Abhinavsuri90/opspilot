@@ -56,7 +56,7 @@ make down   # stop services; retain database and original PDFs
 
 ## Pages
 
-There are **eight pages**: three public entry pages and five workspace pages. They ship together in one web application.
+There are **thirteen pages**: three public entry pages, seven workspace pages and three admin settings pages. They ship together in one web application.
 
 | Route | Access | Purpose |
 | --- | --- | --- |
@@ -67,6 +67,10 @@ There are **eight pages**: three public entry pages and five workspace pages. Th
 | `/inbox` | Approved account | Upload, search, filter categories/status, paginate, inspect PDF/evidence, review, comment and manage access |
 | `/review` | Approved account | Filterable queue of invoices awaiting a decision with SLA and flagged-field counts; `/review/[id]` is the keyboard-first split view for corrections and decisions |
 | `/insights` | Approved account | Verified currency totals, category distribution and bounded invoice questions |
+| `/actions` | Approved account | Pending approvals with a preview of exactly what will be sent, execution history and the dead-letter queue |
+| `/settings/policies` | Organization admin | Kill switch, shadow mode and per-action-type policy |
+| `/settings/connectors` | Organization admin | Webhook, CSV export, Postgres table and Google Sheets connectors with connection tests and export downloads |
+| `/settings/workflow` | Organization admin | YAML workflow configuration: document types, fields, thresholds, rules and destinations |
 | `/admin` | Organization admin | Membership and category management |
 
 The homepage links to `/register?mode=create`, `/register?mode=join&role=member` and `/register?mode=join&role=reviewer`. These preselect the form; they do not grant permissions. Joining users remain pending until an admin approves their membership and role. Everyone uses the same `/login` page with their organization, email and password; the API checks their current membership and permissions.

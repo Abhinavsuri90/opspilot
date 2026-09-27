@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { useEffect } from "react";
 import { AppShell } from "@/components/AppShell";
 import { SessionFallback } from "@/components/SessionFallback";
+import { ACTIONS_POLL_MS, formatActionCount } from "@/lib/actions";
 import { api } from "@/lib/api";
 import { countInProgress, documentStatusLabel, documentStatusTone, isDocumentInProgress, type DocumentStatusTone } from "@/lib/document-status";
 import { isUnauthorizedError, isUnauthorizedStatus, unauthorizedError } from "@/lib/errors";
@@ -16,6 +17,7 @@ const pillTones: Record<DocumentStatusTone, string> = {
   review: "bg-amber-50 text-amber-800 ring-amber-200",
   failed: "bg-rose-50 text-rose-800 ring-rose-200",
   progress: "bg-sky-50 text-sky-800 ring-sky-200",
+  actions: "bg-orange-50 text-orange-800 ring-orange-200",
   completed: "bg-emerald-50 text-emerald-800 ring-emerald-200",
   rejected: "bg-slate-100 text-slate-600 ring-slate-200",
   neutral: "bg-slate-50 text-slate-700 ring-slate-200",
@@ -37,6 +39,21 @@ export default function DashboardPage() {
     },
     refetchInterval: query => query.state.data?.some(item => isDocumentInProgress(item.status)) ? 2000 : 15000,
   });
+
+  // Counted client-side: the API caps a page at 100 and has no total, so a full page reads "100+".
+  const actionCount = (status: "proposed" | "dead_lettered") => ({
+    queryKey: ["actions", session.data?.org_id, session.data?.user_id, status, "", 100] as const,
+    enabled: Boolean(session.data),
+    queryFn: async () => {
+      const result = await api.GET("/v1/actions", { params: { query: { status, limit: 100 } } });
+      if (isUnauthorizedStatus(result.response.status)) throw unauthorizedError();
+      if (result.error || !result.data) throw new Error("Could not load actions");
+      return result.data;
+    },
+    refetchInterval: ACTIONS_POLL_MS,
+  });
+  const pendingActions = useQuery(actionCount("proposed"));
+  const deadLetters = useQuery(actionCount("dead_lettered"));
 
   useEffect(() => {
     if (isUnauthorizedError(documents.error)) {
@@ -84,6 +101,19 @@ export default function DashboardPage() {
         <p className="mt-3 text-[31px] font-bold leading-none tracking-[-.04em] text-[#12233d]">{!summary.data ? <span className="text-slate-300">—</span> : metric.value}</p>
         <p className="mt-2 text-xs text-slate-500">{metric.detail}</p>
       </div>)}
+    </section>
+
+    <section aria-label="Agent actions" className="mt-6 grid gap-3 sm:grid-cols-2">
+      <Link href="/actions?tab=pending" className="group rounded-2xl border border-amber-200/80 bg-amber-50/60 p-5 shadow-[0_6px_20px_rgba(15,23,42,.035)] transition-colors hover:bg-amber-50" data-testid="tile-pending-approvals">
+        <div className="flex items-start justify-between gap-2"><p className="text-xs font-semibold text-amber-900">Pending approvals</p><span aria-hidden="true" className="grid h-8 w-8 place-items-center rounded-lg bg-amber-100 text-lg font-bold text-amber-700">⇢</span></div>
+        <p className="mt-3 text-[31px] font-bold leading-none tracking-[-.04em] text-[#12233d]">{pendingActions.isError ? <span className="text-slate-300">—</span> : formatActionCount(pendingActions.data?.length)}</p>
+        <p className="mt-2 text-xs text-amber-900">Actions waiting for a reviewer before anything leaves the system →</p>
+      </Link>
+      <Link href="/actions?tab=dead" className="group rounded-2xl border border-rose-200/80 bg-rose-50/60 p-5 shadow-[0_6px_20px_rgba(15,23,42,.035)] transition-colors hover:bg-rose-50" data-testid="tile-dead-letters">
+        <div className="flex items-start justify-between gap-2"><p className="text-xs font-semibold text-rose-900">Dead letters</p><span aria-hidden="true" className="grid h-8 w-8 place-items-center rounded-lg bg-rose-100 text-lg font-bold text-rose-700">!</span></div>
+        <p className="mt-3 text-[31px] font-bold leading-none tracking-[-.04em] text-[#12233d]">{deadLetters.isError ? <span className="text-slate-300">—</span> : formatActionCount(deadLetters.data?.length)}</p>
+        <p className="mt-2 text-xs text-rose-900">Actions the worker gave up on; open to retry →</p>
+      </Link>
     </section>
 
     <section aria-labelledby="recent-documents-heading" className="mt-6 overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-[0_6px_20px_rgba(15,23,42,.035)]">

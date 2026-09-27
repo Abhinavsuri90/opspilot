@@ -279,7 +279,7 @@ export default function ReviewDocumentPage() {
                 {save.isError && save.variables.action !== "review" && tab !== "timeline" && <p role="alert" className="mb-3 rounded-xl bg-rose-50 p-3 text-sm text-rose-800">{save.error.message}</p>}
                 {data && tab === "discussion" && <Discussion data={data} comment={comment} saving={save.isPending} onCommentChange={setComment} onSubmit={event => { event.preventDefault(); save.mutate({ action: "comments", body: comment }); }} />}
                 {data && sharing && tab === "access" && <AccessForm data={data} sharing={sharing} draft={sharingDraft} collaborators={collaborators} saving={save.isPending} onChange={values => { if (sharing) setSharingDraft({ ...sharing, ...values }); }} onSubmit={event => { event.preventDefault(); if (!save.isPending) save.mutate({ action: "sharing", sharing }); }} onDiscard={() => { setSharingDraft(null); save.reset(); void workspace.refetch(); }} />}
-                {tab === "timeline" && <Timeline entries={timeline.data} isLoading={timeline.isLoading} isError={timeline.isError} refetch={timeline.refetch} />}
+                {tab === "timeline" && <Timeline entries={timeline.data} isLoading={timeline.isLoading} isError={timeline.isError} refetch={timeline.refetch} documentId={documentId} />}
                 {tab === "questions" && <InvoiceQuestions documentId={documentId} />}
               </div>
             </div>

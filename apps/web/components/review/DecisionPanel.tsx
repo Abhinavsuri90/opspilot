@@ -16,7 +16,7 @@ type DecisionPanelProps = {
   onReopen: () => void;
 };
 
-const COMPLETED = new Set(["approved", "rejected", "auto_approved"]);
+const COMPLETED = new Set(["approved", "rejected", "auto_approved", "actions_pending", "completed"]);
 
 /** Approve (after every flagged field is resolved), reject with a reason, or reopen a finished review. */
 export function DecisionPanel({ status, canReview, flaggedCount, reason, saving, error, reasonRef, onReasonChange, onApprove, onReject, onReopen }: DecisionPanelProps) {
