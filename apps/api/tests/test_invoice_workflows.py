@@ -27,8 +27,17 @@ from app.models import (
     Membership,
     Organization,
     User,
+    WorkflowConfig,
 )
-from app.workflow_models import InvoiceCategory, InvoiceComment, InvoiceMetadata, InvoiceReview
+from app.workflow_config import default_invoice_config
+from app.workflow_models import (
+    FieldCorrection,
+    InvoiceCategory,
+    InvoiceComment,
+    InvoiceMetadata,
+    InvoiceReview,
+    ReviewTask,
+)
 
 
 @dataclass
@@ -138,6 +147,11 @@ def workspace() -> Iterator[Workspace]:
                 )
             )
         session.flush()
+        session.add(
+            WorkflowConfig(
+                org_id=org_id, version=1, config_json=default_invoice_config().model_dump_json()
+            )
+        )
         document = make_document(org_id, actors["member"])
         other_document = make_document(other_org, actors["external"])
         session.add_all([document, other_document])
@@ -201,6 +215,13 @@ def test_category_admin_management_versioning_and_archive(workspace: Workspace) 
     assert response.status_code == 201
     category = response.json()
     assert category["name"] == "Travel"
+    for actor in ("member", "reviewer", "viewer"):
+        workspace.actor = actor
+        denied_update = client.post(
+            f"/v1/categories/{category['id']}", json={"version": 1, "active": False}
+        )
+        assert denied_update.status_code == 403, actor
+    workspace.actor = "admin"
     assert client.post("/v1/categories", json={"name": "travel"}).status_code == 409
     assert (
         client.post(
@@ -305,8 +326,6 @@ def test_verification_requires_explicit_currency_and_keeps_extraction(workspace:
 
 def test_review_assignment_transitions_and_stale_decisions(workspace: Workspace) -> None:
     client = workspace.client
-    approve = {"version": 0, "decision": "approve"}
-    assert client.post(f"{workspace.path}/review", json=approve).status_code == 422
     workspace.metadata(
         assigned_reviewer_id=str(workspace.actors["reviewer"]),
         verified_amount="19.25",
@@ -718,6 +737,8 @@ def test_question_examples_shown_in_ui_are_supported(
         "/v1/organization/collaborators",
         "/v1/workspace/summary",
         f"/v1/documents/{uuid.uuid4()}/workspace",
+        f"/v1/documents/{uuid.uuid4()}/timeline",
+        "/v1/review/queue",
     ],
 )
 def test_workflow_routes_require_authentication(path: str) -> None:
@@ -725,6 +746,17 @@ def test_workflow_routes_require_authentication(path: str) -> None:
     app.include_router(router)
     with TestClient(app) as client:
         assert client.get(path).status_code == 401
+
+
+def test_field_correction_route_requires_authentication() -> None:
+    app = FastAPI()
+    app.include_router(router)
+    with TestClient(app) as client:
+        response = client.post(
+            f"/v1/documents/{uuid.uuid4()}/fields/{uuid.uuid4()}",
+            json={"version": 0, "action": "accept"},
+        )
+        assert response.status_code == 401
 
 
 @pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
@@ -760,7 +792,13 @@ def test_workflow_tables_enforce_tenant_rls_and_append_only_history() -> None:
             from sqlalchemy import text
 
             # Permissions reject mutation even when no row matches the predicate.
-            for table in ("invoice_comments", "invoice_reviews"):
+            append_only = (
+                "invoice_comments",
+                "invoice_reviews",
+                "field_corrections",
+                "review_tasks",
+            )
+            for table in append_only:
                 set_org_context(session, org_id)
                 with pytest.raises(DBAPIError):
                     session.execute(
@@ -781,7 +819,7 @@ def test_http_restricted_invoice_acl_pdf_retry_duplicate_and_grant_revocation() 
     from sqlalchemy import delete
 
     from app.main import app
-    from app.models import OutboxEvent, WorkflowConfig
+    from app.models import OutboxEvent
     from app.security import make_session_token
     from app.storage import get_store
     from app.workflow_models import InvoiceGrant
@@ -1002,6 +1040,8 @@ def test_http_restricted_invoice_acl_pdf_retry_duplicate_and_grant_revocation() 
         app.dependency_overrides.pop(get_store, None)
         with Session(owner_engine) as session:
             for model in (
+                FieldCorrection,
+                ReviewTask,
                 InvoiceReview,
                 InvoiceGrant,
                 InvoiceComment,

@@ -1,6 +1,5 @@
 """Idempotently create fictional local demo organizations and users."""
 
-import json
 import os
 import uuid
 
@@ -10,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.db import normalize_database_url
 from app.models import Membership, Organization, User, WorkflowConfig
 from app.security import hash_password, verify_password
+from app.workflow_config import default_invoice_config
 
 
 def seed() -> None:
@@ -17,23 +17,11 @@ def seed() -> None:
     reset_credentials = os.environ.get("RESET_DEMO_CREDENTIALS") == "1"
     engine = create_engine(normalize_database_url(os.environ["DATABASE_OWNER_URL"]))
     demo_orgs = [
-        (
-            "northwind",
-            "Northwind Traders",
-            "northwind@example.com",
-            "admin",
-            "invoice",
-        ),
-        (
-            "contoso",
-            "Contoso Logistics",
-            "contoso@example.com",
-            "reviewer",
-            "invoice",
-        ),
+        ("northwind", "Northwind Traders", "northwind@example.com", "admin"),
+        ("contoso", "Contoso Logistics", "contoso@example.com", "reviewer"),
     ]
     with Session(engine) as session, session.begin():
-        for slug, name, email, role, document_type in demo_orgs:
+        for slug, name, email, role in demo_orgs:
             org = session.scalar(select(Organization).where(Organization.slug == slug))
             if org is None:
                 org = Organization(id=uuid.uuid4(), slug=slug, name=name)
@@ -69,9 +57,7 @@ def seed() -> None:
                         id=uuid.uuid4(),
                         org_id=org.id,
                         version=1,
-                        config_json=json.dumps(
-                            {"document_types": [document_type], "fields": []}
-                        ),
+                        config_json=default_invoice_config().model_dump_json(),
                     )
                 )
     print("Seeded fictional demo orgs: northwind and contoso")

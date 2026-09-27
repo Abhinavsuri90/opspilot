@@ -11,6 +11,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    Integer,
     Numeric,
     String,
     Text,
@@ -118,3 +119,50 @@ class InvoiceReview(Base):
     decision: Mapped[str] = mapped_column(String(20), nullable=False)
     comment: Mapped[str] = mapped_column(Text, nullable=False, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FieldCorrection(Base):
+    """Append-only reviewer decisions about one extracted field."""
+
+    __tablename__ = "field_corrections"
+    __table_args__ = (
+        ForeignKeyConstraint(["org_id", "document_id"], ["documents.org_id", "documents.id"]),
+        ForeignKeyConstraint(
+            ["org_id", "reviewer_user_id"], ["memberships.org_id", "memberships.user_id"]
+        ),
+        CheckConstraint("kind IN ('accept', 'edit')", name="ck_field_corrections_kind"),
+        Index("ix_field_corrections_document", "org_id", "document_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
+    document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    field_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("extracted_fields.id"), nullable=False)
+    field_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False)
+    before_value: Mapped[str] = mapped_column(Text, nullable=False)
+    after_value: Mapped[str] = mapped_column(Text, nullable=False)
+    reviewer_user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ReviewTask(Base):
+    """One open or completed human review per document, with its SLA clock."""
+
+    __tablename__ = "review_tasks"
+    __table_args__ = (
+        ForeignKeyConstraint(["org_id", "document_id"], ["documents.org_id", "documents.id"]),
+        CheckConstraint(
+            "outcome IS NULL OR outcome IN ('approved', 'rejected')", name="ck_review_tasks_outcome"
+        ),
+        Index("ix_review_tasks_due", "org_id", "due_at"),
+    )
+
+    document_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    sla_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    outcome: Mapped[str | None] = mapped_column(String(20))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")

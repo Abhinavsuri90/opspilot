@@ -27,8 +27,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from app import document_service
+from app import document_service, review_service
+from app.access import can_access_document
 from app.auth import (
+    Identity,
     SessionResponse,
     describe_session,
     membership_denial,
@@ -37,11 +39,11 @@ from app.auth import (
 from app.auth import (
     current_session as current_session,
 )
+from app.client_ip import client_ip
 from app.config import get_settings
 from app.db import get_session, set_org_context
 from app.document_service import (
     DocumentAccessDenied,
-    DocumentDetail,
     DocumentLimitReached,
     DocumentNotRetryable,
     DocumentRetryLimitReached,
@@ -50,11 +52,9 @@ from app.document_service import (
     MissingWorkflowConfig,
     UploadResponse,
 )
-from app.invoice_workflows import can_access_document
 from app.invoice_workflows import router as invoice_router
 from app.limits import MAX_UPLOAD_BYTES, MAX_UPLOAD_REQUEST_BYTES
-from app.login_throttle import clear_attempts, reserve_attempt
-from app.models import Membership, Organization, User
+from app.login_throttle import clear_attempts, reserve_login
 from app.onboarding import router as onboarding_router
 from app.repositories import (
     get_document_by_id,
@@ -62,6 +62,7 @@ from app.repositories import (
     get_organization_by_slug,
     get_user_by_email,
 )
+from app.review_service import DocumentDetail
 from app.security import (
     DUMMY_PASSWORD_HASH,
     verify_password,
@@ -103,6 +104,21 @@ class ErrorEnvelope(BaseModel):
     error: ErrorDetail
 
 
+def error_response(
+    status_code: int,
+    code: str,
+    message: str,
+    details: object | None = None,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
+    envelope = ErrorEnvelope(error=ErrorDetail(code=code, message=message, details=details))
+    return JSONResponse(status_code=status_code, content=envelope.model_dump(), headers=headers)
+
+
+def request_id_of(request: Request) -> str:
+    return str(getattr(request.state, "request_id", "") or uuid.uuid4())
+
+
 @app.exception_handler(StarletteHTTPException)
 async def http_error_handler(request: Request, exc: StarletteHTTPException) -> JSONResponse:
     code = {
@@ -110,25 +126,18 @@ async def http_error_handler(request: Request, exc: StarletteHTTPException) -> J
         403: "forbidden",
         404: "not_found",
     }.get(exc.status_code, "request_failed")
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"error": {"code": code, "message": str(exc.detail), "details": None}},
-    )
+    return error_response(exc.status_code, code, str(exc.detail))
 
 
 @app.exception_handler(Exception)
 async def unexpected_error_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.exception("Unhandled API error", exc_info=exc)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": {
-                "code": "internal_error",
-                "message": "An unexpected error occurred",
-                "details": None,
-            }
-        },
-        headers={"X-Request-ID": getattr(request.state, "request_id", str(uuid.uuid4()))},
+    request_id = request_id_of(request)
+    logger.exception("Unhandled API error request_id=%s", request_id, exc_info=exc)
+    return error_response(
+        500,
+        "internal_error",
+        "An unexpected error occurred",
+        headers={"X-Request-ID": request_id},
     )
 
 
@@ -138,28 +147,14 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
         {"field": ".".join(str(part) for part in error["loc"]), "message": error["msg"]}
         for error in exc.errors()
     ]
-    return JSONResponse(
-        status_code=422,
-        content={
-            "error": {"code": "validation_error", "message": "Invalid request", "details": details}
-        },
-    )
+    return error_response(422, "validation_error", "Invalid request", details)
 
 
 @app.exception_handler(DocumentRetryLimitReached)
 async def retry_limit_error_handler(
     request: Request, exc: DocumentRetryLimitReached
 ) -> JSONResponse:
-    return JSONResponse(
-        status_code=409,
-        content={
-            "error": {
-                "code": "retry_limit_reached",
-                "message": str(exc),
-                "details": None,
-            }
-        },
-    )
+    return error_response(409, "retry_limit_reached", str(exc))
 
 
 @app.middleware("http")
@@ -176,18 +171,12 @@ async def add_request_id(
         origin = request.headers.get("Origin")
         origin_mismatch = origin is not None and origin != settings.web_origin.rstrip("/")
         if origin_mismatch or request.headers.get("Sec-Fetch-Site") == "cross-site":
-            denial = JSONResponse(
-                status_code=403,
-                content={
-                    "error": {
-                        "code": "forbidden",
-                        "message": "Request origin is not allowed",
-                        "details": None,
-                    }
-                },
+            return error_response(
+                403,
+                "forbidden",
+                "Request origin is not allowed",
+                headers={"X-Request-ID": request_id},
             )
-            denial.headers["X-Request-ID"] = request_id
-            return denial
     if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
         upload = request.url.path == "/v1/documents"
         limit = MAX_UPLOAD_REQUEST_BYTES if upload else 64 * 1024
@@ -211,34 +200,39 @@ async def add_request_id(
                     break
                 chunks.append(chunk)
         if too_large:
-            denial = JSONResponse(
-                status_code=413,
-                content={
-                    "error": {
-                        "code": "upload_too_large" if upload else "request_too_large",
-                        "message": message,
-                        "details": None,
-                    }
-                },
+            return error_response(
+                413,
+                "upload_too_large" if upload else "request_too_large",
+                message,
                 headers={"X-Request-ID": request_id},
             )
-            return denial
         request._body = b"".join(chunks)
-    response = await call_next(request)
+    try:
+        response = await call_next(request)
+    except Exception:
+        # The outer server error handler builds the 500 response; log the
+        # completion line here so every request, failed or not, has one.
+        _log_request(request, 500, started, request_id)
+        raise
     response.headers["X-Request-ID"] = request_id
-    duration_ms = (perf_counter() - started) * 1000
+    duration_ms = _log_request(request, response.status_code, started, request_id)
     response.headers["Server-Timing"] = f"api;dur={duration_ms:.1f}"
     response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _log_request(request: Request, status_code: int, started: float, request_id: str) -> float:
+    duration_ms = (perf_counter() - started) * 1000
     route = request.scope.get("route")
     logger.info(
         "request_complete method=%s route=%s status=%d duration_ms=%.1f request_id=%s",
         request.method,
         getattr(route, "path", "unmatched"),
-        response.status_code,
+        status_code,
         duration_ms,
         request_id,
     )
-    return response
+    return duration_ms
 
 
 @app.get("/healthz")
@@ -259,7 +253,8 @@ def readyz(session: Annotated[Session, Depends(get_session)]) -> dict[str, str]:
                 "workflow_configs AS w, audit_events AS a, documents AS d, "
                 "outbox_events AS e, extraction_runs AS r, extracted_fields AS f, "
                 "login_attempts AS l, invoice_metadata AS im, invoice_categories AS ic, "
-                "invoice_comments AS co, invoice_reviews AS rv, invoice_grants AS dg LIMIT 0"
+                "invoice_comments AS co, invoice_reviews AS rv, invoice_grants AS dg, "
+                "field_corrections AS fc, review_tasks AS rt LIMIT 0"
             )
         )
     except SQLAlchemyError as exc:
@@ -269,9 +264,12 @@ def readyz(session: Annotated[Session, Depends(get_session)]) -> dict[str, str]:
 
 @app.post("/v1/auth/login", response_model=SessionResponse)
 def login(
-    body: LoginRequest, response: Response, session: Annotated[Session, Depends(get_session)]
+    body: LoginRequest,
+    request: Request,
+    response: Response,
+    session: Annotated[Session, Depends(get_session)],
 ) -> SessionResponse:
-    if not reserve_attempt(session, body.org_slug, body.email):
+    if not reserve_login(session, body.org_slug, body.email, client_ip(request)):
         raise HTTPException(
             status_code=429, detail="Too many login attempts; try again in 15 minutes"
         )
@@ -287,6 +285,8 @@ def login(
     if membership is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if membership.status != "active":
+        # The credentials were right, so this pending or suspended account only
+        # spends the single reservation made above and is never cleared here.
         raise HTTPException(status_code=403, detail=membership_denial(membership))
     clear_attempts(session, body.org_slug, body.email)
     set_session_cookie(response, user.id, org.id)
@@ -300,7 +300,7 @@ def logout(response: Response) -> None:
 
 @app.get("/v1/auth/me", response_model=SessionResponse)
 def me(
-    identity: Annotated[tuple[Session, User, Organization, Membership], Depends(current_session)],
+    identity: Annotated[Identity, Depends(current_session)],
 ) -> SessionResponse:
     _, user, org, membership = identity
     return describe_session(user, org, membership)
@@ -309,7 +309,7 @@ def me(
 @app.post("/v1/documents", response_model=UploadResponse, status_code=202)
 def upload_document(
     file: Annotated[UploadFile, File()],
-    identity: Annotated[tuple[Session, User, Organization, Membership], Depends(current_session)],
+    identity: Annotated[Identity, Depends(current_session)],
     store: Annotated[ObjectStore, Depends(get_store)],
 ) -> UploadResponse:
     session, user, org, membership = identity
@@ -334,14 +334,17 @@ def upload_document(
 
 @app.get("/v1/documents", response_model=list[DocumentSummary])
 def documents(
-    identity: Annotated[tuple[Session, User, Organization, Membership], Depends(current_session)],
+    identity: Annotated[Identity, Depends(current_session)],
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     category_id: uuid.UUID | None = None,
     q: Annotated[str | None, Query(min_length=1, max_length=255)] = None,
     status: Annotated[
         str | None,
-        Query(pattern="^(in_progress|queued|extracting|validating|needs_review|approved|rejected|failed)$"),
+        Query(
+            pattern="^(in_progress|queued|extracting|validating|needs_review|approved|"
+            "auto_approved|rejected|failed)$"
+        ),
     ] = None,
 ) -> list[DocumentSummary]:
     session, user, org, membership = identity
@@ -361,10 +364,10 @@ def documents(
 @app.get("/v1/documents/{document_id}", response_model=DocumentDetail)
 def document_detail(
     document_id: uuid.UUID,
-    identity: Annotated[tuple[Session, User, Organization, Membership], Depends(current_session)],
+    identity: Annotated[Identity, Depends(current_session)],
 ) -> DocumentDetail:
     session, user, org, membership = identity
-    result = document_service.read(session, org.id, document_id, user.id, membership.role)
+    result = review_service.read_document(session, org.id, document_id, user.id, membership.role)
     if result is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return result
@@ -373,7 +376,7 @@ def document_detail(
 @app.post("/v1/documents/{document_id}/retry", response_model=DocumentSummary, status_code=202)
 def retry_document(
     document_id: uuid.UUID,
-    identity: Annotated[tuple[Session, User, Organization, Membership], Depends(current_session)],
+    identity: Annotated[Identity, Depends(current_session)],
 ) -> DocumentSummary:
     session, user, org, membership = identity
     if membership.role not in ("admin", "reviewer", "member"):
@@ -390,7 +393,7 @@ def retry_document(
 @app.get("/v1/documents/{document_id}/file", response_class=Response)
 def document_file(
     document_id: uuid.UUID,
-    identity: Annotated[tuple[Session, User, Organization, Membership], Depends(current_session)],
+    identity: Annotated[Identity, Depends(current_session)],
     store: Annotated[ObjectStore, Depends(get_store)],
     download: bool = False,
 ) -> Response:

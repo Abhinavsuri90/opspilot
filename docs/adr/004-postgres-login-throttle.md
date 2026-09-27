@@ -17,4 +17,4 @@ The counter is deliberately separate from tenant-owned invoice data: login occur
 - Multiple API instances share the same limit, and restarts do not reset it.
 - Each login now needs a short database write before Argon2 verification; database unavailability prevents sign-in.
 - Someone who knows a login identity can temporarily exhaust its attempts. An edge per-IP limit or WAF is still advisable before publishing a widely shared demo account.
-- The migration must run before deploying the updated API. The normal Railway migration job already performs `alembic upgrade head` ahead of API rollout.
+- The migration must run before deploying the updated API. Both deployment paths run `alembic upgrade head` as a separate owner-credential step before the API is restarted (see `docs/deployment.md`).

@@ -18,6 +18,7 @@ from app.auth import (
     describe_session,
     set_session_cookie,
 )
+from app.client_ip import client_ip
 from app.db import get_session, set_org_context
 from app.login_throttle import reserve_attempt
 from app.models import AuditEvent, Membership, Organization, User, WorkflowConfig
@@ -28,6 +29,7 @@ from app.repositories import (
     list_members,
 )
 from app.security import hash_password, verify_password
+from app.workflow_config import default_invoice_config
 
 router = APIRouter(tags=["Organizations"])
 SLUG_PATTERN = r"^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$"
@@ -113,9 +115,9 @@ def describe_member(membership: Membership, user: User) -> MemberResponse:
 
 
 def reserve_signup(request: Request, session: Session, email: str) -> None:
-    # Do not trust client-controlled forwarding headers. The peer limit remains
-    # a backstop behind the web proxy; deployments should also rate-limit at the edge.
-    peer = request.client.host if request.client is not None else "unknown"
+    # The address limit is a backstop behind the web proxy; deployments should
+    # also rate-limit at the edge. client_ip only trusts edge-appended forwarding.
+    peer = client_ip(request)
     if not reserve_attempt(session, "signup-peer", peer, limit=100) or not reserve_attempt(
         session, "signup-email", email
     ):
@@ -196,7 +198,7 @@ def register_organization(
                 WorkflowConfig(
                     org_id=org.id,
                     version=1,
-                    config_json=json.dumps({"document_types": ["invoice"], "fields": []}),
+                    config_json=default_invoice_config().model_dump_json(),
                 ),
                 AuditEvent(
                     org_id=org.id,
@@ -297,18 +299,31 @@ def decide_membership(
     session.execute(
         text("SELECT pg_advisory_xact_lock(hashtextextended(:org_id, 0))"), {"org_id": str(org.id)}
     )
+    admin_denial = HTTPException(
+        status_code=409, detail="Admin access cannot be changed through member approval"
+    )
+    # Read before locking: two admins deciding on each other each hold a KEY SHARE
+    # lock on their own row, so a FOR UPDATE on an admin row could form a lock cycle.
+    unlocked = session.scalar(
+        select(Membership).where(Membership.org_id == org.id, Membership.user_id == user_id)
+    )
+    if unlocked is None:
+        raise HTTPException(status_code=404, detail="Organization member not found")
+    if unlocked.role == "admin":
+        raise admin_denial
     member = session.scalar(
         select(Membership)
-        .where(Membership.org_id == org.id, Membership.user_id == user_id)
+        .where(
+            Membership.org_id == org.id,
+            Membership.user_id == user_id,
+            Membership.role != "admin",
+        )
         .with_for_update()
         .execution_options(populate_existing=True)
     )
     if member is None:
-        raise HTTPException(status_code=404, detail="Organization member not found")
-    if member.role == "admin":
-        raise HTTPException(
-            status_code=409, detail="Admin access cannot be changed through member approval"
-        )
+        # The row became an admin between the two reads.
+        raise admin_denial
     if body.decision == "rejected" and member.status not in {"pending", "rejected"}:
         raise HTTPException(
             status_code=409, detail="Suspend an active account to revoke its access"
@@ -340,7 +355,8 @@ def decide_membership(
         )
     )
     user = session.get(User, user_id)
-    assert user is not None
+    if user is None:
+        raise HTTPException(status_code=404, detail="Organization member not found")
     result = describe_member(member, user)
     session.commit()
     return result

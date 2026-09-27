@@ -1,6 +1,9 @@
+import logging
 import os
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -8,10 +11,12 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import DBAPIError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.db import get_session, normalize_database_url, set_org_context
-from app.login_throttle import identity_hash
+from app.client_ip import client_ip, is_trusted_peer
+from app.db import SessionLocal, get_session, normalize_database_url, set_org_context
+from app.login_throttle import client_ip_hash, identity_hash
 from app.main import app
 from app.models import LoginAttempt, Membership, Organization
+from tests.conftest import TEST_CLIENT_HOST, postgres
 
 
 def test_healthz() -> None:
@@ -50,6 +55,33 @@ def test_error_envelopes_and_request_ids() -> None:
         assert failed.headers["x-request-id"] == "failure-123"
     finally:
         del app.dependency_overrides[get_session]
+
+
+def test_unhandled_error_logs_request_id_and_completion_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken_dependency() -> None:
+        raise RuntimeError("private database detail")
+
+    app.dependency_overrides[get_session] = broken_dependency
+    try:
+        with (
+            caplog.at_level(logging.INFO, logger="uvicorn.error.opspilot"),
+            TestClient(app, raise_server_exceptions=False) as client,
+        ):
+            failed = client.get("/readyz", headers={"X-Request-ID": "failure-log-123"})
+    finally:
+        del app.dependency_overrides[get_session]
+    assert failed.status_code == 500
+    assert failed.headers["x-request-id"] == "failure-log-123"
+    messages = [
+        record.getMessage() for record in caplog.records if record.name == "uvicorn.error.opspilot"
+    ]
+    assert any("Unhandled API error request_id=failure-log-123" in item for item in messages)
+    completion = [item for item in messages if item.startswith("request_complete")]
+    assert completion and "status=500" in completion[-1]
+    assert "request_id=failure-log-123" in completion[-1]
+    assert "private database detail" not in failed.text
 
 
 def test_browser_post_rejects_untrusted_origin() -> None:
@@ -302,6 +334,77 @@ def test_login_throttle_blocks_repeated_guesses_and_resets_after_success() -> No
             assert session.get(LoginAttempt, identity_hash("northwind", known_email)) is None
 
 
+@postgres
+def test_readyz_reports_ready_with_migrated_schema() -> None:
+    with TestClient(app) as client:
+        response = client.get("/readyz")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
+
+
+@postgres
+def test_login_throttle_limits_attempts_per_client_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("app.login_throttle.MAX_IP_ATTEMPTS_PER_WINDOW", 3)
+    with TestClient(app) as client:
+        for _ in range(3):
+            guess = client.post(
+                "/v1/auth/login",
+                json={
+                    "org_slug": "northwind",
+                    "email": f"absent-{uuid.uuid4().hex}@example.com",
+                    "password": "wrong-password",
+                },
+            )
+            assert guess.status_code == 401
+        blocked = client.post(
+            "/v1/auth/login",
+            json={
+                "org_slug": "northwind",
+                "email": f"absent-{uuid.uuid4().hex}@example.com",
+                "password": "wrong-password",
+            },
+        )
+        assert blocked.status_code == 429
+        # Even correct credentials stay blocked until the address window resets.
+        assert (
+            client.post(
+                "/v1/auth/login",
+                json={
+                    "org_slug": "northwind",
+                    "email": "northwind@example.com",
+                    "password": os.environ["DEMO_PASSWORD"],
+                },
+            ).status_code
+            == 429
+        )
+        with SessionLocal() as session:
+            row = session.get(LoginAttempt, client_ip_hash(TEST_CLIENT_HOST))
+            assert row is not None and row.attempts == 5
+            # The per-account counter for the demo user is unaffected by the address block.
+            account = session.get(LoginAttempt, identity_hash("northwind", "northwind@example.com"))
+            assert account is not None and account.attempts == 1
+        with SessionLocal() as session, session.begin():
+            row = session.get(LoginAttempt, client_ip_hash(TEST_CLIENT_HOST))
+            assert row is not None
+            row.window_started_at = datetime.now(UTC) - timedelta(minutes=16)
+        success = client.post(
+            "/v1/auth/login",
+            json={
+                "org_slug": "northwind",
+                "email": "northwind@example.com",
+                "password": os.environ["DEMO_PASSWORD"],
+            },
+        )
+        assert success.status_code == 200
+        with SessionLocal() as session:
+            account_key = identity_hash("northwind", "northwind@example.com")
+            assert session.get(LoginAttempt, account_key) is None
+            row = session.get(LoginAttempt, client_ip_hash(TEST_CLIENT_HOST))
+            assert row is not None and row.attempts == 1
+
+
 def test_request_timing_and_json_body_limit() -> None:
     with TestClient(app) as client:
         health = client.get("/healthz", headers={"X-Request-ID": "timing-check"})
@@ -316,3 +419,65 @@ def test_request_timing_and_json_body_limit() -> None:
         )
         assert oversized.status_code == 413
         assert oversized.json()["error"]["code"] == "request_too_large"
+
+
+def fake_request(peer: str | None, forwarded: str | None = None) -> Any:
+    headers = {"x-forwarded-for": forwarded} if forwarded is not None else {}
+    return SimpleNamespace(
+        client=SimpleNamespace(host=peer) if peer is not None else None, headers=headers
+    )
+
+
+@pytest.mark.parametrize(
+    ("peer", "forwarded", "expected"),
+    [
+        ("10.0.0.5", "1.2.3.4", "1.2.3.4"),
+        ("127.0.0.1", "9.9.9.9, 1.2.3.4", "1.2.3.4"),
+        ("172.16.8.1", " 5.5.5.5 ,  6.6.6.6 , ", "6.6.6.6"),
+        ("192.168.1.2", "", "192.168.1.2"),
+        ("192.168.1.2", None, "192.168.1.2"),
+        ("::1", "2001:db8::10", "2001:db8::10"),
+        ("fd12::1", "2001:db8::10", "2001:db8::10"),
+        ("203.0.113.7", "1.2.3.4", "203.0.113.7"),
+        ("203.0.113.7", None, "203.0.113.7"),
+        ("testclient", "1.2.3.4", "testclient"),
+        (None, "1.2.3.4", "unknown"),
+        ("", "1.2.3.4", "unknown"),
+    ],
+)
+def test_client_ip_trusts_only_the_edge_appended_forwarded_entry(
+    peer: str | None, forwarded: str | None, expected: str
+) -> None:
+    assert client_ip(fake_request(peer, forwarded)) == expected
+
+
+def test_trusted_peer_recognizes_loopback_and_private_ranges_only() -> None:
+    assert all(is_trusted_peer(host) for host in ("127.0.0.1", "10.1.2.3", "172.31.0.9", "::1"))
+    assert all(is_trusted_peer(host) for host in ("192.168.0.1", "fc00::1", "fdff::2"))
+    assert is_trusted_peer("::ffff:10.0.0.7")
+    public = ("8.8.8.8", "172.32.0.1", "203.0.113.7", "100.64.0.1", "169.254.1.1", "2001:db8::1")
+    assert not any(is_trusted_peer(host) for host in public)
+    assert not is_trusted_peer("") and not is_trusted_peer("not-an-address")
+
+
+def test_login_throttle_keys_on_trusted_forwarded_address(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[str] = []
+
+    def record(session: object, org_slug: str, email: str, address: str) -> bool:
+        seen.append(address)
+        return False
+
+    monkeypatch.setattr("app.main.reserve_login", record)
+    app.dependency_overrides[get_session] = lambda: object()
+    try:
+        with TestClient(app) as client:
+            # TestClient's peer "testclient" is not an address, so the header is ignored.
+            spoofed = client.post(
+                "/v1/auth/login",
+                json={"org_slug": "northwind", "email": "a@example.com", "password": "x"},
+                headers={"X-Forwarded-For": "1.2.3.4"},
+            )
+            assert spoofed.status_code == 429
+    finally:
+        del app.dependency_overrides[get_session]
+    assert seen == ["testclient"]

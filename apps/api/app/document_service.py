@@ -1,27 +1,26 @@
 import hashlib
 import json
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.access import accessible_document_clause, can_access_document
 from app.config import get_settings
 from app.db import set_org_context
-from app.invoice_workflows import accessible_document_clause, can_access_document
 from app.limits import MAX_UPLOAD_BYTES
 from app.llm.provider import ExtractionError, pdf_pages
-from app.models import AuditEvent, Document, ExtractedField, OutboxEvent
+from app.models import AuditEvent, Document, OutboxEvent
 from app.repositories import (
+    flagged_counts,
     get_document_by_hash,
-    get_document_by_id,
-    latest_extraction_run,
     latest_workflow_config,
-    list_document_fields,
 )
 from app.storage import ObjectStore
+from app.timeouts import OperationTimeout, run_with_timeout
 from app.workflow_models import InvoiceMetadata
 
 MAX_MANUAL_RETRIES = 2
@@ -55,55 +54,54 @@ class DocumentSummary(BaseModel):
     id: uuid.UUID
     filename: str
     status: str
+    document_type: str
     size_bytes: int
     workflow_config_version: int
     failure_reason: str | None
+    flagged_count: int
     created_at: datetime
-
-
-class FieldResponse(BaseModel):
-    name: str
-    value: str
-    evidence: str
-    page_number: int
-
-
-class DocumentDetail(DocumentSummary):
-    fields: list[FieldResponse]
-    provider: str | None
 
 
 class UploadResponse(DocumentSummary):
     duplicate: bool
 
 
-def summary(document: Document) -> DocumentSummary:
+def summary(document: Document, flagged_count: int = 0) -> DocumentSummary:
     return DocumentSummary(
         id=document.id,
         filename=document.filename,
         status=document.status,
+        document_type=document.document_type,
         size_bytes=document.size_bytes,
         workflow_config_version=document.workflow_config_version,
         failure_reason=document.failure_reason,
+        flagged_count=flagged_count,
         created_at=document.created_at,
     )
 
 
-def detail(
-    document: Document, fields: list[ExtractedField], provider: str | None
-) -> DocumentDetail:
-    return DocumentDetail(
-        **summary(document).model_dump(),
-        provider=provider,
-        fields=[
-            FieldResponse(
-                name=field.name,
-                value=field.value,
-                evidence=field.evidence,
-                page_number=field.page_number,
-            )
-            for field in fields
-        ],
+def document_audit(
+    org_id: uuid.UUID,
+    document_id: uuid.UUID,
+    actor_user_id: uuid.UUID | None,
+    event_type: str,
+    detail: dict[str, object] | None = None,
+    created_at: datetime | None = None,
+) -> AuditEvent:
+    """Audit row for a document event; document_id is indexed for the timeline.
+
+    The timestamp comes from the application clock: rows written in one database
+    transaction would otherwise share the same ``now()`` and lose their order.
+    """
+    payload: dict[str, object] = {"document_id": str(document_id), **(detail or {})}
+    return AuditEvent(
+        id=uuid.uuid4(),
+        org_id=org_id,
+        actor_user_id=actor_user_id,
+        document_id=document_id,
+        event_type=event_type,
+        detail_json=json.dumps(payload, default=str, sort_keys=True),
+        created_at=created_at or datetime.now(UTC),
     )
 
 
@@ -132,9 +130,11 @@ def upload(
         return UploadResponse(**summary(existing).model_dump(), duplicate=True)
 
     try:
-        pdf_pages(data)
+        run_with_timeout(lambda: pdf_pages(data), get_settings().upload_parse_timeout_seconds)
     except ExtractionError as exc:
         raise InvalidDocument(str(exc)) from exc
+    except OperationTimeout as exc:
+        raise InvalidDocument("PDF took too long to parse") from exc
 
     config = latest_workflow_config(session, org_id)
     if config is None:
@@ -181,14 +181,15 @@ def upload(
             attempts=0,
         )
     )
-    for event_type in ("document.received", "document.queued"):
+    received_at = datetime.now(UTC)
+    for order, event_type in enumerate(("document.received", "document.queued")):
         session.add(
-            AuditEvent(
-                id=uuid.uuid4(),
-                org_id=org_id,
-                actor_user_id=user_id,
-                event_type=event_type,
-                detail_json=json.dumps({"document_id": str(document.id)}),
+            document_audit(
+                org_id,
+                document.id,
+                user_id,
+                event_type,
+                created_at=received_at + timedelta(microseconds=order),
             )
         )
     try:
@@ -232,28 +233,15 @@ def browse(
         )
     if q:
         query = query.where(Document.filename.icontains(q, autoescape=True))
-    documents = session.scalars(
-        query.order_by(Document.created_at.desc(), Document.id.desc()).offset(offset).limit(limit)
+    documents = list(
+        session.scalars(
+            query.order_by(Document.created_at.desc(), Document.id.desc())
+            .offset(offset)
+            .limit(limit)
+        )
     )
-    return [summary(document) for document in documents]
-
-
-def read(
-    session: Session,
-    org_id: uuid.UUID,
-    document_id: uuid.UUID,
-    user_id: uuid.UUID,
-    role: str,
-) -> DocumentDetail | None:
-    document = get_document_by_id(session, org_id, document_id)
-    if document is None or not can_access_document(session, org_id, user_id, role, document):
-        return None
-    run = latest_extraction_run(session, org_id, document_id)
-    return detail(
-        document,
-        list_document_fields(session, org_id, document_id),
-        run.provider if run is not None else None,
-    )
+    flagged = flagged_counts(session, org_id, [document.id for document in documents])
+    return [summary(document, flagged.get(document.id, 0)) for document in documents]
 
 
 def retry(
@@ -301,14 +289,6 @@ def retry(
             attempts=0,
         )
     )
-    session.add(
-        AuditEvent(
-            id=uuid.uuid4(),
-            org_id=org_id,
-            actor_user_id=user_id,
-            event_type="document.retry_requested",
-            detail_json=json.dumps({"document_id": str(document.id)}),
-        )
-    )
+    session.add(document_audit(org_id, document.id, user_id, "document.retry_requested"))
     session.commit()
     return summary(document)

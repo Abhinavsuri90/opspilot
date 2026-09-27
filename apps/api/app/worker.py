@@ -1,4 +1,4 @@
-"""Small Postgres outbox worker for the first document workflow slice."""
+"""Postgres outbox worker: extraction, validation, confidence and review routing."""
 
 import hashlib
 import json
@@ -8,14 +8,20 @@ import uuid
 from bisect import bisect
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from functools import partial
 
 from sqlalchemy import and_, or_, select, update
+from sqlalchemy.orm import Session
 
+from app.confidence import Evaluation, evaluate
+from app.config import get_settings
 from app.db import SessionLocal, set_org_context
+from app.document_service import document_audit
 from app.llm.provider import (
-    ExtractedValue,
     ExtractionError,
     ExtractionProvider,
+    ExtractionResult,
     ProviderUnavailable,
     get_provider,
 )
@@ -27,7 +33,11 @@ from app.models import (
     Organization,
     OutboxEvent,
 )
+from app.repositories import get_workflow_config_version
+from app.review_service import open_review_task
 from app.storage import ObjectStore, StorageError, StoredDocumentTooLarge, get_store
+from app.timeouts import OperationTimeout, run_with_timeout
+from app.workflow_config import InvalidWorkflowConfig, WorkflowConfigModel, load_config
 
 logger = logging.getLogger(__name__)
 MAX_EXTRACTION_ATTEMPTS = 3
@@ -44,16 +54,17 @@ class Claim:
     size_bytes: int
     claimed_at: datetime
     attempts: int
+    workflow_config_version: int
 
 
-def audit(org_id: uuid.UUID, document_id: uuid.UUID, event_type: str) -> AuditEvent:
-    return AuditEvent(
-        id=uuid.uuid4(),
-        org_id=org_id,
-        actor_user_id=None,
-        event_type=event_type,
-        detail_json=json.dumps({"document_id": str(document_id)}),
-    )
+def audit(
+    org_id: uuid.UUID,
+    document_id: uuid.UUID,
+    event_type: str,
+    detail: dict[str, object] | None = None,
+    created_at: datetime | None = None,
+) -> AuditEvent:
+    return document_audit(org_id, document_id, None, event_type, detail, created_at)
 
 
 def claim_next(org_id: uuid.UUID, document_id: uuid.UUID | None = None) -> Claim | None:
@@ -109,69 +120,156 @@ def claim_next(org_id: uuid.UUID, document_id: uuid.UUID | None = None) -> Claim
             document.size_bytes,
             now,
             event.attempts,
+            document.workflow_config_version,
         )
 
 
-def complete(claim: Claim, fields: list[ExtractedValue], provider: ExtractionProvider) -> None:
+def load_pinned_config(org_id: uuid.UUID, version: int) -> WorkflowConfigModel | None:
+    with SessionLocal() as session:
+        set_org_context(session, org_id)
+        row = get_workflow_config_version(session, org_id, version)
+        if row is None:
+            return None
+        try:
+            return load_config(row.config_json)
+        except InvalidWorkflowConfig:
+            logger.warning("Workflow config version %s for org %s is invalid", version, org_id)
+            return None
+
+
+def _current_lease(session: Session, claim: Claim) -> tuple[OutboxEvent, Document] | None:
+    """Lock the outbox event and document; None when another worker reclaimed the lease."""
+    event = session.get(OutboxEvent, claim.event_id, with_for_update=True)
+    document = session.get(Document, claim.document_id, with_for_update=True)
+    if (
+        event is None
+        or document is None
+        or event.claimed_at != claim.claimed_at
+        or event.published_at is not None
+        or document.status != "extracting"
+    ):
+        return None
+    return event, document
+
+
+def _store_run(
+    claim: Claim, result: ExtractionResult, provider: ExtractionProvider, evaluation: Evaluation
+) -> tuple[ExtractionRun, list[ExtractedField]]:
+    run = ExtractionRun(
+        id=uuid.uuid4(),
+        org_id=claim.org_id,
+        document_id=claim.document_id,
+        provider=provider.name,
+        model=result.model,
+        prompt_version=result.prompt_version,
+        raw_json=json.dumps(
+            {
+                "fields": [asdict(value) for value in result.fields],
+                "document_type": result.document_type,
+                "tokens_in": result.tokens_in,
+                "tokens_out": result.tokens_out,
+                "latency_ms": result.latency_ms,
+                "notes": result.notes,
+                "rule_results": [asdict(rule) for rule in evaluation.rule_results],
+            }
+        ),
+    )
+    fields = [
+        ExtractedField(
+            id=uuid.uuid4(),
+            org_id=claim.org_id,
+            document_id=claim.document_id,
+            extraction_run_id=run.id,
+            name=assessment.name,
+            value=assessment.value,
+            evidence=assessment.evidence,
+            page_number=assessment.page_number,
+            field_type=assessment.field_type,
+            required=assessment.required,
+            confidence=_decimal4(assessment.confidence),
+            threshold=_decimal4(assessment.threshold),
+            status=assessment.status,
+            signals_json=json.dumps(assessment.signals),
+            reasons_json=json.dumps(assessment.reasons),
+        )
+        for assessment in evaluation.fields
+    ]
+    return run, fields
+
+
+def _decimal4(value: float) -> Decimal:
+    return Decimal(str(round(value, 4)))
+
+
+def complete(
+    claim: Claim,
+    result: ExtractionResult,
+    provider: ExtractionProvider,
+    config: WorkflowConfigModel,
+) -> None:
+    now = datetime.now(UTC)
     with SessionLocal() as session, session.begin():
         set_org_context(session, claim.org_id)
         # Serialize completion with lease reclamation. Reading the lease without
         # a lock can let an old worker commit after another worker reclaims it.
-        event = session.get(OutboxEvent, claim.event_id, with_for_update=True)
-        document = session.get(Document, claim.document_id, with_for_update=True)
-        if (
-            event is None
-            or document is None
-            or event.claimed_at != claim.claimed_at
-            or event.published_at is not None
-            or document.status != "extracting"
-        ):
+        lease = _current_lease(session, claim)
+        if lease is None:
             return
-        run = ExtractionRun(
-            id=uuid.uuid4(),
-            org_id=claim.org_id,
-            document_id=claim.document_id,
-            provider=provider.name,
-            model=provider.model,
-            prompt_version=provider.prompt_version,
-            raw_json=json.dumps([asdict(field) for field in fields]),
-        )
+        event, document = lease
+        # Validation runs inside the completion transaction: a crash here rolls
+        # back to the leased "extracting" state, so the document stays reclaimable.
+        document.status = "validating"
+        document.updated_at = now
+        session.add(audit(claim.org_id, claim.document_id, "document.validating", None, now))
+        session.flush()
+
+        type_spec = config.document_type(result.document_type) or config.document_types[0]
+        evaluation = evaluate(result.fields, result.pages, type_spec)
+        run, fields = _store_run(claim, result, provider, evaluation)
         session.add(run)
         session.flush()
-        for field in fields:
+        session.add_all(fields)
+        flagged = [item.name for item in evaluation.fields if item.status == "needs_review"]
+        failed_rules = [rule.name for rule in evaluation.rule_results if rule.passed is False]
+
+        document.document_type = type_spec.name
+        document.failure_reason = None
+        event.published_at = now
+        if config.review_policy == "always" or flagged or failed_rules:
+            document.status = "needs_review"
+            open_review_task(
+                session, claim.org_id, claim.document_id, config.review_sla_minutes, now
+            )
             session.add(
-                ExtractedField(
-                    id=uuid.uuid4(),
-                    org_id=claim.org_id,
-                    document_id=claim.document_id,
-                    extraction_run_id=run.id,
-                    name=field.name,
-                    value=field.value,
-                    evidence=field.evidence,
-                    page_number=field.page_number,
+                audit(
+                    claim.org_id,
+                    claim.document_id,
+                    "document.needs_review",
+                    {"flagged_fields": flagged, "failed_rules": failed_rules},
+                    now + timedelta(microseconds=1),
                 )
             )
-        document.status = "needs_review"
-        document.failure_reason = None
-        document.updated_at = datetime.now(UTC)
-        event.published_at = datetime.now(UTC)
-        session.add(audit(claim.org_id, claim.document_id, "document.needs_review"))
+        else:
+            document.status = "auto_approved"
+            session.add(
+                audit(
+                    claim.org_id,
+                    claim.document_id,
+                    "document.auto_approved",
+                    None,
+                    now + timedelta(microseconds=1),
+                )
+            )
 
 
 def fail(claim: Claim, reason: str, retryable: bool) -> None:
     now = datetime.now(UTC)
     with SessionLocal() as session, session.begin():
         set_org_context(session, claim.org_id)
-        event = session.get(OutboxEvent, claim.event_id, with_for_update=True)
-        document = session.get(Document, claim.document_id, with_for_update=True)
-        if (
-            event is None
-            or document is None
-            or event.claimed_at != claim.claimed_at
-            or event.published_at is not None
-            or document.status != "extracting"
-        ):
+        lease = _current_lease(session, claim)
+        if lease is None:
             return
+        event, document = lease
         document.updated_at = now
         if retryable and claim.attempts < MAX_EXTRACTION_ATTEMPTS:
             document.status = "queued"
@@ -182,7 +280,9 @@ def fail(claim: Claim, reason: str, retryable: bool) -> None:
             document.status = "failed"
             document.failure_reason = reason[:200]
             event.published_at = now
-            session.add(audit(claim.org_id, claim.document_id, "document.failed"))
+            session.add(
+                audit(claim.org_id, claim.document_id, "document.failed", {"reason": reason[:200]})
+            )
 
 
 def process_one(
@@ -210,6 +310,10 @@ def process_one(
                 retryable=False,
             )
             return True
+        config = load_pinned_config(claim.org_id, claim.workflow_config_version)
+        if config is None:
+            fail(claim, "Workflow configuration version is missing", retryable=False)
+            return True
         try:
             data = object_store.get(claim.storage_key)
             if (
@@ -218,9 +322,16 @@ def process_one(
             ):
                 fail(claim, "Stored document failed integrity check", retryable=False)
                 return True
-            fields = provider.extract(data)
+            # Parsing and extraction run under a hard wall-clock limit so one
+            # hostile PDF or hung provider cannot hold the worker forever.
+            result = run_with_timeout(
+                partial(provider.extract, data, config),
+                get_settings().extraction_timeout_seconds,
+            )
         except ExtractionError as exc:
             fail(claim, str(exc), retryable=False)
+        except OperationTimeout:
+            fail(claim, "Extraction timed out", retryable=False)
         except StoredDocumentTooLarge:
             fail(claim, "Stored document exceeds upload size limit", retryable=False)
         except (StorageError, ProviderUnavailable):
@@ -229,7 +340,7 @@ def process_one(
             logger.exception("Unexpected extraction error for document %s", claim.document_id)
             fail(claim, "Extraction failed after retries", retryable=True)
         else:
-            complete(claim, fields, provider)
+            complete(claim, result, provider, config)
         return True
     return False
 

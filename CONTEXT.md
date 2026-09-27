@@ -1,56 +1,69 @@
-# Current handoff
+# Handoff
 
-Updated 2026-09-26 for the complete Oracle walkthrough and production VM files. Previous verified application release: `c92450d`; application implementation: `a8dfad5`. The Oracle configuration has been tested locally, but no Oracle resources have been provisioned by this work.
+## 1. Last updated
 
-## Implemented
+2026-09-27, mid-session. Latest commit `7ffb822` (spec wording; no code change). Uncommitted work in progress: see section 4.
 
-Eight pages: public Home, Register, Login, Dashboard, Inbox, Review, Insights and Admin. Home presents the workflow, role choices, product preview, page guide and FAQ. Landing and authentication use a shared cream/teal visual identity. Organization owners register as admins; member/reviewer entry links preselect pending join requests. URL parameters do not grant permissions. All roles share one sign-in; the API checks active membership and invoice access. Admins manage categories, roles and suspension. Invoices support full document viewing, immutable extraction evidence, reviewer assignment, verified Decimal money, comments, approve/reject/reopen and restricted authenticated sharing. SQL-backed questions and currency-separated totals honor the complete document ACL.
+## 2. Current status
 
-FastAPI uses a restricted Postgres role plus tenant RLS. Migrations through `0005` add membership lifecycle and collaboration tables. A leased transactional outbox runs extraction; default provider rules parses labeled text locally, with optional OpenRouter structured extraction. Runtime services never receive owner database credentials. Normal make up does not seed accounts; make demo explicitly does.
+Full project evaluation completed on 2026-09-27 (score 5.5/10: engineering about 7, spec completeness about 3). All ten local check suites were green at commit `7ffb822`: Ruff, mypy, 80 API tests, ESLint, TypeScript, 16 web tests, API smoke, public browser suite, fresh-company browser workflow, extraction eval. GitHub CI green on the last three commits.
 
-## Verification in this release
+The owner then chose to implement the rest of SPEC.md before deploying. Build order: fixes + Phase 2 → 3 → 4 → 5 → 6 to 9 → Phase 10 Oracle go-live. One commit per phase, every check suite green before each commit.
 
-Public-entry release: web lint, TypeScript, 16 unit tests and production Docker build passed. The new public browser suite passes homepage 200, all three role links, direct entry, history, invalid-parameter fallback, preserved organization draft, shared login, protected Dashboard redirect, keyboard skip link, mobile navigation and 390/320 px layout. The full fresh-company workflow suite passed again. Visual review covered desktop/mobile landing, sign-in and reviewer registration; all signup forms also fit 320 px. The public suite is included in GitHub CI after browser dependencies are installed. No extraction or API behavior changed in this release.
+**In progress right now:** Phase 2 backend (confidence engine, workflow config schema, safe rule DSL, corrections, review tasks, review queue and timeline endpoints, migration 0006) plus the twelve review bugs; and the frontend review fixes (inbox polling bug, filter-aware empty state, cross-tab session handling, shared session hook, middleware cookie gate, proxy header passthrough, Zod register schema, component split, jsdom unit tests).
 
-Previous organization/collaboration release evidence:
+## 3. Exact next step
 
-Final local verification: 80 Postgres API tests; Python lint and strict types; 16 web tests; web lint, types and production Docker build; zero production npm audit advisories. Existing browser happy/error/company-isolation suites pass. The fresh-company browser suite passes signup, pending 403, approval, categories, extraction, verified money, comments, restricted sharing, decisions, questions, totals, suspension, concurrent draft preservation/conflicts, actual two-page PDF rendering/navigation/zoom, and 390 px responsive Admin. Local sequential 20-sample browser p95: documents 67.5 ms, summary 7.3 ms; these are not load-test or production results. OpenAPI matches the built API image (26 operations). Application commit `ad55d0f` passed all four jobs in [GitHub CI](https://github.com/Abhinavsuri90/opspilot/actions/runs/36241455074): API, web, release images and browser smoke.
+1. When the backend stream finishes: rebuild, run `make lint typecheck test`, then `make gen-client` to refresh `apps/web/lib/schema.d.ts`.
+2. When the frontend fixes finish: run the web checks and the browser suites (`cd apps/web && npm run test:e2e:public && node scripts/e2e-workspace.mjs`).
+3. Build the Phase 2 review split view (`/review`, `/review/[id]`) against the new endpoints; brief is drafted in the session scratchpad and mirrored in section 5.
+4. Update SYSTEM_DESIGN.md, README.md, PROGRESS.md; commit `feat: ...` without any AI attribution; push.
+5. Start Phase 3 (actions, policies, kill switch, connectors). Design notes are in section 5.
 
-## Deployment
+## 4. Files in play
 
-Owner reports completing the guide through Step 3: Render account/project setup and a Postgres database on the Free plan, with connection credentials saved privately. Region, database privileges and connectivity have not been independently verified. Storage, migrations and application deployment remain pending. The owner now explicitly requires free hosting and allows card verification, but no paid plan. Do not provision the existing Blueprint: its web/API/worker all use paid plans. Render Free Postgres expires after 30 days and has no backups.
+- `apps/api/app/workflow_config.py`, `rules.py`, `confidence.py`, `review_service.py`, `prompts/`: new Phase 2 modules.
+- `apps/api/alembic/versions/0006_*.py`: field confidence columns, `field_corrections`, `review_tasks`, `audit_events.document_id`, `documents.document_type`, missing indexes, workflow_configs INSERT grant.
+- `apps/api/app/worker.py`, `llm/provider.py`, `document_service.py`, `invoice_workflows.py`, `main.py`, `config.py`, `login_throttle.py`, `onboarding.py`: pipeline, new endpoints and review fixes.
+- `apps/web/app/**`, `components/workspace/*`, `lib/*`, `middleware.ts`, `vitest.config.ts`: frontend fixes.
+- `docs/adr/006-confidence-scoring.md`: signal weights.
 
-Recommended alternative, pending signup/capacity: Oracle Always Free A1 VM, self-managed PostgreSQL, private object storage and HTTPS ingress. Current official allowance is 2 OCPUs/12 GB, not the older 4/24 figure. Free capacity is not guaranteed; idle instances can be reclaimed; no uptime SLA. Production Compose is prepared below; hosted verification still depends on account capacity and credentials. Fallback is one combined Render Free web service plus Supabase Free Postgres/storage. It requires process supervision, bounded memory, restricted-role pooler support, S3 compatibility validation and disabling Supabase Data API. Render sleep stops the worker; do not promise identical availability. Continuous worker polling makes Neon compute-hour quotas a poor fit. Details and official sources are in docs/deployment.md.
+## 5. Decisions and deviations
 
-Oracle production Compose is now implemented in infra/oracle: separate Caddy/web/API/worker/Postgres, only TCP80/443 published, private database network, persistent data/TLS volumes, rotated Docker logs, container memory limits, owner-only migration profile, secure cookies and restricted runtime role. init_env.py generates private secrets without printing them and refuses overwrites; ops selects the production files; backup.sh writes a validated database archive; check_storage.py verifies a tiny synthetic PDF round trip once real credentials exist. No storage SDK change was needed: current OCI supports the pinned SDK's checksum trailers. ADR005 records the single-VM tradeoff.
+- New organizations default to `review_policy: always`; threshold-based auto-approval is opt-in per org. Reason: safe first-day behavior at a customer; keeps existing flows and tests valid.
+- `extracted_fields` stays immutable (INSERT-only); reviewer actions are append-only `field_corrections`; the effective value is the latest correction. Reason: evidence must never be rewritten.
+- `Settings.environment` default flips to `production`; local, CI and tests set `development` explicitly. Reason: fail closed.
+- Postgres outbox instead of Celery/Redis (ADR 003). Redis in the dev Compose file is unused and will be removed; Mailpit stays for Phase 4 email intake and Phase 6 drafts.
+- Oracle Always Free VM instead of Railway (ADR 005). SPEC.md still says Railway in places; treat the spec as the roadmap, `docs/deployment.md` as the runbook.
+- Phase 3 design notes: `org_settings` (kill switch, shadow mode), `action_policies`, `connector_instances` (Fernet-encrypted credentials), `actions` with idempotency key, outbox topics `propose_actions` and `execute_action`, policy and kill-switch check immediately before execution in the worker, dead-letter after 5 attempts with a retry endpoint.
 
-Oracle local verification: API/web production builds; Caddy config; fresh PostgreSQL16 migrations through0005; API/web/Caddy health; HTTPS homepage and organization registration through Caddy with Secure/HttpOnly cookie; authenticated proxy requests;403 wrong-origin and401 anonymous denials; restricted role has no superuser/BYPASSRLS; backup helper and restore into a separate database preserve schema and the synthetic organization. Private env creation/600 mode/no secret output/overwrite refusal, shell syntax and Python lint/format passed. TLS used a local test certificate; public CA issuance, actual OCI S3 and cloud firewall remain unverified. Existing application source was not changed.
+## 6. Environment
 
-render.yaml retains the paid Render reference with one public web service for all eight pages, a separate private API and background worker. The local application is running at http://localhost:3300 using rules extraction. No hosted URL/account connection or live OpenRouter evaluation has been verified. An earlier OpenRouter key was disclosed in chat; it was not used by this work. Require a rotated key in ignored local environment or host worker secrets before live model tests. Rules extraction avoids model charges but only supports labeled text invoices.
+- Local web http://localhost:3300, API http://localhost:8000/docs. No staging or production URL exists yet.
+- External accounts: GitHub repo `Abhinavsuri90/opspilot` with Actions CI. Oracle Cloud account not yet created (guide in `docs/deployment.md`, Part 1 steps given to the owner). Render account exists but is not to be used (paid plans).
+- Env var names: see `.env.example` (DATABASE_URL, DATABASE_OWNER_URL, APP_DB_PASSWORD, JWT_SECRET, COOKIE_SECURE, WEB_ORIGIN, ENVIRONMENT, S3_*, LLM_PROVIDER, OPENROUTER_API_KEY, OPENROUTER_MODEL, MAX_DOCUMENTS_PER_ORG, plus the new EXTRACTION_TIMEOUT_SECONDS and UPLOAD_PARSE_TIMEOUT_SECONDS). Never store values here.
+- Demo logins exist only after `make demo` locally (Northwind and Contoso admins; password from DEMO_PASSWORD in the ignored `.env`).
 
-## Exact next step
+## 7. How to run and test
 
-The user requested the entire Oracle guide in chat. Follow docs/deployment.md from signup through compartment, manual public VCN, A1 Ubuntu24.04 ARM VM, SSH, DuckDNS, private bucket/scoped Customer Secret Key, Docker install, clone, private config helper, build/migrate/start, real storage/TLS/browser verification and backups. First confirm signup and actual A1 Running capacity in the home region, staying on Free Tier. Keep secrets on the VM or in a password manager. All eight pages deploy together. Do not seed the hosted database. Use the managed fallback if free VM capacity cannot be obtained.
+```sh
+LLM_PROVIDER=rules OPENROUTER_API_KEY= make up      # start local stack
+make lint typecheck test                            # backend + web gates
+cd apps/web && npm run test:e2e:public && node scripts/e2e-workspace.mjs
+make eval                                           # extraction eval report
+make gen-client                                     # after any API change
+```
 
-## Important files
+## 8. Known issues and gotchas
 
-- SYSTEM_DESIGN.md: current architecture, permissions, data model, failure handling, concurrency, latency targets and capacity assumptions.
-- README.md: local signup steps, pages, checks and limits.
-- docs/deployment.md: free hosting comparison and paid Render reference; render.yaml: paid Render configuration.
-- infra/oracle/: production Compose, Caddy, private configuration setup, command wrapper, database backup and scoped storage check.
-- docs/adr/005-free-vm-deployment.md: free VM choice and operational tradeoffs.
-- apps/api/app/auth.py, onboarding.py, invoice_workflows.py: organization access and collaboration.
-- apps/web/components/InvoiceWorkspace.tsx: review/discussion/sharing UI.
-- apps/web/scripts/e2e-workspace.mjs: fresh company acceptance flow and small sequential latency smoke.
-- apps/web/app/page.tsx, landing.module.css and components/PublicBrand.tsx: public entry and visual identity.
-- apps/web/scripts/e2e-public.mjs: public navigation and signup selection checks.
+- The local Northwind org reached 99 of 100 documents because Postgres tests never cleaned up; the fix (teardown cleanup) is part of the current backend stream. If `make test` returns 409 quota errors, that is why.
+- Running the API test suite and the browser suites at the same time can trip the shared login throttle; run them sequentially.
+- The `gh` CLI is not installed; use the GitHub REST API or the web UI to check CI.
+- The local assistant-instructions file is intentionally untracked through a local git exclude and must never be committed.
+- Git history before `7ffb822` still contains the old tooling file; rewriting history is the owner's call.
 
-## How to run and test
+## 9. Open questions for the owner
 
-Start Docker Desktop, then `LLM_PROVIDER=rules OPENROUTER_API_KEY= make up`. Open http://localhost:3300. `make down` stops services while preserving data. Web checks: `cd apps/web && npm run lint && npm run typecheck && npm test && npm run test:e2e:public && npm run test:e2e:workspace`. Full stack commands and optional model configuration are in README.md. Secrets belong only in ignored environment files or Render settings.
-
-## Remaining operational gates
-
-Free host signup/capacity, production host configuration, private storage, hosted acceptance test, fresh model key/model evaluation if enabled, email verification/password recovery, owner recovery/transfer, trusted edge abuse controls, hostile PDF isolation, backups/restore, alerts and measured production load. SPEC.md is the historical roadmap; it is not the release status. See docs/deployment-readiness-review.md.
-
-The old demo-guide.md was removed because README and SYSTEM_DESIGN now provide the maintained walkthrough and interview material. PROGRESS.md retains historical entries; read the newest entry first.
+- Confirm the Oracle home region choice before creating the account (cannot be changed later).
+- Decide whether to rewrite git history to remove the old tooling file (force push; CI run links in PROGRESS.md would point at rewritten commits).
+- OpenRouter: a fresh key is needed before any live-model evaluation; the key shared in an earlier chat must be revoked.

@@ -9,13 +9,24 @@ def invoice_pdf(
     vendor: str = "Northwind Traders",
     invoice_date: str = "2026-09-26",
     total: str = "$123.45",
+    extra_lines: dict[str, str] | None = None,
+    omit: tuple[str, ...] = (),
 ) -> bytes:
-    lines = [
-        "OpsPilot fictional demo invoice",
-        f"Vendor: {vendor}",
-        f"Invoice Number: {invoice_number}",
-        f"Invoice Date: {invoice_date}",
-        f"Total: {total}",
+    """Build a one-page text invoice.
+
+    ``extra_lines`` adds labeled lines such as ``{"Subtotal": "$100.00"}`` and
+    ``omit`` drops standard labels, which the extraction eval uses to create
+    documents that should be flagged.
+    """
+    labeled = {
+        "Vendor": vendor,
+        "Invoice Number": invoice_number,
+        "Invoice Date": invoice_date,
+        **(extra_lines or {}),
+        "Total": total,
+    }
+    lines = ["OpsPilot fictional demo invoice"] + [
+        f"{label}: {value}" for label, value in labeled.items() if label not in omit
     ]
     escaped = [
         line.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")

@@ -33,7 +33,9 @@ def test_repeat_seed_preserves_existing_password_and_role(
             select(WorkflowConfig).where(WorkflowConfig.org_id == contoso.id)
         )
         assert config is not None
-        assert json.loads(config.config_json)["document_types"] == ["invoice"]
+        stored = json.loads(config.config_json)
+        assert stored["document_types"][0]["name"] == "invoice"
+        assert stored["review_policy"] == "always"
         config.config_json = json.dumps({"document_types": ["custom"], "fields": []})
 
     monkeypatch.setenv("DEMO_PASSWORD", "second-password")

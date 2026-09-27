@@ -1,0 +1,6 @@
+{
+  "exact_match": 0.9478,
+  "grounded_fraction": 1.0,
+  "flag_precision": 0.6667,
+  "flag_recall": 1.0
+}

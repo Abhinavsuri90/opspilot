@@ -7,15 +7,17 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Annotated, Literal, cast
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
-from sqlalchemy import and_, case, delete, exists, func, or_, select
+from sqlalchemy import and_, case, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from sqlalchemy.sql.elements import ColumnElement
 
-from app.auth import current_session
+from app import review_service
+from app.access import accessible_document_clause, can_access_document
+from app.auth import Identity, current_session
 from app.models import AuditEvent, Document, ExtractedField, Membership, Organization, User
+from app.review_service import DocumentDetail, QueueItem, TimelineEntry
 from app.workflow_models import (
     InvoiceCategory,
     InvoiceComment,
@@ -24,8 +26,10 @@ from app.workflow_models import (
     InvoiceReview,
 )
 
+__all__ = ["accessible_document_clause", "can_access_document", "router"]
+
 router = APIRouter(prefix="/v1", tags=["Invoice workspace"])
-SessionContext = Annotated[tuple[Session, User, Organization, Membership], Depends(current_session)]
+SessionContext = Annotated[Identity, Depends(current_session)]
 # Explicit supported ISO 4217 codes; a dollar sign is never treated as a currency.
 SUPPORTED_CURRENCIES = frozenset(
     "AED AUD BDT BGN BHD BRL CAD CHF CLP CNY COP CZK DKK EGP EUR GBP HKD HUF IDR ILS "
@@ -104,6 +108,20 @@ class SharingUpdate(RequestModel):
     version: int = Field(ge=0)
     visibility: Literal["workspace", "restricted"]
     user_ids: list[uuid.UUID] = Field(default_factory=list, max_length=100)
+
+
+class FieldCorrectionRequest(RequestModel):
+    version: int = Field(ge=0)
+    action: Literal["accept", "edit"]
+    value: str | None = Field(default=None, max_length=4000)
+
+    @model_validator(mode="after")
+    def value_matches_action(self) -> "FieldCorrectionRequest":
+        if self.action == "edit" and not self.value:
+            raise ValueError("Provide the corrected value to edit this field")
+        if self.action == "accept" and self.value is not None:
+            raise ValueError("Accepting a field does not take a value")
+        return self
 
 
 class CollaboratorResponse(BaseModel):
@@ -211,58 +229,6 @@ class QuestionResponse(BaseModel):
     summary: WorkspaceSummary | None = None
 
 
-def accessible_document_clause(
-    org_id: uuid.UUID, user_id: uuid.UUID, role: str
-) -> ColumnElement[bool]:
-    """SQL predicate shared by lists, aggregates and direct document access."""
-    tenant = Document.org_id == org_id
-    if role == "admin":
-        return tenant
-    restricted = (
-        exists()
-        .where(
-            InvoiceMetadata.document_id == Document.id,
-            InvoiceMetadata.org_id == org_id,
-            InvoiceMetadata.visibility == "restricted",
-        )
-        .correlate(Document)
-    )
-    assigned = (
-        exists()
-        .where(
-            InvoiceMetadata.document_id == Document.id,
-            InvoiceMetadata.org_id == org_id,
-            InvoiceMetadata.assigned_reviewer_id == user_id,
-        )
-        .correlate(Document)
-    )
-    granted = (
-        exists()
-        .where(
-            InvoiceGrant.document_id == Document.id,
-            InvoiceGrant.org_id == org_id,
-            InvoiceGrant.user_id == user_id,
-        )
-        .correlate(Document)
-    )
-    return and_(tenant, or_(~restricted, Document.uploaded_by == user_id, assigned, granted))
-
-
-def can_access_document(
-    session: Session, org_id: uuid.UUID, user_id: uuid.UUID, role: str, document: Document
-) -> bool:
-    if document.org_id != org_id:
-        return False
-    return (
-        session.scalar(
-            select(Document.id).where(
-                Document.id == document.id, accessible_document_clause(org_id, user_id, role)
-            )
-        )
-        is not None
-    )
-
-
 def _document(
     session: Session,
     org: Organization,
@@ -328,13 +294,16 @@ def _audit(
     user_id: uuid.UUID,
     event_type: str,
     details: dict[str, object],
+    document_id: uuid.UUID | None = None,
 ) -> None:
     session.add(
         AuditEvent(
             org_id=org_id,
             actor_user_id=user_id,
+            document_id=document_id,
             event_type=event_type,
             detail_json=json.dumps(details, default=str, sort_keys=True),
+            created_at=datetime.now(UTC),
         )
     )
 
@@ -398,12 +367,17 @@ def _workspace(
         reviews=reviews,
         capabilities=Capabilities(
             can_edit=may_review and document.status == "needs_review",
-            can_review=may_review and document.status in {"needs_review", "approved", "rejected"},
+            can_review=may_review and document.status in REVIEWABLE_STATUSES,
             can_share=_may_share(membership, user, document),
             can_assign=membership.role == "admin" and document.status == "needs_review",
             can_comment=membership.role in {"admin", "reviewer", "member"},
         ),
     )
+
+
+# Statuses a reviewer can act on: decide an open review, or reopen a completed one.
+COMPLETED_STATUSES = frozenset({"approved", "rejected", "auto_approved"})
+REVIEWABLE_STATUSES = COMPLETED_STATUSES | {"needs_review"}
 
 
 def _finish(
@@ -576,6 +550,7 @@ def update_metadata(
             "document_id": document.id,
             "changes": payload.model_dump(exclude_unset=True),
         },
+        document_id=document.id,
     )
     return _finish(session, document, user, membership)
 
@@ -606,6 +581,7 @@ def add_comment(
             "document_id": document.id,
             "comment_id": comment.id,
         },
+        document_id=document.id,
     )
     return _finish(session, document, user, membership)
 
@@ -621,18 +597,23 @@ def review_invoice(
         raise HTTPException(
             403, "Only an eligible reviewer or administrator can review this invoice"
         )
+    config = review_service.pinned_config(session, document)
     if payload.decision == "reopen":
-        if document.status not in {"approved", "rejected"}:
+        if document.status not in COMPLETED_STATUSES:
             raise HTTPException(409, "Only approved or rejected invoices can be reopened")
         new_status = "needs_review"
+        review_service.open_review_task(session, org.id, document.id, config.review_sla_minutes)
     else:
         if document.status != "needs_review":
             raise HTTPException(409, "Invoice is not awaiting review")
-        if payload.decision == "approve" and (
-            metadata.verified_amount is None or metadata.currency is None
-        ):
-            raise HTTPException(422, "Verify the invoice amount and currency before approval")
-        new_status = "approved" if payload.decision == "approve" else "rejected"
+        if payload.decision == "approve":
+            _prepare_approval(session, org, document, metadata)
+            new_status = "approved"
+        else:
+            new_status = "rejected"
+        review_service.complete_review_task(
+            session, org.id, document.id, "approved" if new_status == "approved" else "rejected"
+        )
     previous_status = document.status
     document.status, document.updated_at = new_status, datetime.now(UTC)
     metadata.version += 1
@@ -659,8 +640,103 @@ def review_invoice(
             "verified_amount": metadata.verified_amount,
             "currency": metadata.currency,
         },
+        document_id=document.id,
     )
     return _finish(session, document, user, membership)
+
+
+def _prepare_approval(
+    session: Session, org: Organization, document: Document, metadata: InvoiceMetadata
+) -> None:
+    """Every flagged field needs a reviewer decision, and money must be verifiable."""
+    unresolved = review_service.unresolved_flag_count(session, org.id, document.id)
+    if unresolved:
+        raise HTTPException(422, f"{unresolved} field(s) still need review")
+    if metadata.verified_amount is not None and metadata.currency is not None:
+        return
+    derived = review_service.derive_verified_money(session, document, org.default_currency)
+    if derived is None or derived[1] not in SUPPORTED_CURRENCIES:
+        raise HTTPException(422, "Verify the invoice amount and currency before approval")
+    metadata.verified_amount, metadata.currency = derived
+
+
+@router.post("/documents/{document_id}/fields/{field_id}", response_model=DocumentDetail)
+def correct_field(
+    document_id: uuid.UUID,
+    field_id: uuid.UUID,
+    payload: FieldCorrectionRequest,
+    context: SessionContext,
+) -> DocumentDetail:
+    session, user, org, membership = context
+    document = _document(session, org, user, membership, document_id, lock=True)
+    metadata = _mutable_metadata(session, document, payload.version)
+    if not _may_review(membership, user, metadata):
+        raise HTTPException(
+            403, "Only an eligible reviewer or administrator can correct this invoice"
+        )
+    if document.status != "needs_review":
+        raise HTTPException(
+            409, "Invoice must be ready for review; reopen a completed review first"
+        )
+    try:
+        correction = review_service.apply_correction(
+            session, document, user.id, field_id, payload.action, payload.value
+        )
+    except review_service.FieldNotFound as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except review_service.InvalidCorrection as exc:
+        raise HTTPException(422, str(exc)) from exc
+    metadata.version += 1
+    document.updated_at = datetime.now(UTC)
+    _audit(
+        session,
+        org.id,
+        user.id,
+        "invoice.field_edited" if payload.action == "edit" else "invoice.field_accepted",
+        {
+            "document_id": document.id,
+            "field": correction.field_name,
+            "before": correction.before_value,
+            "after": correction.after_value,
+        },
+        document_id=document.id,
+    )
+    session.flush()
+    response = review_service.document_detail(session, document)
+    session.commit()
+    return response
+
+
+@router.get("/review/queue", response_model=list[QueueItem])
+def review_queue(
+    context: SessionContext,
+    document_type: Annotated[str | None, Query(max_length=50)] = None,
+    vendor: Annotated[str | None, Query(min_length=1, max_length=200)] = None,
+    max_age_hours: Annotated[int | None, Query(ge=1, le=24 * 365)] = None,
+    assigned: Literal["me", "unassigned", "all"] = "all",
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+) -> list[QueueItem]:
+    session, user, org, membership = context
+    return review_service.review_queue(
+        session,
+        org.id,
+        user.id,
+        membership.role,
+        document_type=document_type,
+        vendor=vendor,
+        max_age_hours=max_age_hours,
+        assigned=assigned,
+        offset=offset,
+        limit=limit,
+    )
+
+
+@router.get("/documents/{document_id}/timeline", response_model=list[TimelineEntry])
+def document_timeline(document_id: uuid.UUID, context: SessionContext) -> list[TimelineEntry]:
+    session, user, org, membership = context
+    document = _document(session, org, user, membership, document_id)
+    return review_service.timeline(session, org.id, document.id)
 
 
 @router.post("/documents/{document_id}/sharing", response_model=WorkspaceResponse)
@@ -707,6 +783,7 @@ def update_sharing(
             "visibility": payload.visibility,
             "user_ids": sorted(str(target) for target in desired),
         },
+        document_id=document.id,
     )
     return _finish(session, document, user, membership)
 
@@ -775,7 +852,9 @@ def _summary(
             {key: Decimal("0.0000") for key in ("total", "pending_review", "approved", "rejected")},
         )
         bucket["total"] += amount
-        status_key = "pending_review" if state == "needs_review" else state
+        status_key = {"needs_review": "pending_review", "auto_approved": "approved"}.get(
+            state, state
+        )
         if status_key in {"pending_review", "approved", "rejected"}:
             bucket[status_key] += amount
 

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from app import document_service
+from app import document_service, review_service
 from app.db import get_session
 from app.document_service import (
     DocumentLimitReached,
@@ -36,7 +36,15 @@ def clear_route_overrides() -> Any:
         ("GET", "/v1/organization/members", {}),
         ("GET", "/v1/documents", {}),
         ("GET", f"/v1/documents/{uuid.uuid4()}", {}),
+        ("GET", f"/v1/documents/{uuid.uuid4()}/file", {}),
+        ("GET", f"/v1/documents/{uuid.uuid4()}/timeline", {}),
+        ("GET", "/v1/review/queue", {}),
         ("POST", f"/v1/documents/{uuid.uuid4()}/retry", {}),
+        (
+            "POST",
+            f"/v1/documents/{uuid.uuid4()}/fields/{uuid.uuid4()}",
+            {"json": {"version": 0, "action": "accept"}},
+        ),
         (
             "POST",
             "/v1/documents",
@@ -69,7 +77,9 @@ def test_read_only_member_cannot_manage_documents_or_members(
     )
     app.dependency_overrides[get_store] = lambda: object()
     monkeypatch.setattr(document_service, "browse", lambda session, org, user, role, **kwargs: [])
-    monkeypatch.setattr(document_service, "read", lambda session, org, document, user, role: None)
+    monkeypatch.setattr(
+        review_service, "read_document", lambda session, org, document, user, role: None
+    )
 
     denied_routes: list[tuple[str, str, dict[str, Any]]] = [
         ("GET", "/v1/organization/members", {}),

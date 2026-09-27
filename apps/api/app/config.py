@@ -13,7 +13,9 @@ class Settings(BaseSettings):
     jwt_secret: str = "dev-only-change-me-before-deployment"
     cookie_secure: bool = False
     web_origin: str = "http://localhost:3300"
-    environment: str = "development"
+    # Fail closed: an unset ENVIRONMENT gets the production checks below. Local
+    # development, tests and CI set ENVIRONMENT=development explicitly.
+    environment: str = "production"
     s3_endpoint_url: str | None = None
     s3_bucket: str = "documents"
     s3_region: str = "us-east-1"
@@ -24,6 +26,9 @@ class Settings(BaseSettings):
     openrouter_api_key: str | None = None
     openrouter_model: str = "google/gemini-3.8-flash"
     max_documents_per_org: int = Field(default=100, ge=1, le=100_000)
+    # Wall-clock limits for PDF parsing and extraction; see app/timeouts.py.
+    extraction_timeout_seconds: float = Field(default=60, gt=0, le=600)
+    upload_parse_timeout_seconds: float = Field(default=15, gt=0, le=120)
 
     @model_validator(mode="after")
     def reject_unsafe_deployment(self) -> "Settings":

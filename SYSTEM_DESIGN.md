@@ -29,6 +29,7 @@ flowchart TB
     DB[(Postgres: restricted application role and tenant RLS)]
     Store[(Private S3-compatible PDF bucket)]
     Worker[Extraction worker: leased Postgres outbox]
+    Confidence[Confidence engine: grounding, format, cross-field rules, self-report]
     Rules[Local labeled-field parser]
     Router[Optional OpenRouter structured extraction]
     Admin[Operator migration process: owner role]
@@ -40,7 +41,8 @@ flowchart TB
     Worker -->|Verify hash and fetch PDF| Store
     Worker --> Rules
     Worker -. configured alternative .-> Router
-    Worker -->|Evidence, state and audit| DB
+    Worker --> Confidence
+    Worker -->|Evidence, scores, review task, state and audit| DB
     Admin -->|Alembic migrations only| DB
 ```
 
@@ -49,9 +51,9 @@ flowchart TB
 | Component | Owns | Scaling boundary |
 | --- | --- | --- |
 | Next.js | Pages, typed API client, TanStack Query cache, same-origin proxy | Stateless web replicas |
-| FastAPI | Authentication, permissions, validation, invoice workflow, PDF delivery | Stateless API replicas; Postgres connection budget applies |
+| FastAPI | Authentication, permissions, validation, invoice workflow, field corrections, review queue, timeline, PDF delivery | Stateless API replicas; Postgres connection budget applies |
 | Postgres | Accounts, tenancy, workflow state, durable jobs, immutable evidence, audit | Vertical scaling first; inspect actual query plans before adding replicas |
-| Worker | PDF text parsing, optional model call, evidence validation, durable completion | One active extraction per process; add workers within provider and DB limits |
+| Worker | PDF text parsing, optional model call, evidence validation, confidence scoring, rule evaluation, review-task creation, durable completion | One extraction at a time per process under a hard timeout; add workers within provider and DB limits |
 | Object store | Original PDF bytes | Managed private bucket; backup/versioning configured by operator |
 | Migration process | Schema and restricted-role grants | One serialized release step; owner credentials excluded from serving processes |
 
@@ -114,6 +116,7 @@ All document actions additionally require access to that particular document.
 | Upload and retry failed extraction | Yes | Yes | Yes | No |
 | Add invoice comments | Yes | Yes | Yes | No |
 | Verify amount/currency and set category | Yes | Eligible reviewer | No | No |
+| Accept or edit extracted fields (creates a correction) | Yes | Eligible reviewer | No | No |
 | Approve/reject/reopen | Yes | Eligible reviewer | No | No |
 | Assign reviewer | Yes | No | No | No |
 | Manage visibility/grants | Yes | If uploader | If uploader | No |
@@ -142,7 +145,7 @@ RLS enforces organization isolation. Per-document restrictions are enforced by a
 - Unknown credentials receive a consistent error; valid pending credentials receive an actionable pending status.
 - No raw API keys, cookies, passwords, document text or email addresses in request timing logs.
 
-Render private networking puts the web proxy in front of the API. Signup's peer throttle can group proxied traffic by the web service address. Before unrestricted public signup, configure an edge rate limit/bot challenge and a trusted client-IP design; do not blindly trust arbitrary forwarded IP headers.
+The web proxy forwards `X-Forwarded-For` and `X-Forwarded-Proto`. The API derives the client address with one rule: when the connecting peer is a loopback or private-network address (the web container), it takes the rightmost `X-Forwarded-For` entry, which is the value the trusted edge appended; otherwise it uses the peer address and ignores the header. A browser-supplied leftmost entry therefore cannot spoof the per-address login throttle (50 attempts per 15 minutes) or the signup throttle. An edge rate limit or bot challenge is still advisable before unrestricted public signup.
 
 ## 4. Data model and invariants
 
@@ -161,6 +164,9 @@ erDiagram
     DOCUMENT ||--o{ INVOICE_COMMENT : discusses
     DOCUMENT ||--o{ INVOICE_REVIEW : decides
     DOCUMENT ||--o{ INVOICE_GRANT : shares
+    EXTRACTED_FIELD ||--o{ FIELD_CORRECTION : corrects
+    DOCUMENT ||--o| REVIEW_TASK : tracks
+    DOCUMENT ||--o{ AUDIT_EVENT : links
     ORGANIZATION ||--o{ AUDIT_EVENT : records
 ```
 
@@ -169,7 +175,10 @@ erDiagram
 | Membership | Unique organization/user pair; active/pending/rejected/suspended lifecycle |
 | Document | Unique `(org_id, content_hash)`; original bytes referenced by deterministic org/hash key |
 | Outbox event | Created atomically with document and intake audit; claimed with a lease |
-| Extraction run / field | Original provider output and exact evidence retained; review does not overwrite extraction |
+| Workflow config | Versioned per organization; validated Pydantic schema of document types, typed fields with thresholds, and cross-field rules in a parsed rule grammar (never `eval`) |
+| Extraction run / field | Original provider output and exact evidence retained; each field stores confidence, threshold, status (`auto`/`needs_review`), signal values and reasons; review never overwrites extraction |
+| Field correction | Append-only accept/edit rows by a reviewer; the effective value is the latest correction, else the original |
+| Review task | One per document; opened when review is required, due after the configured SLA, completed with the decision, restarted on reopen |
 | Invoice metadata | One row/document; default visibility workspace; version begins at zero |
 | Verified money | Decimal `NUMERIC(20,4)`, nonnegative, amount and ISO currency both set or both absent |
 | Category | Unique normalized name inside organization; archive instead of deleting referenced history |
@@ -223,13 +232,21 @@ sequenceDiagram
     Worker->>S3: Fetch and verify original hash/size
     Worker->>Extractor: Parse fields or call configured model
     Extractor-->>Worker: Fields and page evidence
-    Worker->>DB: Check lease, commit evidence + needs_review
-    Reviewer->>API: Read full PDF and extracted evidence
+    Worker->>Worker: Score each field (grounding, format, rules, self-report)
+    Worker->>DB: Check lease, commit evidence + scores + review task + needs_review or auto_approved
+    Reviewer->>API: Read full PDF, evidence, confidence and reasons
+    Reviewer->>API: Accept or edit flagged fields (append-only corrections)
     Reviewer->>API: Save category + verified amount/currency + version
     API->>DB: Lock document, reject stale version, audit
     Reviewer->>API: Approve/reject with current version
     API->>DB: Decision history + state + audit in one transaction
 ```
+
+### Validation and confidence
+
+Confidence is not the model's opinion of itself. Each extracted field receives a score in [0, 1] from six signals, weighted and renormalized over the signals that apply: grounding 0.35 (evidence is an exact substring of the page text, 0.7 after whitespace normalization), format 0.25 (type, regex and enum checks from the field spec), cross-field rules 0.20 (every rule referencing the field passes), model agreement 0.10 and memory prior 0.05 (reserved for the tier-2 router and vendor memory), and self-report 0.05. A field below its configured threshold is `needs_review` with human-readable reasons. Missing required fields are stored as empty flagged fields so a reviewer can supply them. Rules such as `subtotal + tax == total` come from tenant configuration and are parsed into a fixed grammar; unsupported syntax is rejected when the configuration is saved. Weights and rationale: [ADR 006](docs/adr/006-confidence-scoring.md).
+
+The organization's `review_policy` decides routing: `always` (the default for new organizations) sends every document to review; `threshold` auto-approves a document only when no field is flagged and no rule failed. Approval requires every flagged field to carry a correction; verified amount and currency are derived from the effective total and currency fields when the reviewer has not entered them.
 
 ### Implemented document states
 
@@ -238,14 +255,19 @@ stateDiagram-v2
     [*] --> queued: accepted upload
     queued --> extracting: lease claim
     extracting --> queued: transient error with retry budget
-    extracting --> needs_review: grounded extraction saved
-    extracting --> failed: terminal error or exhausted budget
+    extracting --> validating: grounded extraction
+    validating --> needs_review: policy always, flagged field or failed rule
+    validating --> auto_approved: threshold policy, nothing flagged
+    extracting --> failed: terminal error, timeout or exhausted budget
     failed --> queued: authorized manual retry
-    needs_review --> approved: amount and currency verified
+    needs_review --> approved: flagged fields corrected, money verified
     needs_review --> rejected: reason required
     approved --> needs_review: reopen
+    auto_approved --> needs_review: reopen
     rejected --> needs_review: reopen
 ```
+
+`validating` runs inside the completion transaction, so a crash rolls the document back to the leased `extracting` state; the step is visible in the audit trail rather than as a resting status.
 
 ### Concurrent edits
 
@@ -269,7 +291,8 @@ This is at-least-once processing with guarded database completion. A crash after
 | Duplicate file is restricted from uploader | Generic conflict, no existing ID/filename leak |
 | Worker exits before completion | Lease expires; another worker can reclaim |
 | Old worker completes after reclaim | Lease mismatch prevents stale completion |
-| Provider returns invented evidence | Validation rejects result; no automatic approval |
+| Provider returns invented evidence | Grounding check drops that field and records the reason; nothing survives, the run fails; no automatic approval |
+| Extraction hangs on a pathological PDF | Hard timeout (60 s default) fails the job as non-retryable; upload-time parsing has its own 15 s bound |
 | Concurrent review/category change | Lock and version check prevent lost update |
 | Suspended user has an old cookie | Active membership check rejects new requests |
 | Object contents change unexpectedly | Hash/length check blocks processing and file delivery |
@@ -284,8 +307,8 @@ This mechanism has no arbitrary SQL generation or model tool execution. It canno
 
 Extraction providers:
 
-- `rules`: local deterministic parser for labeled text (`Vendor:`, `Invoice Number:`, `Invoice Date:`, `Total:`). Useful for supported formats, without model credentials.
-- `openrouter`: sends PDF text to a configured model using a strict JSON schema. Checks returned values/evidence against the original text and page. Model access, cost, data handling and accuracy must be tested for the chosen deployment.
+- `rules`: local deterministic parser that reads every labeled line configured for the document type (for the default invoice: vendor, invoice number, dates, subtotal, tax, total, currency, PO number). Useful for supported formats, without model credentials.
+- `openrouter`: sends PDF text to a configured model with the versioned prompt in `apps/api/app/prompts/` and a strict JSON schema generated from the configured fields. Each returned value and evidence is checked against the original page text; ungrounded fields are dropped individually and the reason is recorded. Model access, cost, data handling and accuracy must be tested for the chosen deployment.
 - `mock`: retained for reproducible test fixtures.
 
 The extractor has no tools and cannot approve an invoice. Uploaded text is untrusted data. Grounding checks establish source correspondence; they do not prove that the supplier's invoice is correct.
@@ -357,6 +380,8 @@ Alternative paid Render topology: public web service, private API service, backg
 
 The web service deploys the homepage, registration, login and all five workspace pages in one release. API and worker run separately so serving pages, handling requests and extracting PDFs have distinct process boundaries. All browser requests use the public web origin and its `/api` proxy; the API stays on Render's private network. The initial rollout order is database and private storage, owner-run migrations, API and worker, web, then a hosted acceptance run. A working homepage alone does not verify signup, database access or background extraction.
 
+`ENVIRONMENT` defaults to `production`, which enforces HTTPS origin, secure cookies, a strong session secret, the restricted database role and non-local storage; local development, CI and tests set `development` explicitly.
+
 Operational responsibilities:
 
 1. Keep owner credentials in the migration environment; runtime has only the restricted connection.
@@ -378,7 +403,9 @@ There is no tested production restore, observed availability history, centralize
 - Cross-organization read/write denial using the restricted database role.
 - Restricted-document denial across file, metadata, list, questions, totals, comments, retry and deduplication.
 - Immediate grant revocation on subsequent requests; stale version conflicts.
-- Immutable extraction evidence and append-only decisions/comments/audit grants.
+- Immutable extraction evidence and append-only decisions/comments/corrections/audit grants.
+- Confidence signals, weight renormalization, thresholds, rule-grammar rejection of unsafe syntax, approve gate on flagged fields, queue filters and ordering, timeline merge order, field access across documents and tenants.
+- Per-address login throttle, forwarded-address derivation, extraction and upload-parse timeouts, request IDs on 500 responses, schema drift between ORM and migrations.
 - Decimal totals across currencies, verified/unverified exclusions, aggregate scope beyond 50 invoices.
 - Fresh browser registration through approval, upload, full PDF review, discussion, decision and insights.
 - Responsive page checks, loading/error states, login with no hard-coded account defaults.
@@ -393,6 +420,7 @@ Start with a real workflow: “A member joins an organization, an admin approves
 - Why the outbox and invoice are committed together; what can still leave an orphan file.
 - How tenant RLS differs from document-level authorization; how totals avoid leaking restricted data.
 - Why reviewer-confirmed money is separate from immutable model extraction.
+- Why confidence combines six signals with grounding weighted highest and the model's self-report lowest, and how a failed cross-field rule flags every field it references.
 - How a lease prevents an old worker committing after a replacement worker.
 - How concurrent reviewer edits get a conflict instead of a silent overwrite.
 - Why bounded database questions and exact evidence are safer to demonstrate than unsupported model claims.

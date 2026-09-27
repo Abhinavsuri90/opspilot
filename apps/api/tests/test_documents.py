@@ -2,7 +2,9 @@ import hashlib
 import json
 import os
 import threading
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -12,18 +14,32 @@ from typing import Any
 import httpx
 import pytest
 from fastapi.testclient import TestClient
+from scripts.generate_demo_invoice import invoice_pdf
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import SessionLocal, engine, set_org_context
-from app.llm.provider import ExtractionError, MockInvoiceProvider, OpenRouterInvoiceProvider
+from app.llm.provider import (
+    ExtractionError,
+    ExtractionResult,
+    MockInvoiceProvider,
+    OpenRouterInvoiceProvider,
+)
 from app.main import app
-from app.models import Document, ExtractionRun, Organization, OutboxEvent
+from app.models import AuditEvent, Document, ExtractionRun, Organization, OutboxEvent
 from app.storage import get_store
 from app.worker import Claim, claim_next, complete, fail, process_one
 from app.worker import main as worker_main
+from app.workflow_config import (
+    DocumentTypeSpec,
+    FieldSpec,
+    WorkflowConfigModel,
+    default_invoice_config,
+)
+from tests.conftest import Tenant, TenantFactory, postgres
 
 SAMPLE = Path(__file__).parents[3] / "examples" / "northwind-invoice.pdf"
+CONFIG = default_invoice_config()
 
 
 class MemoryStore:
@@ -37,15 +53,84 @@ class MemoryStore:
         return self.objects[key]
 
 
+def demo_login(client: TestClient, slug: str = "northwind") -> dict[str, Any]:
+    response = client.post(
+        "/v1/auth/login",
+        json={
+            "org_slug": slug,
+            "email": f"{slug}@example.com",
+            "password": os.environ["DEMO_PASSWORD"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    return dict(response.json())
+
+
+def tenant_login(client: TestClient, tenant: Tenant, role: str = "admin") -> None:
+    client.cookies.clear()
+    client.cookies.set("opspilot_session", tenant.token(role))
+
+
+def upload(client: TestClient, filename: str, data: bytes) -> dict[str, Any]:
+    response = client.post("/v1/documents", files={"file": (filename, data, "application/pdf")})
+    assert response.status_code == 202, response.text
+    return dict(response.json())
+
+
+def unique_sample() -> bytes:
+    return SAMPLE.read_bytes().replace(b"NW-2026-001", uuid.uuid4().hex[:11].upper().encode())
+
+
 def test_mock_provider_returns_grounded_invoice_fields() -> None:
-    fields = MockInvoiceProvider().extract(SAMPLE.read_bytes())
-    assert {field.name: field.value for field in fields} == {
+    result = MockInvoiceProvider().extract(SAMPLE.read_bytes(), CONFIG)
+    assert {field.name: field.value for field in result.fields} == {
         "vendor": "Northwind Traders",
         "invoice_number": "NW-2026-001",
         "invoice_date": "2026-09-26",
         "total": "$123.45",
     }
-    assert all(field.evidence.endswith(field.value) and field.page_number == 1 for field in fields)
+    assert all(
+        field.evidence.endswith(field.value) and field.page_number == 1 for field in result.fields
+    )
+    assert all(field.self_confidence == 1.0 for field in result.fields)
+    assert result.document_type == "invoice"
+    assert result.prompt_version == "mock-v2" and result.model == "invoice-pattern-v2"
+    assert result.tokens_in is None and result.latency_ms >= 0
+    assert len(result.pages) == 1
+
+
+def test_rules_provider_reads_configured_labels_and_detects_document_type() -> None:
+    receipt = DocumentTypeSpec(
+        name="receipt",
+        detect=["receipt"],
+        fields=[FieldSpec(name="merchant"), FieldSpec(name="amount", type="money")],
+    )
+    config = WorkflowConfigModel(document_types=[receipt, CONFIG.document_types[0]])
+    data = invoice_pdf(
+        invoice_number="PO-9",
+        extra_lines={
+            "Due Date": "2026-10-26",
+            "Subtotal": "$100.00",
+            "Tax": "$23.45",
+            "Currency": "USD",
+            "PO Number": "PO-2026-014",
+        },
+    )
+    result = MockInvoiceProvider().extract(data, config)
+    assert result.document_type == "invoice"
+    assert {field.name: field.value for field in result.fields} == {
+        "vendor": "Northwind Traders",
+        "invoice_number": "PO-9",
+        "invoice_date": "2026-09-26",
+        "due_date": "2026-10-26",
+        "subtotal": "$100.00",
+        "tax": "$23.45",
+        "total": "$123.45",
+        "currency": "USD",
+        "po_number": "PO-2026-014",
+    }
+    with pytest.raises(ExtractionError, match="No supported receipt fields"):
+        MockInvoiceProvider().extract(data, WorkflowConfigModel(document_types=[receipt]))
 
 
 def test_worker_exits_on_invalid_provider_configuration(
@@ -59,73 +144,82 @@ def test_worker_exits_on_invalid_provider_configuration(
         worker_main()
 
 
-def test_openrouter_provider_uses_schema_and_rejects_ungrounded_values() -> None:
+def openrouter_response(fields: list[dict[str, object]]) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json={
+            "choices": [{"message": {"content": json.dumps({"fields": fields})}}],
+            "usage": {"prompt_tokens": 321, "completion_tokens": 45},
+        },
+    )
+
+
+def test_openrouter_provider_uses_config_schema_and_drops_ungrounded_fields() -> None:
     def response(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         assert payload["model"] == "google/gemini-3.8-flash"
         assert payload["response_format"]["type"] == "json_schema"
         assert payload["provider"]["require_parameters"] is True
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": json.dumps(
-                                {
-                                    "fields": [
-                                        {
-                                            "name": "total",
-                                            "value": "$123.45",
-                                            "evidence": "Total: $123.45",
-                                            "page_number": 1,
-                                        }
-                                    ]
-                                }
-                            )
-                        }
-                    }
-                ]
-            },
+        schema = payload["response_format"]["json_schema"]["schema"]
+        item = schema["properties"]["fields"]["items"]
+        assert item["properties"]["name"]["enum"] == [
+            field.name for field in CONFIG.document_types[0].fields
+        ]
+        assert "confidence" in item["required"]
+        assert "Fields to extract" in payload["messages"][0]["content"]
+        assert "po_number: PO Number (identifier)" in payload["messages"][0]["content"]
+        return openrouter_response(
+            [
+                {
+                    "name": "total",
+                    "value": "$123.45",
+                    "evidence": "Total: $123.45",
+                    "page_number": 1,
+                    "confidence": 0.9,
+                },
+                {
+                    "name": "vendor",
+                    "value": "Acme",
+                    "evidence": "Vendor: Acme",
+                    "page_number": 1,
+                    "confidence": 0.9,
+                },
+            ]
         )
 
     with httpx.Client(transport=httpx.MockTransport(response)) as client:
         provider = OpenRouterInvoiceProvider("test-only-key", "google/gemini-3.8-flash", client)
-        assert provider.extract(SAMPLE.read_bytes())[0].value == "$123.45"
+        result = provider.extract(SAMPLE.read_bytes(), CONFIG)
+    assert [(field.name, field.value, field.self_confidence) for field in result.fields] == [
+        ("total", "$123.45", 0.9)
+    ]
+    assert result.notes == ["Dropped field 'vendor': evidence not found verbatim in the PDF"]
+    assert result.tokens_in == 321 and result.tokens_out == 45
+    assert result.prompt_version == "extraction-v2"
 
     def ungrounded(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "content": json.dumps(
-                                {
-                                    "fields": [
-                                        {
-                                            "name": "total",
-                                            "value": "$999.99",
-                                            "evidence": "Total: $999.99",
-                                            "page_number": 1,
-                                        }
-                                    ]
-                                }
-                            )
-                        }
-                    }
-                ]
-            },
+        return openrouter_response(
+            [
+                {
+                    "name": "total",
+                    "value": "$999.99",
+                    "evidence": "Total: $999.99",
+                    "page_number": 1,
+                    "confidence": 1,
+                }
+            ]
         )
 
     with httpx.Client(transport=httpx.MockTransport(ungrounded)) as client:
         provider = OpenRouterInvoiceProvider("test-only-key", "google/gemini-3.8-flash", client)
-        with pytest.raises(ExtractionError):
-            provider.extract(SAMPLE.read_bytes())
+        with pytest.raises(ExtractionError, match="no field with matching PDF evidence"):
+            provider.extract(SAMPLE.read_bytes(), CONFIG)
 
 
-@pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
-def test_upload_dedup_extraction_and_tenant_visibility(monkeypatch: pytest.MonkeyPatch) -> None:
+@postgres
+def test_upload_dedup_extraction_and_tenant_visibility(
+    monkeypatch: pytest.MonkeyPatch, demo_document_cleanup: None
+) -> None:
     monkeypatch.setattr("app.worker.get_provider", MockInvoiceProvider)
     store = MemoryStore()
     app.dependency_overrides[get_store] = lambda: store
@@ -133,24 +227,20 @@ def test_upload_dedup_extraction_and_tenant_visibility(monkeypatch: pytest.Monke
     data = SAMPLE.read_bytes().replace(b"NW-2026-001", invoice_number.encode("ascii"))
     try:
         with TestClient(app) as client:
-            login = client.post(
-                "/v1/auth/login",
-                json={
-                    "org_slug": "northwind",
-                    "email": "northwind@example.com",
-                    "password": os.environ["DEMO_PASSWORD"],
-                },
-            )
-            assert login.status_code == 200
-            org_id = uuid.UUID(login.json()["org_id"])
+            org_id = uuid.UUID(demo_login(client)["org_id"])
             with SessionLocal() as session:
                 set_org_context(session, org_id)
-                existing_count = session.scalar(
-                    select(func.count()).select_from(Document).where(Document.org_id == org_id)
-                ) or 0
+                existing_count = (
+                    session.scalar(
+                        select(func.count()).select_from(Document).where(Document.org_id == org_id)
+                    )
+                    or 0
+                )
             monkeypatch.setattr(
                 "app.document_service.get_settings",
-                lambda: SimpleNamespace(max_documents_per_org=existing_count + 1),
+                lambda: SimpleNamespace(
+                    max_documents_per_org=existing_count + 1, upload_parse_timeout_seconds=15
+                ),
             )
 
             invalid = client.post(
@@ -166,27 +256,21 @@ def test_upload_dedup_extraction_and_tenant_visibility(monkeypatch: pytest.Monke
             assert malformed.status_code == 400
             assert store.objects == {}
 
-            uploaded = client.post(
-                "/v1/documents", files={"file": ("invoice.pdf", data, "application/pdf")}
-            )
-            assert uploaded.status_code == 202, uploaded.text
-            assert uploaded.json()["status"] == "queued"
-            assert uploaded.json()["duplicate"] is False
-            document_id = uploaded.json()["id"]
+            uploaded = upload(client, "invoice.pdf", data)
+            assert uploaded["status"] == "queued"
+            assert uploaded["duplicate"] is False
+            assert uploaded["document_type"] == "invoice"
+            assert uploaded["flagged_count"] == 0
+            document_id = uploaded["id"]
             assert len(store.objects) == 1
 
-            duplicate = client.post(
-                "/v1/documents", files={"file": ("renamed.pdf", data, "application/pdf")}
-            )
-            assert duplicate.status_code == 202
-            assert duplicate.json()["id"] == document_id
-            assert duplicate.json()["duplicate"] is True
+            duplicate = upload(client, "renamed.pdf", data)
+            assert duplicate["id"] == document_id
+            assert duplicate["duplicate"] is True
 
-            another = SAMPLE.read_bytes().replace(
-                b"NW-2026-001", uuid.uuid4().hex[:11].upper().encode("ascii")
-            )
             at_limit = client.post(
-                "/v1/documents", files={"file": ("another.pdf", another, "application/pdf")}
+                "/v1/documents",
+                files={"file": ("another.pdf", unique_sample(), "application/pdf")},
             )
             assert at_limit.status_code == 409
             assert len(store.objects) == 1
@@ -194,49 +278,54 @@ def test_upload_dedup_extraction_and_tenant_visibility(monkeypatch: pytest.Monke
             assert process_one(store, uuid.UUID(document_id)) is True
             detail = client.get(f"/v1/documents/{document_id}")
             assert detail.status_code == 200
-            assert detail.json()["status"] == "needs_review"
-            fields = {field["name"]: field for field in detail.json()["fields"]}
+            body = detail.json()
+            assert body["status"] == "needs_review"
+            assert body["provider"] == "mock" and body["version"] == 0
+            fields = {field["name"]: field for field in body["fields"]}
             assert fields["invoice_number"]["value"] == invoice_number
+            assert fields["invoice_number"]["current_value"] == invoice_number
             assert fields["invoice_number"]["evidence"].endswith(invoice_number)
-            assert any(row["id"] == document_id for row in client.get("/v1/documents").json())
-
-            other_login = client.post(
-                "/v1/auth/login",
-                json={
-                    "org_slug": "contoso",
-                    "email": "contoso@example.com",
-                    "password": os.environ["DEMO_PASSWORD"],
-                },
+            assert fields["invoice_number"]["label"] == "Invoice Number"
+            assert fields["invoice_number"]["status"] == "auto"
+            assert fields["total"]["confidence"] == 1.0 and fields["total"]["threshold"] == 0.9
+            assert fields["total"]["signals"]["grounding"] == 1.0
+            assert fields["total"]["signals"]["model_agreement"] is None
+            assert fields["total"]["reasons"] == []
+            assert body["flagged_count"] == 0
+            assert body["review_task"]["overdue"] is False
+            assert body["review_task"]["sla_minutes"] == 240
+            assert body["review_task"]["outcome"] is None
+            assert [rule["passed"] for rule in body["rule_results"]] == [None, None]
+            listed = client.get("/v1/documents").json()
+            assert any(row["id"] == document_id and row["flagged_count"] == 0 for row in listed)
+            assert any(
+                row["document_id"] == document_id for row in client.get("/v1/review/queue").json()
             )
-            assert other_login.status_code == 200
+
+            demo_login(client, "contoso")
             assert client.get(f"/v1/documents/{document_id}").status_code == 404
+            assert client.get(f"/v1/documents/{document_id}/timeline").status_code == 404
             assert all(row["id"] != document_id for row in client.get("/v1/documents").json())
+            assert all(
+                row["document_id"] != document_id
+                for row in client.get("/v1/review/queue").json()
+            )
     finally:
         del app.dependency_overrides[get_store]
 
 
-@pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
-def test_worker_rejects_corrupted_stored_document(monkeypatch: pytest.MonkeyPatch) -> None:
+@postgres
+def test_worker_rejects_corrupted_stored_document(
+    monkeypatch: pytest.MonkeyPatch, demo_document_cleanup: None
+) -> None:
     monkeypatch.setattr("app.worker.get_provider", MockInvoiceProvider)
     store = MemoryStore()
     app.dependency_overrides[get_store] = lambda: store
-    data = SAMPLE.read_bytes().replace(b"NW-2026-001", uuid.uuid4().hex[:11].upper().encode())
+    data = unique_sample()
     try:
         with TestClient(app) as client:
-            login = client.post(
-                "/v1/auth/login",
-                json={
-                    "org_slug": "northwind",
-                    "email": "northwind@example.com",
-                    "password": os.environ["DEMO_PASSWORD"],
-                },
-            )
-            assert login.status_code == 200
-            uploaded = client.post(
-                "/v1/documents", files={"file": ("invoice.pdf", data, "application/pdf")}
-            )
-            assert uploaded.status_code == 202, uploaded.text
-            document_id = uuid.UUID(uploaded.json()["id"])
+            demo_login(client)
+            document_id = uuid.UUID(upload(client, "invoice.pdf", data)["id"])
             key = next(iter(store.objects))
             store.objects[key] = data[:-1] + b"X"
 
@@ -246,16 +335,26 @@ def test_worker_rejects_corrupted_stored_document(monkeypatch: pytest.MonkeyPatc
             assert detail.json()["status"] == "failed"
             assert detail.json()["failure_reason"] == "Stored document failed integrity check"
             assert detail.json()["fields"] == []
+            assert detail.json()["review_task"] is None
+            timeline = client.get(f"/v1/documents/{document_id}/timeline").json()
+            assert [entry["event_type"] for entry in timeline] == [
+                "document.received",
+                "document.queued",
+                "document.extracting",
+                "document.failed",
+            ]
+            assert timeline[-1]["detail"]["reason"] == "Stored document failed integrity check"
     finally:
         del app.dependency_overrides[get_store]
 
 
-@pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
+@postgres
 def test_worker_rotates_tenants_even_when_one_has_a_backlog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr("app.worker.get_provider", MockInvoiceProvider)
     monkeypatch.setattr("app.worker._last_org_id", None)
+    monkeypatch.setattr("app.worker.load_pinned_config", lambda org_id, version: CONFIG)
     store = MemoryStore()
     data = SAMPLE.read_bytes()
     store.put("fairness.pdf", data)
@@ -276,39 +375,27 @@ def test_worker_rotates_tenants_even_when_one_has_a_backlog(
             len(data),
             datetime.now(UTC),
             1,
+            1,
         )
 
     monkeypatch.setattr("app.worker.claim_next", claim_with_backlog)
-    monkeypatch.setattr("app.worker.complete", lambda claim, fields, provider: None)
+    monkeypatch.setattr("app.worker.complete", lambda claim, result, provider, config: None)
     assert process_one(store)
     assert process_one(store)
     assert claimed_orgs == org_ids[:2]
 
 
-@pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
+@postgres
 def test_worker_lease_lock_prevents_reclaim_during_completion(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, demo_document_cleanup: None
 ) -> None:
     store = MemoryStore()
     app.dependency_overrides[get_store] = lambda: store
-    data = SAMPLE.read_bytes().replace(b"NW-2026-001", uuid.uuid4().hex[:11].upper().encode())
+    data = unique_sample()
     try:
         with TestClient(app) as client:
-            login = client.post(
-                "/v1/auth/login",
-                json={
-                    "org_slug": "northwind",
-                    "email": "northwind@example.com",
-                    "password": os.environ["DEMO_PASSWORD"],
-                },
-            )
-            assert login.status_code == 200
-            org_id = uuid.UUID(login.json()["org_id"])
-            uploaded = client.post(
-                "/v1/documents", files={"file": ("invoice.pdf", data, "application/pdf")}
-            )
-            assert uploaded.status_code == 202, uploaded.text
-            document_id = uuid.UUID(uploaded.json()["id"])
+            org_id = uuid.UUID(demo_login(client)["org_id"])
+            document_id = uuid.UUID(upload(client, "invoice.pdf", data)["id"])
             claim = claim_next(org_id, document_id)
             assert claim is not None
 
@@ -341,9 +428,8 @@ def test_worker_lease_lock_prevents_reclaim_during_completion(
 
             def finish() -> None:
                 try:
-                    complete(
-                        stale_claim, MockInvoiceProvider().extract(data), MockInvoiceProvider()
-                    )
+                    provider = MockInvoiceProvider()
+                    complete(stale_claim, provider.extract(data, CONFIG), provider, CONFIG)
                 except Exception as exc:
                     errors.append(exc)
 
@@ -365,46 +451,31 @@ def test_worker_lease_lock_prevents_reclaim_during_completion(
                     select(ExtractionRun).where(ExtractionRun.document_id == document_id)
                 ).all()
                 assert len(runs) == 1
+                assert json.loads(runs[0].raw_json)["document_type"] == "invoice"
     finally:
         del app.dependency_overrides[get_store]
 
 
-@pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
+@postgres
 def test_failed_document_can_be_retried_without_reuploading(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, demo_document_cleanup: None
 ) -> None:
     monkeypatch.setattr("app.worker.get_provider", MockInvoiceProvider)
     store = MemoryStore()
     app.dependency_overrides[get_store] = lambda: store
-    data = SAMPLE.read_bytes().replace(b"NW-2026-001", uuid.uuid4().hex[:11].upper().encode())
+    data = unique_sample()
     try:
         with TestClient(app) as client:
-            login = client.post(
-                "/v1/auth/login",
-                json={
-                    "org_slug": "northwind",
-                    "email": "northwind@example.com",
-                    "password": os.environ["DEMO_PASSWORD"],
-                },
-            )
-            assert login.status_code == 200
-            org_id = uuid.UUID(login.json()["org_id"])
-            uploaded = client.post(
-                "/v1/documents", files={"file": ("retry.pdf", data, "application/pdf")}
-            )
-            assert uploaded.status_code == 202, uploaded.text
-            document_id = uuid.UUID(uploaded.json()["id"])
+            org_id = uuid.UUID(demo_login(client)["org_id"])
+            document_id = uuid.UUID(upload(client, "retry.pdf", data)["id"])
             claim = claim_next(org_id, document_id)
             assert claim is not None
             fail(claim, "Provider temporarily unavailable", retryable=False)
             assert client.get(f"/v1/documents/{document_id}").json()["status"] == "failed"
 
-            duplicate = client.post(
-                "/v1/documents", files={"file": ("retry.pdf", data, "application/pdf")}
-            )
-            assert duplicate.status_code == 202
-            assert duplicate.json()["duplicate"] is True
-            assert duplicate.json()["status"] == "failed"
+            duplicate = upload(client, "retry.pdf", data)
+            assert duplicate["duplicate"] is True
+            assert duplicate["status"] == "failed"
 
             retried = client.post(f"/v1/documents/{document_id}/retry")
             assert retried.status_code == 202
@@ -417,42 +488,21 @@ def test_failed_document_can_be_retried_without_reuploading(
             assert detail.json()["status"] == "needs_review"
             assert detail.json()["fields"]
 
-            other_login = client.post(
-                "/v1/auth/login",
-                json={
-                    "org_slug": "contoso",
-                    "email": "contoso@example.com",
-                    "password": os.environ["DEMO_PASSWORD"],
-                },
-            )
-            assert other_login.status_code == 200
+            demo_login(client, "contoso")
             assert client.post(f"/v1/documents/{document_id}/retry").status_code == 404
     finally:
         del app.dependency_overrides[get_store]
 
 
-@pytest.mark.skipif("DATABASE_OWNER_URL" not in os.environ, reason="Postgres integration test")
-def test_manual_retry_limit_blocks_third_request() -> None:
+@postgres
+def test_manual_retry_limit_blocks_third_request(demo_document_cleanup: None) -> None:
     store = MemoryStore()
     app.dependency_overrides[get_store] = lambda: store
-    data = SAMPLE.read_bytes().replace(b"NW-2026-001", uuid.uuid4().hex[:11].upper().encode())
+    data = unique_sample()
     try:
         with TestClient(app) as client:
-            login = client.post(
-                "/v1/auth/login",
-                json={
-                    "org_slug": "northwind",
-                    "email": "northwind@example.com",
-                    "password": os.environ["DEMO_PASSWORD"],
-                },
-            )
-            assert login.status_code == 200
-            org_id = uuid.UUID(login.json()["org_id"])
-            uploaded = client.post(
-                "/v1/documents", files={"file": ("retry-limit.pdf", data, "application/pdf")}
-            )
-            assert uploaded.status_code == 202, uploaded.text
-            document_id = uuid.UUID(uploaded.json()["id"])
+            org_id = uuid.UUID(demo_login(client)["org_id"])
+            document_id = uuid.UUID(upload(client, "retry-limit.pdf", data)["id"])
 
             for manual_retry in range(3):
                 claim = claim_next(org_id, document_id)
@@ -477,5 +527,194 @@ def test_manual_retry_limit_blocks_third_request() -> None:
                     .where(OutboxEvent.document_id == document_id)
                 )
                 assert event_count == 3
+    finally:
+        del app.dependency_overrides[get_store]
+
+
+def threshold_config() -> WorkflowConfigModel:
+    return default_invoice_config().model_copy(update={"review_policy": "threshold"})
+
+
+def audit_events(org_id: uuid.UUID, document_id: uuid.UUID) -> list[tuple[str, dict[str, Any]]]:
+    with SessionLocal() as session:
+        set_org_context(session, org_id)
+        rows = session.scalars(
+            select(AuditEvent)
+            .where(AuditEvent.org_id == org_id, AuditEvent.document_id == document_id)
+            .order_by(AuditEvent.created_at, AuditEvent.id)
+        )
+        return [(row.event_type, json.loads(row.detail_json)) for row in rows]
+
+
+@postgres
+def test_threshold_policy_auto_approves_clean_documents(
+    monkeypatch: pytest.MonkeyPatch, make_tenant: TenantFactory
+) -> None:
+    monkeypatch.setattr("app.worker.get_provider", MockInvoiceProvider)
+    tenant = make_tenant(threshold_config())
+    store = MemoryStore()
+    app.dependency_overrides[get_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            tenant_login(client, tenant, "member")
+            document_id = uuid.UUID(upload(client, "clean.pdf", invoice_pdf())["id"])
+            assert process_one(store, document_id) is True
+            body = client.get(f"/v1/documents/{document_id}").json()
+            assert body["status"] == "auto_approved"
+            assert body["flagged_count"] == 0 and body["review_task"] is None
+            assert all(field["status"] == "auto" for field in body["fields"])
+            events = [event for event, _ in audit_events(tenant.org_id, document_id)]
+            assert events == [
+                "document.received",
+                "document.queued",
+                "document.extracting",
+                "document.validating",
+                "document.auto_approved",
+            ]
+            assert client.get("/v1/review/queue").json() == []
+            listed = client.get("/v1/documents", params={"status": "auto_approved"}).json()
+            assert [row["id"] for row in listed] == [str(document_id)]
+
+            tenant_login(client, tenant, "reviewer")
+            workspace = client.get(f"/v1/documents/{document_id}/workspace").json()
+            assert workspace["capabilities"]["can_review"] is True
+            assert workspace["capabilities"]["can_edit"] is False
+            reopened = client.post(
+                f"/v1/documents/{document_id}/review", json={"version": 0, "decision": "reopen"}
+            )
+            assert reopened.status_code == 200, reopened.text
+            body = client.get(f"/v1/documents/{document_id}").json()
+            assert body["status"] == "needs_review"
+            assert body["review_task"]["outcome"] is None
+            assert body["review_task"]["completed_at"] is None
+            assert [row["document_id"] for row in client.get("/v1/review/queue").json()] == [
+                str(document_id)
+            ]
+    finally:
+        del app.dependency_overrides[get_store]
+
+
+@postgres
+def test_threshold_policy_flags_bad_fields_and_failed_rules(
+    monkeypatch: pytest.MonkeyPatch, make_tenant: TenantFactory
+) -> None:
+    monkeypatch.setattr("app.worker.get_provider", MockInvoiceProvider)
+    tenant = make_tenant(threshold_config())
+    store = MemoryStore()
+    app.dependency_overrides[get_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            tenant_login(client, tenant, "admin")
+            bad_date = uuid.UUID(
+                upload(
+                    client,
+                    "bad-date.pdf",
+                    invoice_pdf(invoice_number="TH-0002", invoice_date="2026-09-31"),
+                )["id"]
+            )
+            assert process_one(store, bad_date) is True
+            body = client.get(f"/v1/documents/{bad_date}").json()
+            assert body["status"] == "needs_review" and body["flagged_count"] == 1
+            date_field = next(field for field in body["fields"] if field["name"] == "invoice_date")
+            assert date_field["status"] == "needs_review"
+            assert date_field["signals"]["format"] == 0.0
+            assert "Value is not a valid date" in date_field["reasons"]
+            assert body["review_task"]["overdue"] is False
+            flagged_event = dict(audit_events(tenant.org_id, bad_date))["document.needs_review"]
+            assert flagged_event["flagged_fields"] == ["invoice_date"]
+            assert flagged_event["failed_rules"] == []
+
+            mismatch = uuid.UUID(
+                upload(
+                    client,
+                    "mismatch.pdf",
+                    invoice_pdf(
+                        invoice_number="TH-0003",
+                        total="$120.00",
+                        extra_lines={"Subtotal": "$100.00", "Tax": "$10.00"},
+                    ),
+                )["id"]
+            )
+            assert process_one(store, mismatch) is True
+            body = client.get(f"/v1/documents/{mismatch}").json()
+            assert body["status"] == "needs_review"
+            rules = {rule["name"]: rule for rule in body["rule_results"]}
+            assert rules["totals_add_up"]["passed"] is False
+            assert rules["totals_add_up"]["message"] == "Subtotal plus tax must equal total"
+            assert rules["due_after_issue"]["passed"] is None
+            flagged = {f["name"] for f in body["fields"] if f["status"] == "needs_review"}
+            assert flagged == {"subtotal", "tax", "total"}
+            assert body["flagged_count"] == 3
+            flagged_event = dict(audit_events(tenant.org_id, mismatch))["document.needs_review"]
+            assert flagged_event["failed_rules"] == ["totals_add_up"]
+            queue = client.get("/v1/review/queue").json()
+            assert [row["flagged_count"] for row in queue] == [1, 3]
+    finally:
+        del app.dependency_overrides[get_store]
+
+
+@postgres
+def test_worker_fails_documents_whose_extraction_times_out(
+    monkeypatch: pytest.MonkeyPatch, make_tenant: TenantFactory
+) -> None:
+    class SlowProvider(MockInvoiceProvider):
+        def extract(self, data: bytes, config: WorkflowConfigModel) -> ExtractionResult:
+            time.sleep(2)
+            return super().extract(data, config)
+
+    monkeypatch.setattr("app.worker.get_provider", SlowProvider)
+    monkeypatch.setattr(
+        "app.worker.get_settings", lambda: SimpleNamespace(extraction_timeout_seconds=0.2)
+    )
+    tenant = make_tenant()
+    store = MemoryStore()
+    app.dependency_overrides[get_store] = lambda: store
+    try:
+        with TestClient(app) as client:
+            tenant_login(client, tenant, "member")
+            document_id = uuid.UUID(upload(client, "slow.pdf", invoice_pdf())["id"])
+            started = time.monotonic()
+            assert process_one(store, document_id) is True
+            assert time.monotonic() - started < 1.5
+            body = client.get(f"/v1/documents/{document_id}").json()
+            assert body["status"] == "failed"
+            assert body["failure_reason"] == "Extraction timed out"
+            assert client.post(f"/v1/documents/{document_id}/retry").status_code == 202
+    finally:
+        del app.dependency_overrides[get_store]
+
+
+@postgres
+def test_concurrent_identical_uploads_create_one_document(make_tenant: TenantFactory) -> None:
+    tenant = make_tenant()
+    store = MemoryStore()
+    app.dependency_overrides[get_store] = lambda: store
+    data = invoice_pdf(invoice_number=f"RACE-{uuid.uuid4().hex[:8]}")
+    barrier = threading.Barrier(2)
+
+    def race() -> dict[str, Any]:
+        with TestClient(app) as client:
+            tenant_login(client, tenant, "member")
+            barrier.wait(timeout=5)
+            return upload(client, "race.pdf", data)
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(race) for _ in range(2)]
+            results = [future.result(timeout=20) for future in futures]
+        assert sorted(result["duplicate"] for result in results) == [False, True]
+        assert len({result["id"] for result in results}) == 1
+        with SessionLocal() as session:
+            set_org_context(session, tenant.org_id)
+            count = session.scalar(
+                select(func.count())
+                .select_from(Document)
+                .where(
+                    Document.org_id == tenant.org_id,
+                    Document.content_hash == hashlib.sha256(data).hexdigest(),
+                )
+            )
+            assert count == 1
+        assert len(store.objects) == 1
     finally:
         del app.dependency_overrides[get_store]

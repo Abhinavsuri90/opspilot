@@ -28,6 +28,9 @@ dev = ["mypy>=1.14,<2", "pytest>=8.3,<9", "ruff>=0.9,<1"]
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+[tool.setuptools.package-data]
+app = ["prompts/*.md"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

@@ -16,6 +16,8 @@ COPY scripts/__init__.py scripts/seed.py /workspace/scripts/
 
 WORKDIR /workspace/apps/api
 EXPOSE 8000
+# Forwarded client addresses are resolved in app/client_ip.py, which only trusts
+# X-Forwarded-For from private-network peers and uses the edge-appended entry.
 CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
 
 FROM base AS development

@@ -1,7 +1,20 @@
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Numeric,
+    String,
+    Text,
+    UniqueConstraint,
+    false,
+    func,
+)
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -12,6 +25,14 @@ class Base(DeclarativeBase):
 
 class Organization(Base):
     __tablename__ = "organizations"
+    # Migration 0004 uses a Postgres regex; this portable form lets SQLite fixtures
+    # enforce the same three uppercase letters.
+    __table_args__ = (
+        CheckConstraint(
+            "default_currency = upper(default_currency) AND length(default_currency) = 3",
+            name="ck_organizations_currency",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     slug: Mapped[str] = mapped_column(String(80), unique=True)
@@ -44,6 +65,17 @@ class Membership(Base):
     __tablename__ = "memberships"
     __table_args__ = (
         UniqueConstraint("org_id", "user_id", name="uq_membership_org_user"),
+        CheckConstraint(
+            "status IN ('pending', 'active', 'rejected', 'suspended')",
+            name="ck_memberships_status",
+        ),
+        CheckConstraint(
+            "role IN ('admin', 'reviewer', 'member', 'viewer')", name="ck_memberships_role"
+        ),
+        CheckConstraint(
+            "requested_role IS NULL OR requested_role IN ('admin', 'reviewer', 'member', 'viewer')",
+            name="ck_memberships_requested_role",
+        ),
         Index("ix_memberships_org_role", "org_id", "role"),
         Index("ix_memberships_org_status", "org_id", "status"),
     )
@@ -72,11 +104,17 @@ class WorkflowConfig(Base):
 
 class AuditEvent(Base):
     __tablename__ = "audit_events"
-    __table_args__ = (Index("ix_audit_events_org_created", "org_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_audit_events_org_created", "org_id", "created_at"),
+        Index("ix_audit_events_document", "org_id", "document_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"))
+    # Set for every event about a document; there is deliberately no foreign key so
+    # the audit trail outlives the document row.
+    document_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
     detail_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -88,6 +126,7 @@ class Document(Base):
         UniqueConstraint("org_id", "id", name="uq_documents_org_id"),
         UniqueConstraint("org_id", "content_hash", name="uq_documents_org_hash"),
         Index("ix_documents_org_status_created", "org_id", "status", "created_at"),
+        Index("ix_documents_org_created", "org_id", "created_at", "id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -101,12 +140,20 @@ class Document(Base):
     workflow_config_version: Mapped[int] = mapped_column(nullable=False)
     status: Mapped[str] = mapped_column(String(30), nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(String(200))
+    document_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="invoice", server_default="invoice"
+    )
+    # Reserved for distributed tracing of the extraction pipeline.
+    trace_id: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class ExtractionRun(Base):
     __tablename__ = "extraction_runs"
+    __table_args__ = (
+        Index("ix_extraction_runs_document", "org_id", "document_id", "created_at"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
@@ -119,8 +166,13 @@ class ExtractionRun(Base):
 
 
 class ExtractedField(Base):
+    """Immutable extraction evidence; reviewer changes live in field_corrections."""
+
     __tablename__ = "extracted_fields"
-    __table_args__ = (Index("ix_extracted_fields_document", "org_id", "document_id"),)
+    __table_args__ = (
+        Index("ix_extracted_fields_document", "org_id", "document_id"),
+        CheckConstraint("status IN ('auto', 'needs_review')", name="ck_extracted_fields_status"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)
@@ -132,11 +184,35 @@ class ExtractedField(Base):
     value: Mapped[str] = mapped_column(Text, nullable=False)
     evidence: Mapped[str] = mapped_column(Text, nullable=False)
     page_number: Mapped[int] = mapped_column(nullable=False)
+    field_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="text", server_default="text"
+    )
+    required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
+    )
+    confidence: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4), nullable=False, default=Decimal("1.0"), server_default="1.0"
+    )
+    threshold: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4), nullable=False, default=Decimal("0.8"), server_default="0.8"
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="auto", server_default="auto"
+    )
+    signals_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="{}", server_default="{}"
+    )
+    reasons_json: Mapped[str] = mapped_column(
+        Text, nullable=False, default="[]", server_default="[]"
+    )
 
 
 class OutboxEvent(Base):
     __tablename__ = "outbox_events"
-    __table_args__ = (Index("ix_outbox_org_available", "org_id", "published_at", "available_at"),)
+    __table_args__ = (
+        Index("ix_outbox_org_available", "org_id", "published_at", "available_at"),
+        Index("ix_outbox_document", "org_id", "document_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("organizations.id"), nullable=False)

@@ -14,6 +14,9 @@ Built with Next.js, React, TanStack Query, FastAPI, Postgres row-level security 
 - Organization registration and company selection at login/join; admin approval for joining members/reviewers.
 - Admin-managed invoice categories and membership approval, role selection, rejection and suspension.
 - PDF upload, tenant-specific deduplication, background extraction, source evidence and retry.
+- Per-field confidence from six signals (grounding, format, cross-field rules, self-report, with router and memory slots reserved), configurable thresholds, and plain-language reasons for every flagged field.
+- Versioned per-organization workflow configuration: document types, typed fields and cross-field rules in a safe rule grammar; new organizations default to reviewing every document.
+- Field-level accept and edit as append-only corrections, review tasks with an SLA, a filterable review queue and a per-document timeline.
 - Full PDF viewing with page navigation, zoom, selectable page text and download; reviewer assignment, verified amount/currency and approve/reject/reopen.
 - Invoice comments, decision history and authenticated sharing with restricted visibility.
 - Dashboard, review queue, category filters, paginated inbox and Insights.
@@ -59,7 +62,7 @@ There are **eight pages**: three public entry pages and five workspace pages. Th
 | `/login` | Public | Select organization and sign in; pending accounts get an explanation |
 | `/dashboard` | Approved account | Counts across all accessible invoices and recent activity |
 | `/inbox` | Approved account | Upload, search, filter categories/status, paginate, inspect PDF/evidence, review, comment and manage access |
-| `/review` | Approved account | Paginated queue of accessible invoices awaiting a decision; actions depend on role and assignment |
+| `/review` | Approved account | Filterable queue of invoices awaiting a decision with SLA and flagged-field counts; `/review/[id]` is the keyboard-first split view for corrections and decisions |
 | `/insights` | Approved account | Verified currency totals, category distribution and bounded invoice questions |
 | `/admin` | Organization admin | Membership and category management |
 
@@ -69,7 +72,7 @@ Admins can manage the organization. Reviewers can verify and decide eligible inv
 
 ## Extraction providers
 
-`rules` is the default offline provider. It reads explicitly labeled `Vendor:`, `Invoice Number:`, `Invoice Date:` and `Total:` text. It is a limited parser, not general AI or OCR.
+`rules` is the default offline provider. It reads explicitly labeled lines for every field configured for the document type (for the default invoice: `Vendor:`, `Invoice Number:`, `Invoice Date:`, `Due Date:`, `Subtotal:`, `Tax:`, `Total:`, `Currency:`, `PO Number:`). It is a limited parser, not general AI or OCR.
 
 For varied text invoices, configure OpenRouter in your ignored `.env` or Render secrets:
 
@@ -128,7 +131,7 @@ flowchart LR
 
 - [System design](SYSTEM_DESIGN.md): implemented architecture, data model, permissions, concurrency, recovery, latency targets and capacity calculations.
 - [Deployment](docs/deployment.md): Oracle VM with private API/worker/Postgres and OCI PDF storage; paid Render alternative.
-- [Architecture decisions](docs/adr/): tenant isolation, local storage, outbox and shared throttling.
+- [Architecture decisions](docs/adr/): tenant isolation, local storage, outbox, shared throttling, free-VM deployment and confidence scoring.
 - [Product roadmap](SPEC.md): original broader vision; not a claim that all roadmap features exist.
 
 All eight pages deploy as one Next.js service. On Oracle, `infra/oracle/compose.yaml` adds Caddy HTTPS, separate private API/worker containers and persistent PostgreSQL. The browser uses the web service's same-origin API proxy; the API has no public port. The [deployment guide](docs/deployment.md) covers signup, free resource limits, private storage, migrations, backups and hosted checks. Oracle availability and hosted behavior remain to be verified. The existing Render Blueprint uses paid plans.

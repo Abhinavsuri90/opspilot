@@ -31,7 +31,11 @@ seed: setup
 	docker compose run --rm admin python /workspace/scripts/seed.py
 
 test: setup web-deps
-	docker compose run --rm admin pytest -q
+	# The background worker shares the database and would claim documents the
+	# tests queue; pause it so the test process owns the outbox, then restore it.
+	docker compose stop worker
+	docker compose run --rm admin pytest -q -p no:cacheprovider || (docker compose up -d worker; exit 1)
+	docker compose up -d worker
 	cd apps/web && npm test
 
 lint: setup web-deps
