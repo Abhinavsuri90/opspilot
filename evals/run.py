@@ -28,6 +28,16 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+from scripts.generate_synthetic import (
+    DEFAULT_COUNT,
+    DEFAULT_SEED,
+    generate_dataset,
+    write_dataset,
+)
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
+
 from app import memory
 from app.config import get_settings
 from app.llm.client import CallOutcome
@@ -42,16 +52,6 @@ from app.llm.provider import (
 from app.llm.router import Assessment, ModelRouter
 from app.models import Base
 from app.workflow_config import template_config
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
-from sqlalchemy.pool import StaticPool
-
-from scripts.generate_synthetic import (
-    DEFAULT_COUNT,
-    DEFAULT_SEED,
-    generate_dataset,
-    write_dataset,
-)
 
 DATASETS = Path(__file__).with_name("datasets")
 GENERATED = DATASETS / "generated"

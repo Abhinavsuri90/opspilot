@@ -11,6 +11,10 @@ import os
 import uuid
 from datetime import UTC, datetime
 
+from pydantic import ValidationError
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
 from app.action_models import ConnectorInstance, OrgSettings
 from app.db import normalize_database_url
 from app.models import Membership, Organization, User, WorkflowConfig
@@ -21,9 +25,6 @@ from app.workflow_config import (
     default_invoice_config,
     template_config,
 )
-from pydantic import ValidationError
-from sqlalchemy import create_engine, select
-from sqlalchemy.orm import Session
 
 DEMO_ORGS = [
     ("northwind", "Northwind Traders", "northwind@example.com", "admin", "invoice"),
@@ -52,9 +53,7 @@ def earlier_demo_shapes(slug: str, template: str) -> list[dict[str, object]]:
             {
                 **wanted.model_dump(),
                 "document_types": [
-                    item.model_dump()
-                    for item in wanted.document_types
-                    if item.name != "invoice"
+                    item.model_dump() for item in wanted.document_types if item.name != "invoice"
                 ],
             }
         )
