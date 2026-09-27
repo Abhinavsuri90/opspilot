@@ -70,8 +70,8 @@ try {
   assert.equal(registered.role, "admin");
   await admin.waitForURL(`${baseURL}/dashboard`);
   await admin.getByRole("heading", { name: "Dashboard", exact: true }).waitFor();
-  await admin.getByRole("region", { name: "Document summary" }).getByText("Auto-approved", { exact: true }).waitFor();
-  console.log("Fresh organization registered; dashboard shows the auto-approved tile");
+  await admin.getByRole("region", { name: "Key performance indicators" }).getByRole("group", { name: "Auto-approve rate" }).waitFor();
+  console.log("Fresh organization registered; dashboard shows the auto-approve rate tile");
 
   await admin.getByRole("link", { name: "Inbox", exact: true }).click();
   const pdf = Buffer.from(await readFile(new URL("../../../examples/multipage-invoice.pdf", import.meta.url)));
@@ -82,8 +82,8 @@ try {
   const invoiceNumber = `RV-${randomBytes(4).toString("hex").toUpperCase()}`;
   assert.equal(invoiceNumber.length, originalNumber.length);
   pdf.write(invoiceNumber, position, "ascii");
-  await admin.getByLabel("Invoice PDF").setInputFiles({ name: filename, mimeType: "application/pdf", buffer: pdf });
-  const uploaded = await submitted(admin, "/v1/documents", () => admin.getByRole("button", { name: "Upload invoice" }).click(), 202);
+  await admin.getByLabel("Document PDFs").setInputFiles({ name: filename, mimeType: "application/pdf", buffer: pdf });
+  const uploaded = await submitted(admin, "/v1/documents", () => admin.getByRole("button", { name: /^Upload \d+ document/ }).click(), 202);
   const documentId = uploaded.id;
   const detailPane = admin.getByRole("region", { name: "Extraction result" });
   await detailPane.getByText(invoiceNumber, { exact: true }).waitFor({ timeout: 60000 });

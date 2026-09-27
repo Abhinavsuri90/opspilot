@@ -1,5 +1,14 @@
 import { z } from "zod";
 
+export const ORGANIZATION_TEMPLATES = ["invoice", "logistics"] as const;
+export type OrganizationTemplate = (typeof ORGANIZATION_TEMPLATES)[number];
+
+/** The starting workflow an organization is created with; the API stores the matching configuration as version 1. */
+export const templateOptions: { value: OrganizationTemplate; label: string; description: string }[] = [
+  { value: "invoice", label: "Invoices", description: "Vendor invoices: vendor, invoice number, dates, totals and currency, with arithmetic checks." },
+  { value: "logistics", label: "Logistics: purchase orders and delivery notes", description: "Purchase orders and delivery notes: buyer, supplier, PO and delivery note numbers, dates, packages and totals." },
+];
+
 export const SLUG_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$/;
 export const PASSWORD_MESSAGE = "Use a password with 12–128 characters, including a letter and a number.";
 
@@ -19,6 +28,7 @@ export const registrationSchema = z.discriminatedUnion("mode", [
     org_name: z.string().trim().min(2, "Enter an organization name with at least 2 characters."),
     org_slug: orgSlug,
     default_currency: z.string().trim().toUpperCase().length(3, "Choose a default currency."),
+    template: z.enum(ORGANIZATION_TEMPLATES, { message: "Choose the documents your workspace starts with." }).default("invoice"),
     email,
     password,
     confirmation,

@@ -36,11 +36,11 @@ try {
   async function uploadFixture(filename, invoiceNumber) {
     await page.goto(`${baseURL}/inbox`);
     const path = fileURLToPath(new URL(`../../../examples/demo/${filename}`, import.meta.url));
-    await page.getByLabel("Invoice PDF").setInputFiles(path);
+    await page.getByLabel("Document PDFs").setInputFiles(path);
     const uploaded = page.waitForResponse(response =>
       new URL(response.url()).pathname === "/api/v1/documents" && response.request().method() === "POST",
     );
-    await page.getByRole("button", { name: "Upload invoice" }).click();
+    await page.getByRole("button", { name: /^Upload \d+ document/ }).click();
     const response = await uploaded;
     if (response.status() !== 202) throw new Error(`${filename} upload returned ${response.status()}`);
     const payload = await response.json();

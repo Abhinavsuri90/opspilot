@@ -7,7 +7,7 @@ describe("PDF selection", () => {
   });
 
   it("rejects wrong extensions and empty or oversized files", () => {
-    expect(validatePdfSelection({ name: "invoice.txt", size: 1024 })).toBe("Choose a PDF invoice.");
+    expect(validatePdfSelection({ name: "invoice.txt", size: 1024 })).toBe("Choose a PDF document.");
     expect(validatePdfSelection({ name: "invoice.pdf", size: 0 })).toContain("between 1 byte");
     expect(validatePdfSelection({ name: "invoice.pdf", size: 10 * 1024 * 1024 + 1 })).toContain("10 MB");
   });

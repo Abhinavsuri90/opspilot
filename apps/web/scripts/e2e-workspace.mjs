@@ -135,8 +135,8 @@ try {
   const invoiceNumber = `WS-${randomBytes(4).toString("hex").toUpperCase()}`;
   assert.equal(invoiceNumber.length, originalNumber.length);
   pdf.write(invoiceNumber, position, "ascii");
-  await admin.getByLabel("Invoice PDF").setInputFiles({ name: `workspace-${suffix}.pdf`, mimeType: "application/pdf", buffer: pdf });
-  const document = await submitted(admin, "/v1/documents", () => admin.getByRole("button", { name: "Upload invoice" }).click(), 202);
+  await admin.getByLabel("Document PDFs").setInputFiles({ name: `workspace-${suffix}.pdf`, mimeType: "application/pdf", buffer: pdf });
+  const document = await submitted(admin, "/v1/documents", () => admin.getByRole("button", { name: /^Upload \d+ document/ }).click(), 202);
   const detail = admin.getByRole("region", { name: "Extraction result" });
   await detail.getByText(invoiceNumber, { exact: true }).waitFor({ timeout: 60000 });
   const documentId = document.id;

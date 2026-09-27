@@ -46,12 +46,12 @@ try {
   const invoiceNumber = `NW-${randomBytes(4).toString("hex").toUpperCase()}`;
   const uniqueSample = Buffer.from(sample);
   uniqueSample.write(invoiceNumber, position, "ascii");
-  await page.getByLabel("Invoice PDF").setInputFiles({
+  await page.getByLabel("Document PDFs").setInputFiles({
     name: "northwind-invoice.pdf",
     mimeType: "application/pdf",
     buffer: uniqueSample,
   });
-  await page.getByRole("button", { name: "Upload invoice" }).click();
+  await page.getByRole("button", { name: /^Upload \d+ document/ }).click();
   await page.getByRole("region", { name: "Extraction result" })
     .getByText(invoiceNumber, { exact: true }).waitFor({ timeout: 30000 });
   if (process.env.E2E_INBOX_SCREENSHOT) {

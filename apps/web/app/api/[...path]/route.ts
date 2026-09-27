@@ -3,8 +3,10 @@ import type { NextRequest } from "next/server";
 type RouteContext = { params: Promise<{ path: string[] }> };
 // Allow multipart framing around the API's 10 MB file limit.
 const MAX_REQUEST_BYTES = 11 * 1024 * 1024;
-// Only these request headers reach the API; everything else stops here.
-const FORWARDED_REQUEST_HEADERS = ["accept", "content-type", "cookie", "origin", "sec-fetch-site", "x-request-id"];
+// Only these request headers reach the API; everything else stops here. The
+// Authorization header carries an organization API key for integrations that
+// upload through the same origin as the app.
+const FORWARDED_REQUEST_HEADERS = ["accept", "authorization", "content-type", "cookie", "origin", "sec-fetch-site", "x-request-id"];
 // Only these response headers reach the browser. Content-Encoding is deliberately
 // absent: fetch already decoded the body, so forwarding it would corrupt the response.
 const FORWARDED_RESPONSE_HEADERS = ["content-type", "x-request-id", "content-disposition", "x-content-type-options", "content-security-policy", "server-timing", "retry-after"];

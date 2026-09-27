@@ -17,7 +17,8 @@
     "gen-client": "node scripts/gen-client.mjs",
     "test:e2e:workspace": "node scripts/e2e-workspace.mjs",
     "test:e2e:review": "node scripts/e2e-review.mjs",
-    "test:e2e:actions": "node scripts/e2e-actions.mjs"
+    "test:e2e:actions": "node scripts/e2e-actions.mjs",
+    "test:e2e:intake": "node scripts/e2e-intake.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.85.0",
@@ -26,6 +27,7 @@
     "pdfjs-dist": "6.3.289",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "recharts": "^3.10.1",
     "zod": "^4.1.0"
   },
   "devDependencies": {

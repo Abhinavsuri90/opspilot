@@ -24,6 +24,12 @@ describe("registration validation", () => {
     });
   });
 
+  it("defaults the workflow template to invoices and accepts logistics", () => {
+    expect(registrationSchema.parse(create)).toMatchObject({ template: "invoice" });
+    expect(registrationSchema.parse({ ...create, template: "logistics" })).toMatchObject({ template: "logistics" });
+    expect(firstMessage({ ...create, template: "shipping" })).toBe("Choose the documents your workspace starts with.");
+  });
+
   it("reports the organization name before anything else", () => {
     expect(firstMessage({ ...create, org_name: "A", org_slug: "!!", password: "short" })).toBe("Enter an organization name with at least 2 characters.");
   });

@@ -8,6 +8,7 @@ import { AppShell } from "@/components/AppShell";
 import { SessionFallback } from "@/components/SessionFallback";
 import { SlaChip } from "@/components/review/SlaChip";
 import { api } from "@/lib/api";
+import { documentTypeLabel } from "@/lib/document-types";
 import { isUnauthorizedError, unauthorizedError } from "@/lib/errors";
 import { formatDateTime } from "@/lib/format";
 import { AGE_OPTIONS, buildQueueQuery, DEFAULT_QUEUE_FILTERS, formatQueueTotal, QUEUE_PAGE_SIZE, queueFiltersActive, type QueueAge, type QueueAssigned, type QueueFilters } from "@/lib/review-queue";
@@ -98,7 +99,7 @@ export default function ReviewQueuePage() {
         <label className="text-xs font-semibold text-slate-700">Document type
           <select className="field mt-1 text-sm" value={filters.documentType} onChange={event => update({ documentType: event.target.value })}>
             <option value="">All types</option>
-            {typeOptions.map(type => <option key={type} value={type}>{type.replaceAll("_", " ")}</option>)}
+            {typeOptions.map(type => <option key={type} value={type}>{documentTypeLabel(type)}</option>)}
           </select>
         </label>
         <label className="text-xs font-semibold text-slate-700">Vendor
@@ -131,7 +132,7 @@ export default function ReviewQueuePage() {
         <div aria-hidden="true" className={`hidden gap-4 border-y border-slate-100 bg-slate-50 px-5 py-2 text-[11px] font-bold uppercase tracking-wide text-slate-500 lg:grid ${columns}`}><span>File</span><span>Vendor</span><span>Total</span><span>Flagged</span><span>SLA</span><span>Assignee</span><span>Opened</span></div>
         <ul aria-label="Invoices awaiting review" className="divide-y divide-slate-100">
         {rows.map(item => <li key={item.document_id}><Link href={`/review/${encodeURIComponent(item.document_id)}`} aria-label={`Review ${item.filename}`} className={`grid grid-cols-2 gap-x-4 gap-y-3 px-5 py-4 text-sm transition-colors hover:bg-cyan-50/50 focus-visible:bg-cyan-50/50 lg:items-center lg:gap-4 ${columns}`}>
-          <Cell label="File" className="col-span-2 lg:col-span-1"><span className="block break-all font-bold text-slate-900">{item.filename}</span><span className="block text-xs capitalize text-slate-500">{item.document_type.replaceAll("_", " ")}</span></Cell>
+          <Cell label="File" className="col-span-2 lg:col-span-1"><span className="block break-all font-bold text-slate-900">{item.filename}</span><span className="block text-xs text-slate-500">{documentTypeLabel(item.document_type)}</span></Cell>
           <Cell label="Vendor"><span className="block truncate text-slate-800">{item.vendor ?? <span className="text-slate-400">Unknown</span>}</span></Cell>
           <Cell label="Total"><span className="tabular-nums text-slate-800">{formatQueueTotal(item.total, item.currency)}</span></Cell>
           <Cell label="Flagged"><span className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-bold ${item.flagged_count > 0 ? "border-amber-300 bg-amber-50 text-amber-900" : "border-emerald-200 bg-emerald-50 text-emerald-800"}`}>{item.flagged_count} flagged</span></Cell>

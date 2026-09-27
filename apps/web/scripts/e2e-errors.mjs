@@ -129,30 +129,30 @@ try {
   await page.getByRole("alert").getByRole("button", { name: "Try again" }).click();
   await page.getByText("No documents yet.", { exact: false }).waitFor();
 
-  await page.getByLabel("Invoice PDF").setInputFiles({
+  await page.getByLabel("Document PDFs").setInputFiles({
     name: "invoice.txt", mimeType: "text/plain", buffer: Buffer.from("not a PDF"),
   });
-  await page.getByRole("button", { name: "Upload invoice" }).click();
-  await page.getByRole("alert").getByText("Choose a PDF invoice.").waitFor();
+  await page.getByRole("button", { name: /^Upload \d+ document/ }).click();
+  await page.getByRole("alert").getByText("Choose a PDF document.").waitFor();
 
-  await page.getByLabel("Invoice PDF").setInputFiles({
+  await page.getByLabel("Document PDFs").setInputFiles({
     name: "invoice.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4 sample"),
   });
   for (const [status, message] of [
-    [403, "Your account cannot upload invoices."],
-    [409, "This workspace cannot accept another invoice."],
+    [403, "Your account cannot upload documents."],
+    [409, "This workspace cannot accept another document."],
     [400, "The PDF could not be accepted."],
     [413, "The PDF could not be accepted."],
     [503, "The upload service is temporarily unavailable."],
   ]) {
     uploadStatus = status;
-    await page.getByRole("button", { name: "Upload invoice" }).click();
+    await page.getByRole("button", { name: /^Upload \d+ document/ }).click();
     await page.getByRole("alert").getByText(message, { exact: false }).waitFor();
   }
 
   uploadStatus = 202;
-  await page.getByRole("button", { name: "Upload invoice" }).click();
-  await page.getByRole("status").getByText(/Invoice uploaded/).waitFor();
+  await page.getByRole("button", { name: /^Upload \d+ document/ }).click();
+  await page.getByRole("status").getByText(/1 document uploaded/).waitFor();
   await page.getByRole("region", { name: "Extraction result" })
     .getByRole("alert").getByText(/Could not load this document/).waitFor();
 
@@ -196,7 +196,7 @@ try {
 
   sessionRole = "viewer";
   await page.reload();
-  await page.getByText("Your workspace role can view invoices but cannot upload them.").waitFor();
+  await page.getByText("Your workspace role can view documents but cannot upload them.").waitFor();
   if (await page.getByRole("button", { name: "Retry extraction" }).count()) {
     throw new Error("Viewer saw a retry action");
   }

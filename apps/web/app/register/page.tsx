@@ -7,7 +7,7 @@ import { Suspense, useEffect, useState, type FormEvent } from "react";
 import { PublicBrand } from "@/components/PublicBrand";
 import { api } from "@/lib/api";
 import { apiErrorMessage } from "@/lib/errors";
-import { firstIssueMessage, registrationSchema, type Registration } from "@/lib/register";
+import { firstIssueMessage, registrationSchema, templateOptions, type OrganizationTemplate, type Registration } from "@/lib/register";
 import type { Session } from "@/lib/use-workspace";
 
 type Mode = "create" | "join";
@@ -42,6 +42,7 @@ function RegistrationForm({ initialMode, initialRole }: { initialMode: Mode; ini
   const [password, setPassword] = useState("");
   const [confirmation, setConfirmation] = useState("");
   const [currency, setCurrency] = useState("USD");
+  const [template, setTemplate] = useState<OrganizationTemplate>("invoice");
   const [role, setRole] = useState<RequestedRole>(initialRole);
   const [showPassword, setShowPassword] = useState(false);
   const [validationError, setValidationError] = useState("");
@@ -69,7 +70,7 @@ function RegistrationForm({ initialMode, initialRole }: { initialMode: Mode; ini
       const identity = { org_slug: values.org_slug, email: values.email, password: values.password };
       if (values.mode === "create") {
         const result = await api.POST("/v1/auth/register-organization", {
-          body: { ...identity, org_name: values.org_name, default_currency: values.default_currency, template: "invoice" },
+          body: { ...identity, org_name: values.org_name, default_currency: values.default_currency, template: values.template },
         });
         if (result.error || !result.data) throw new Error(apiErrorMessage(result.error, result.response.status, "Could not create the organization. Please try again."));
         return { mode: "create", session: result.data };
@@ -108,7 +109,7 @@ function RegistrationForm({ initialMode, initialRole }: { initialMode: Mode; ini
     registration.reset();
     setValidationError("");
     const parsed = registrationSchema.safeParse(mode === "create"
-      ? { mode, org_name: orgName, org_slug: orgSlug, default_currency: currency, email, password, confirmation }
+      ? { mode, org_name: orgName, org_slug: orgSlug, default_currency: currency, template, email, password, confirmation }
       : { mode, org_slug: orgSlug, requested_role: role, email, password, confirmation });
     if (!parsed.success) {
       setValidationError(firstIssueMessage(parsed.error));
@@ -123,10 +124,10 @@ function RegistrationForm({ initialMode, initialRole }: { initialMode: Mode; ini
       <PublicBrand light className="relative" />
       <div className="relative mt-8 max-w-lg lg:my-16">
         <p className="text-[11px] font-bold uppercase tracking-[.2em] text-[#d3e8b8]">A workspace that belongs to your team</p>
-        <h1 className="mt-4 text-3xl font-bold leading-tight tracking-[-.04em] lg:text-5xl">Clear invoices.<br />Clear ownership.</h1>
+        <h1 className="mt-4 text-3xl font-bold leading-tight tracking-[-.04em] lg:text-5xl">Clear documents.<br />Clear ownership.</h1>
         <p className="mt-5 text-sm leading-7 text-[#c4d5ce] sm:text-base">Start an organization or request access to your team&apos;s workspace. Every invoice, comment, and review stays within the right organization.</p>
         <ol className="mt-9 hidden space-y-6 lg:block">
-          {[['01', 'Set up your workspace', 'Choose a name, workspace ID, and reporting currency.'], ['02', 'Bring your people in', 'Your admin approves access and assigns each person a role.'], ['03', 'Work through invoices together', 'Upload, categorize, discuss, and review with a clear record.']].map(([number, title, description]) => <li key={number} className="flex gap-4"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-[#d3e8b8]/20 bg-[#d3e8b8]/10 text-xs font-bold text-[#d3e8b8]">{number}</span><div><p className="font-semibold">{title}</p><p className="mt-1 text-sm leading-6 text-[#b5ccc4]">{description}</p></div></li>)}
+          {[['01', 'Set up your workspace', 'Choose a name, workspace ID, starting documents and reporting currency.'], ['02', 'Bring your people in', 'Your admin approves access and assigns each person a role.'], ['03', 'Work through invoices together', 'Upload, categorize, discuss, and review with a clear record.']].map(([number, title, description]) => <li key={number} className="flex gap-4"><span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg border border-[#d3e8b8]/20 bg-[#d3e8b8]/10 text-xs font-bold text-[#d3e8b8]">{number}</span><div><p className="font-semibold">{title}</p><p className="mt-1 text-sm leading-6 text-[#b5ccc4]">{description}</p></div></li>)}
         </ol>
       </div>
       <p className="relative hidden text-xs text-[#b5ccc4] lg:block">Membership approval keeps workspace access in your hands.</p>
@@ -163,6 +164,16 @@ function RegistrationForm({ initialMode, initialRole }: { initialMode: Mode; ini
               {mode === "join" && <datalist id="join-organizations">{organizations.data?.map(org => <option key={org.id} value={org.slug}>{org.name}</option>)}</datalist>}
               <p id="slug-help" className="mt-2 text-xs leading-5 text-slate-500">{mode === "create" ? "A unique ID your team will use at sign in. Your organization name and ID appear in organization search." : organizations.isError ? "Search is unavailable. Enter the workspace ID your admin shared." : "Search by organization name or enter the workspace ID shared by your admin."}</p>
             </div>
+            {mode === "create" && <fieldset>
+              <legend className="mb-2 block text-sm font-semibold text-slate-700">Documents your workspace starts with</legend>
+              <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="Workflow template">
+                {templateOptions.map(option => <label key={option.value} className={`flex cursor-pointer gap-3 rounded-xl border p-3 text-sm transition-colors ${template === option.value ? "border-[#006b60] bg-[#edf3e8] ring-1 ring-[#006b60]" : "border-[#dce5dc] hover:bg-[#f4f8f1]"}`}>
+                  <input type="radio" name="template" value={option.value} checked={template === option.value} onChange={() => setTemplate(option.value)} disabled={registration.isPending} className="mt-1 accent-[#006b60]" />
+                  <span><span className="block font-bold text-[#122f33]">{option.label}</span><span className="mt-0.5 block text-xs leading-5 text-slate-600">{option.description}</span></span>
+                </label>)}
+              </div>
+              <p className="mt-2 text-xs leading-5 text-slate-500">This becomes version 1 of your workflow configuration. Administrators can edit it, and add more document types, later.</p>
+            </fieldset>}
             {mode === "create" ? <div><label htmlFor="currency" className="mb-2 block text-sm font-semibold text-slate-700">Default invoice currency</label><select id="currency" className="field !border-[#ccd9cf] focus:!border-[#006b60] focus:!shadow-[0_0_0_4px_#006b601a]" value={currency} onChange={event => setCurrency(event.target.value)}>{[["USD", "US dollar"], ["INR", "Indian rupee"], ["EUR", "Euro"], ["GBP", "British pound"], ["CAD", "Canadian dollar"], ["AUD", "Australian dollar"], ["SGD", "Singapore dollar"], ["AED", "UAE dirham"]].map(([code, label]) => <option key={code} value={code}>{code} · {label}</option>)}</select><p className="mt-2 text-xs leading-5 text-slate-500">Reviewers can set the correct currency on each invoice. Totals stay separate by currency.</p></div> : <div><label htmlFor="requested-role" className="mb-2 block text-sm font-semibold text-slate-700">Requested role</label><select id="requested-role" className="field !border-[#ccd9cf] focus:!border-[#006b60] focus:!shadow-[0_0_0_4px_#006b601a]" value={role} onChange={event => setRole(event.target.value as RequestedRole)}><option value="member">Member · upload and collaborate</option><option value="reviewer">Reviewer · review and approve invoices</option></select><p className="mt-2 text-xs leading-5 text-slate-500">Your admin confirms your role when approving your account.</p></div>}
             <div><label htmlFor="email" className="mb-2 block text-sm font-semibold text-slate-700">Email</label><input id="email" type="email" className="field !border-[#ccd9cf] focus:!border-[#006b60] focus:!shadow-[0_0_0_4px_#006b601a]" required maxLength={254} autoComplete="username" placeholder="you@company.com" value={email} onChange={event => setEmail(event.target.value)} /></div>
             <div><label htmlFor="password" className="mb-2 block text-sm font-semibold text-slate-700">Password</label><div className="relative"><input id="password" type={showPassword ? "text" : "password"} className="field !border-[#ccd9cf] focus:!border-[#006b60] focus:!shadow-[0_0_0_4px_#006b601a] pr-20" required minLength={12} maxLength={128} autoComplete="new-password" aria-describedby="password-help" value={password} onChange={event => setPassword(event.target.value)} /><button type="button" onClick={() => setShowPassword(value => !value)} className="absolute inset-y-0 right-2 px-2 text-xs font-bold text-[#006b60]" aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></div><p id="password-help" className="mt-2 text-xs leading-5 text-slate-500">12–128 characters with at least one letter and one number. If you already use OpsPilot in another organization, use your existing password.</p></div>

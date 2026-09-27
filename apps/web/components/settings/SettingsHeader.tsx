@@ -1,12 +1,14 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 
-export type SettingsSection = "policies" | "connectors" | "workflow" | "members" | "categories";
+export type SettingsSection = "policies" | "connectors" | "workflow" | "api-keys" | "email-inbox" | "members" | "categories";
 
 export const settingsTabs: { id: SettingsSection; label: string; href: string }[] = [
   { id: "policies", label: "Policies", href: "/settings/policies" },
   { id: "connectors", label: "Connectors", href: "/settings/connectors" },
   { id: "workflow", label: "Workflow", href: "/settings/workflow" },
+  { id: "api-keys", label: "API keys", href: "/settings/api-keys" },
+  { id: "email-inbox", label: "Email inbox", href: "/settings/email-inbox" },
   { id: "members", label: "Members", href: "/admin?tab=members" },
   { id: "categories", label: "Categories", href: "/admin?tab=categories" },
 ];

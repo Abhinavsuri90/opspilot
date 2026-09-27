@@ -74,8 +74,8 @@ All pages belong to one Next.js application. The public homepage explains the pr
 | `/` | Public product overview, role choices, workflow, features and FAQ |
 | `/register` | Public organization creation or membership request |
 | `/login` | Public organization selection and password authentication |
-| `/dashboard` | Approved members: authorized counts and recent invoices |
-| `/inbox` | Approved members: intake, search, evidence, full PDF, discussion and permitted review/access actions |
+| `/dashboard` | Approved members: KPIs over a chosen range and document type, activity chart, approvals and dead letters, recent documents |
+| `/inbox` | Approved members: multi-file intake, source and type filters, evidence, full PDF, message context, near-duplicate warnings, discussion and permitted review/access actions |
 | `/review` | Approved members: filterable queue of authorized pending invoices with SLA and flagged-field counts |
 | `/review/[id]` | Eligible reviewers and admins: keyboard-first split view with evidence highlighting, per-field confidence and reasons, accept/edit corrections, rules, decision, discussion, access and timeline |
 | `/insights` | Approved members: authorized totals, categories and bounded questions |
@@ -83,6 +83,8 @@ All pages belong to one Next.js application. The public homepage explains the pr
 | `/settings/policies` | Organization admins: kill switch, shadow mode and per-action-type policy |
 | `/settings/connectors` | Organization admins: connector setup, connection tests and CSV export downloads |
 | `/settings/workflow` | Organization admins: YAML workflow configuration with inline validation, import and export |
+| `/settings/api-keys` | Organization admins: keys for programmatic submission, shown once, revocable |
+| `/settings/email-inbox` | Organization admins: polled mailbox configuration, connection test and polling status |
 | `/admin` | Organization admins: membership lifecycle and category management |
 
 ```mermaid
@@ -493,6 +495,7 @@ There is no tested production restore, observed availability history, centralize
 - Governance: policy matrix, kill switch engaged between approval and execution (thread-gated), shadow mode never calling a connector, forbidden at execution time, idempotent proposals and executions, backoff to dead letter and manual retry, webhook HMAC verified by a test receiver, SSRF matrix, credential encryption and secrecy, YAML configuration round trip and stale-version conflicts, tenant isolation of actions, connectors, policies and exports.
 - Browser: connector creation and test, YAML import with line-referenced errors, policy change, proposal with preview, approval, a signed webhook received by a local receiver, kill switch blocking then releasing execution, shadow mode and forbidden outcomes (`npm run test:e2e:actions` from `apps/web`).
 - Intake channels: logistics template detection and rules, near-duplicate linking that forces review, API key lifecycle, throttle and route restriction, IMAP and Mailpit backends, worker poll idempotency, KPI math on fixtures, deterministic synthetic dataset and eval baseline per document type.
+- Browser: logistics registration, a purchase order and a delivery note uploaded together, an API-key upload from a cookie-less client, an emailed PDF arriving through Mailpit with its message context, a forced near-duplicate review, and the KPI dashboard with range, type and series controls (`npm run test:e2e:intake` from `apps/web`).
 - Decimal totals across currencies, verified/unverified exclusions, aggregate scope beyond 50 invoices.
 - Fresh browser registration through approval, upload, full PDF review, discussion, decision and insights.
 - Review queue filters, split view, evidence highlight rectangles, keyboard accept/edit/approve, inline validation reasons, shortcuts dialog and timeline (`npm run test:e2e:review` from `apps/web`).

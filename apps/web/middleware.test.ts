@@ -3,7 +3,7 @@ import { decideRedirect } from "./middleware";
 
 describe("edge session guard", () => {
   it("sends cookie-less visitors of protected pages to sign in", () => {
-    for (const path of ["/dashboard", "/inbox", "/inbox/", "/review", "/actions", "/insights", "/admin", "/admin/members", "/settings/policies", "/settings/workflow"]) {
+    for (const path of ["/dashboard", "/inbox", "/inbox/", "/review", "/actions", "/insights", "/admin", "/admin/members", "/settings/policies", "/settings/workflow", "/settings/api-keys", "/settings/email-inbox"]) {
       expect(decideRedirect(path, false)).toBe("/login");
     }
   });

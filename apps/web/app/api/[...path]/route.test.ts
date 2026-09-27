@@ -59,6 +59,23 @@ describe("same-origin API proxy", () => {
     expect(response.headers.get("set-cookie")).toContain("opspilot_session=token");
   });
 
+  it("forwards an API key in the Authorization header and drops headers it does not know", async () => {
+    process.env.API_INTERNAL_URL = "http://api:8000";
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}", { status: 202 }));
+    const request = new NextRequest("http://localhost:3300/api/v1/documents", {
+      method: "POST",
+      headers: { authorization: "Bearer opk_ab12cd34_secret", "x-custom": "dropped" },
+      body: "%PDF-1.4 sample",
+    });
+
+    const response = await POST(request, { params: Promise.resolve({ path: ["v1", "documents"] }) });
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(new Headers(init?.headers).get("authorization")).toBe("Bearer opk_ab12cd34_secret");
+    expect(new Headers(init?.headers).get("x-custom")).toBeNull();
+    expect(response.status).toBe(202);
+  });
+
   it("returns a useful error when the internal API is unreachable", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("connect failed"));
     const request = new NextRequest("http://localhost:3300/api/v1/documents");

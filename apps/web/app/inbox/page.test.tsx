@@ -40,7 +40,7 @@ describe("inbox empty states", () => {
     renderInbox();
 
     expect(await screen.findByText("No documents yet.")).toBeInTheDocument();
-    expect(screen.getByText(/Upload your first invoice/)).toBeInTheDocument();
+    expect(screen.getByText(/Upload your first document/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Clear filters" })).not.toBeInTheDocument();
   });
 
@@ -50,7 +50,7 @@ describe("inbox empty states", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Needs review" }));
 
-    expect(await screen.findByText("No invoices match these filters.")).toBeInTheDocument();
+    expect(await screen.findByText("No documents match these filters.")).toBeInTheDocument();
     await waitFor(() => expect(GET).toHaveBeenCalledWith("/v1/documents", expect.objectContaining({
       params: { query: expect.objectContaining({ status: "needs_review" }) },
     })));

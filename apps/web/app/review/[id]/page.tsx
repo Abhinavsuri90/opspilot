@@ -5,6 +5,8 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import { AppShell } from "@/components/AppShell";
+import { DocumentSourceBadge } from "@/components/DocumentSourceBadge";
+import { NearDuplicateBanner } from "@/components/NearDuplicateBanner";
 import { InvoiceQuestions } from "@/components/InvoiceQuestions";
 import { PdfViewer, type PdfHighlight } from "@/components/PdfViewer";
 import { SessionFallback } from "@/components/SessionFallback";
@@ -22,6 +24,7 @@ import { saveMessage, sendSave, type SaveInput } from "@/components/workspace/sa
 import { sharingSnapshot, type Decision, type SharingDraft } from "@/components/workspace/types";
 import { api } from "@/lib/api";
 import { isDocumentInProgress } from "@/lib/document-status";
+import { documentTypeLabel } from "@/lib/document-types";
 import { isUnauthorizedError, unauthorizedError } from "@/lib/errors";
 import { summarizeFieldStatuses, type FieldDetail } from "@/lib/fields";
 import { keyContext, reviewShortcut } from "@/lib/review-keys";
@@ -231,10 +234,11 @@ export default function ReviewDocumentPage() {
       {detail.data && <>
         <header className="card flex flex-wrap items-start justify-between gap-4 p-5">
           <div className="min-w-0 flex-1">
-            <p className="eyebrow">Review · {detail.data.document_type.replaceAll("_", " ")}</p>
+            <p className="eyebrow">Review · {documentTypeLabel(detail.data.document_type)}</p>
             <h1 className="mt-1 break-all text-2xl font-bold tracking-tight text-slate-900">{detail.data.filename}</h1>
             <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-600">
               <StatusBadge status={detail.data.status} />
+              <DocumentSourceBadge source={detail.data.source} sourceRef={detail.data.source_ref} />
               {detail.data.review_task && <SlaChip dueAt={detail.data.review_task.due_at} completedAt={detail.data.review_task.completed_at} outcome={detail.data.review_task.outcome} now={now} />}
               <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 font-semibold">Assignee: <span className="break-all">{assignee}</span></span>
               <span className="rounded-full border border-slate-200 bg-white px-2.5 py-1 font-semibold" data-testid="field-summary">{summary.flagged} flagged · {summary.auto} auto · {summary.corrected} corrected{summary.accepted > 0 ? ` · ${summary.accepted} accepted` : ""}</span>
@@ -248,6 +252,7 @@ export default function ReviewDocumentPage() {
         {!canReview && workspace.isSuccess && <p className="rounded-xl bg-blue-50 p-4 text-sm text-blue-900">You can inspect invoices you have access to. Review decisions require an admin or reviewer account.</p>}
         {isDocumentInProgress(detail.data.status) && <p role="status" className="rounded-xl border border-blue-100 bg-blue-50 p-4 text-sm text-blue-900">Extraction is running. This page updates automatically.</p>}
         {detail.data.failure_reason && <p role="alert" className="rounded-xl border border-rose-100 bg-rose-50 p-4 text-sm text-rose-800">{detail.data.failure_reason}</p>}
+        <NearDuplicateBanner duplicates={detail.data.near_duplicates} linkTo="review" />
         {notice && <p role="status" className="rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800">{notice}</p>}
         {workspace.isError && <p role="alert" className="rounded-xl bg-rose-50 p-3 text-sm text-rose-800">{workspace.error.message} <button type="button" className="underline" onClick={() => workspace.refetch()}>Refresh</button></p>}
 

@@ -355,8 +355,8 @@ try {
   // Invoice 1 through the inbox and the review split view.
   await sidebar(admin, "Inbox").click();
   const first = invoiceBytes();
-  await admin.getByLabel("Invoice PDF").setInputFiles({ name: first.filename, mimeType: "application/pdf", buffer: first.pdf });
-  const uploaded = await submitted(admin, "/v1/documents", () => admin.getByRole("button", { name: "Upload invoice" }).click(), 202);
+  await admin.getByLabel("Document PDFs").setInputFiles({ name: first.filename, mimeType: "application/pdf", buffer: first.pdf });
+  const uploaded = await submitted(admin, "/v1/documents", () => admin.getByRole("button", { name: /^Upload \d+ document/ }).click(), 202);
   const firstId = uploaded.id;
   await admin.getByRole("region", { name: "Extraction result" }).getByText(first.invoiceNumber, { exact: true }).waitFor({ timeout: 90000 });
   const firstDetail = await acceptFlaggedFields(admin, firstId);

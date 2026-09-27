@@ -8,7 +8,7 @@ import { api } from "@/lib/api";
 import type { components } from "@/lib/schema";
 import { usePolicies } from "@/lib/use-policies";
 
-export type Section = "dashboard" | "inbox" | "review" | "actions" | "insights" | "admin" | "policies" | "connectors" | "workflow";
+export type Section = "dashboard" | "inbox" | "review" | "actions" | "insights" | "admin" | "policies" | "connectors" | "workflow" | "api-keys" | "email-inbox";
 
 type Session = components["schemas"]["SessionResponse"];
 
@@ -30,6 +30,8 @@ const sectionLabels: Record<Section, string> = {
   policies: "Policies",
   connectors: "Connectors",
   workflow: "Workflow",
+  "api-keys": "API keys",
+  "email-inbox": "Email inbox",
 };
 
 function NavIcon({ name }: { name: Section | "sub" }) {
@@ -45,6 +47,8 @@ function NavIcon({ name }: { name: Section | "sub" }) {
     {name === "policies" && <><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.4 7.5 9.5 4.3-1.1 7.5-4.9 7.5-9.5V6L12 3Z" /><path d="M9.5 12l1.8 1.8L15 10" /></>}
     {name === "connectors" && <><path d="M9 7V3M15 7V3M7 7h10v4a5 5 0 0 1-10 0V7Z" /><path d="M12 16v5" /></>}
     {name === "workflow" && <><rect x="3.5" y="4" width="7" height="5" rx="1.2" /><rect x="13.5" y="15" width="7" height="5" rx="1.2" /><path d="M10.5 6.5H15a2 2 0 0 1 2 2V15" /></>}
+    {name === "api-keys" && <><circle cx="8" cy="12" r="4" /><path d="M12 12h9M18 12v3M15 12v2" /></>}
+    {name === "email-inbox" && <><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 7 9 6 9-6" /></>}
   </svg>;
 }
 
@@ -87,6 +91,8 @@ export function AppShell({ session, active, children }: AppShellProps) {
     { key: "policies", section: "policies", label: "Policies", href: "/settings/policies", icon: "policies" },
     { key: "connectors", section: "connectors", label: "Connectors", href: "/settings/connectors", icon: "connectors" },
     { key: "workflow", section: "workflow", label: "Workflow", href: "/settings/workflow", icon: "workflow" },
+    { key: "api-keys", section: "api-keys", label: "API keys", href: "/settings/api-keys", icon: "api-keys" },
+    { key: "email-inbox", section: "email-inbox", label: "Email inbox", href: "/settings/email-inbox", icon: "email-inbox" },
   ];
 
   async function signOut() {
