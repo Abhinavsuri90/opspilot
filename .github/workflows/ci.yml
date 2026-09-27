@@ -179,13 +179,13 @@ jobs:
       - name: Seed fictional invoice activity through the API
         run: docker compose run --rm admin python /workspace/scripts/seed_demo_activity.py http://api:8000
       - run: make eval
+      - run: make smoke-ui
+        env:
+          PLAYWRIGHT_CHROME_PATH: /usr/bin/google-chrome
       - run: node --env-file=../../.env scripts/e2e-learning.mjs
         working-directory: apps/web
         env:
           WEB_BASE_URL: http://localhost:3300
-          PLAYWRIGHT_CHROME_PATH: /usr/bin/google-chrome
-      - run: make smoke-ui
-        env:
           PLAYWRIGHT_CHROME_PATH: /usr/bin/google-chrome
       - run: npm run test:e2e:public
         working-directory: apps/web
