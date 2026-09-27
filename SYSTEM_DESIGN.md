@@ -420,6 +420,8 @@ Example planning input: 100 organizations × 100 invoices/day = 10,000/day, or 0
 
 A 400 KB average PDF at 10,000/day adds about 4 GB/day before replication and backups. One worker calling a slow model cannot sustain that hypothetical peak. Measure arrival rate, job age, extraction duration, token use and provider quotas before sizing a real deployment.
 
+Idle polling cost: each worker loop issues one claim query per outbox topic per organization, currently three topics (extraction, action proposal, action execution) every two seconds, so an idle worker costs about 1.5 queries per second per organization **[estimate]**. That is negligible below a few hundred organizations; measure it before onboarding more, and move to a single cross-tenant claim query with tenant fairness or a LISTEN/NOTIFY wake-up when the measured load justifies it.
+
 ### Scale changes triggered by evidence
 
 | Observed constraint | Next change | Tradeoff |
