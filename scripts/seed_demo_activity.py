@@ -7,6 +7,7 @@ organization. Existing records and manual edits are retained on later runs.
 
 import argparse
 import os
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,14 @@ import httpx
 from app.llm.provider import pdf_pages
 
 EXAMPLES = Path("/workspace/examples/demo")
+_STAGE = "startup"
+_HTTP_STATUS: int | None = None
+
+
+def mark_stage(slug: str, step: str) -> None:
+    """Use fixed stage names so CI can report a failure without publishing job logs."""
+    global _STAGE
+    _STAGE = f"{slug}/{step}"
 
 
 @dataclass(frozen=True)
@@ -83,6 +92,8 @@ CATEGORY_DESCRIPTIONS = {
 
 def checked(response: httpx.Response) -> Any:
     if response.is_error:
+        global _HTTP_STATUS
+        _HTTP_STATUS = response.status_code
         location = f"{response.request.method} {response.request.url.path}"
         raise RuntimeError(
             f"{location} returned HTTP {response.status_code}: {response.text[:250]}"
@@ -90,7 +101,8 @@ def checked(response: httpx.Response) -> Any:
     return response.json()
 
 
-def login(base_url: str, slug: str, email: str, password: str) -> httpx.Client:
+def login(base_url: str, slug: str, email: str, password: str, role: str) -> httpx.Client:
+    mark_stage(slug, f"login_{role}")
     client = httpx.Client(base_url=base_url, timeout=25)
     try:
         checked(
@@ -178,16 +190,19 @@ def seed_org(
 ) -> None:
     admin_email, reviewer_email, member_email, examples = team
     with (
-        login(base_url, slug, admin_email, password) as admin,
-        login(base_url, slug, reviewer_email, password) as reviewer,
-        login(base_url, slug, member_email, password) as member,
+        login(base_url, slug, admin_email, password, "admin") as admin,
+        login(base_url, slug, reviewer_email, password, "reviewer") as reviewer,
+        login(base_url, slug, member_email, password, "member") as member,
     ):
+        mark_stage(slug, "categories")
         categories = ensure_categories(admin, examples)
+        mark_stage(slug, "collaborators")
         collaborators = checked(admin.get("/v1/organization/collaborators"))
         reviewer_id = next(
             row["user_id"] for row in collaborators if row["email"] == reviewer_email
         )
-        for example in examples:
+        for index, example in enumerate(examples, start=1):
+            mark_stage(slug, f"upload_{index}")
             pdf = EXAMPLES.joinpath(example.filename).read_bytes()
             uploaded = checked(
                 admin.post(
@@ -195,7 +210,9 @@ def seed_org(
                 )
             )
             document_id = uploaded["id"]
+            mark_stage(slug, f"extract_{index}")
             document = wait_for_review(admin, document_id)
+            mark_stage(slug, f"metadata_{index}")
             if document["status"] == "needs_review":
                 workspace = checked(admin.get(f"/v1/documents/{document_id}/workspace"))
                 update: dict[str, Any] = {"version": workspace["version"]}
@@ -212,6 +229,7 @@ def seed_org(
                     )
             else:
                 workspace = checked(admin.get(f"/v1/documents/{document_id}/workspace"))
+            mark_stage(slug, f"comment_{index}")
             if not any(comment["body"] == example.comment for comment in workspace["comments"]):
                 workspace = checked(
                     member.post(
@@ -219,7 +237,9 @@ def seed_org(
                     )
                 )
             if example.approve and document["status"] == "needs_review":
+                mark_stage(slug, f"fields_{index}")
                 detail = resolve_flagged_fields(reviewer, document_id, pdf, example)
+                mark_stage(slug, f"approve_{index}")
                 checked(
                     reviewer.post(
                         f"/v1/documents/{document_id}/review",
@@ -241,8 +261,15 @@ def main() -> None:
     if os.environ.get("ENVIRONMENT", "development") != "development":
         raise RuntimeError("Fictional demo activity may only be seeded in development")
     password = os.environ["DEMO_PASSWORD"]
-    for slug, team in DEMO.items():
-        seed_org(args.base_url, slug, password, team)
+    try:
+        for slug, team in DEMO.items():
+            seed_org(args.base_url, slug, password, team)
+    except Exception as exc:
+        # Only finite stage names, the exception type and a numeric HTTP code go into
+        # the public CI annotation. The normal traceback stays in the protected job log.
+        status = _HTTP_STATUS if _HTTP_STATUS is not None else "none"
+        print(f"::error::Demo seed {_STAGE}: {type(exc).__name__}, HTTP {status}", file=sys.stderr)
+        raise
     print("Demo activity ready. Sign in as northwind@example.com or contoso.admin@example.com.")
 
 
