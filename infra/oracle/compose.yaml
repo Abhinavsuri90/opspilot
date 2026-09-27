@@ -42,7 +42,7 @@ x-app-environment: &app-environment
 services:
   postgres:
     <<: *service
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_DB: opspilot
       POSTGRES_USER: opspilot_owner
