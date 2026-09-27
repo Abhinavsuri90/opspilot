@@ -172,17 +172,12 @@ jobs:
             done
           done
           docker save -o /tmp/base-images-compose.tar $images
-      - name: Seed fictional demo and verify its API workflow
-        run: |
-          set +e
-          make demo > /tmp/opspilot-demo.log 2>&1
-          result=$?
-          tail -n 60 /tmp/opspilot-demo.log
-          if [ "$result" -ne 0 ]; then
-            detail="$(rg '^(RuntimeError|ModuleNotFoundError|KeyError|ValueError):' /tmp/opspilot-demo.log | tail -n 1)"
-            if [ -n "$detail" ]; then echo "::error::$detail"; fi
-            exit "$result"
-          fi
+      - name: Start local stack with rules extraction
+        run: LLM_PROVIDER=rules OPENROUTER_API_KEY= make up
+      - name: Seed fictional organization accounts
+        run: make seed
+      - name: Seed fictional invoice activity through the API
+        run: docker compose run --rm admin python /workspace/scripts/seed_demo_activity.py http://api:8000
       - run: make eval
       - run: node --env-file=../../.env scripts/e2e-learning.mjs
         working-directory: apps/web
